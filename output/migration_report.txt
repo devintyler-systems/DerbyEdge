@@ -1,0 +1,34 @@
+DerbyEdge V0 -> V1 Migration Report
+============================================
+Horses migrated    : 20
+Prediction rows    : 0
+
+V1 Table Row Counts
+--------------------------------------------
+  tracks                     1
+  race_cards                 1
+  horses                    20
+  people                    53
+  entries                   20
+  horse_starts               0
+  workouts                  77
+  odds_snapshots             0
+  track_bias                 0
+  trip_flags                 0
+  model_registry             0
+  score_runs                 0
+  entry_scores               0
+
+Breaking Changes
+--------------------------------------------
+  derby_field       -> entries (join horses, race_cards, people)
+  horse_features    -> rebuilt in Stage 3
+  derby_predictions -> score_runs + entry_scores
+  races             -> race_cards
+  race_entries      -> horse_starts
+  win_probability   -> fraction 0-1 (was pct 0-100)
+
+Scripts broken until Stage 2
+  scripts/ingest.py         (writes to derby_field)
+  scripts/build_features.py (reads from derby_field)
+  scripts/score.py          (reads horse_features, derby_field)
