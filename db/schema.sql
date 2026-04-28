@@ -346,3 +346,187 @@ CREATE INDEX IF NOT EXISTS idx_es_run_rank     ON entry_scores(run_id, rank);
 
 -- score_runs
 CREATE INDEX IF NOT EXISTS idx_sr_card         ON score_runs(card_id);
+
+-- ============================================================
+-- VIEWS
+-- All views are pre-race safe (no post-result fields are used
+-- to filter or derive values in v_entries_live or v_race_type).
+-- Views over horse_starts / workouts return 0 rows for seed-only
+-- installs — this is expected and documented in the validation report.
+-- ============================================================
+
+-- v_race_type: race categorization by surface + distance class
+CREATE VIEW IF NOT EXISTS v_race_type AS
+SELECT
+    rc.card_id,
+    rc.track_id,
+    t.name        AS track_name,
+    t.abbrev      AS track_abbrev,
+    rc.card_date,
+    rc.race_number,
+    rc.stakes_name,
+    rc.purse,
+    rc.distance_furlongs,
+    rc.surface,
+    rc.race_class,
+    rc.age_restriction,
+    rc.field_size,
+    CASE WHEN rc.distance_furlongs < 8.5 THEN 'sprint' ELSE 'route' END
+        AS dist_category,
+    rc.surface || '_' ||
+        CASE WHEN rc.distance_furlongs < 8.5 THEN 'sprint' ELSE 'route' END
+        AS race_type_key
+FROM race_cards rc
+JOIN tracks t ON rc.track_id = t.track_id;
+
+
+-- v_entries_live: non-scratched entries with full connection info.
+-- Seed-compat aggregate columns (career_starts, etc.) come from
+-- entries; they are NULL when this entry has no seed row.
+CREATE VIEW IF NOT EXISTS v_entries_live AS
+SELECT
+    e.entry_id,
+    e.card_id,
+    rc.card_date,
+    rc.stakes_name,
+    rc.distance_furlongs,
+    rc.surface,
+    CASE WHEN rc.distance_furlongs < 8.5 THEN 'sprint' ELSE 'route' END
+        AS dist_category,
+    h.horse_id,
+    h.name          AS horse_name,
+    h.sire,
+    h.dam,
+    e.post_position,
+    e.weight,
+    e.morning_line_odds,
+    e.morning_line_prob,
+    ptr.person_id   AS trainer_id,
+    ptr.full_name   AS trainer,
+    pjk.person_id   AS jockey_id,
+    pjk.full_name   AS jockey,
+    pow.person_id   AS owner_id,
+    pow.full_name   AS owner,
+    -- seed-compat aggregate columns (NULL when real horse_starts used)
+    e.career_starts,
+    e.career_wins,
+    e.career_places,
+    e.career_shows,
+    e.career_earnings,
+    e.last_race_days,
+    e.last_race_finish,
+    e.best_speed_fig,
+    e.last_speed_fig,
+    e.avg_speed_fig,
+    e.beyer_fig,
+    e.dirt_starts,
+    e.dirt_wins,
+    e.dist_starts,
+    e.dist_wins,
+    e.wet_starts,
+    e.wet_wins,
+    e.workouts_30,
+    e.gate_class,
+    e.stamina_index,
+    e.pace_style
+FROM  entries    e
+JOIN  race_cards rc  ON e.card_id    = rc.card_id
+JOIN  horses     h   ON e.horse_id   = h.horse_id
+LEFT JOIN people ptr ON e.trainer_id = ptr.person_id
+LEFT JOIN people pjk ON e.jockey_id  = pjk.person_id
+LEFT JOIN people pow ON e.owner_id   = pow.person_id
+WHERE e.scratch_flag = 0;
+
+
+-- v_horse_last_5: last 5 official starts per horse from horse_starts.
+-- NOTE: returns 0 rows for seed-only installs (horse_starts is empty).
+CREATE VIEW IF NOT EXISTS v_horse_last_5 AS
+SELECT
+    inner_q.horse_id,
+    inner_q.horse_name,
+    inner_q.card_date,
+    inner_q.race_number,
+    inner_q.stakes_name,
+    inner_q.distance_furlongs,
+    inner_q.surface,
+    inner_q.finish_position,
+    inner_q.speed_figure,
+    inner_q.beyer_figure,
+    inner_q.lengths_behind,
+    inner_q.earned_purse,
+    inner_q.recency_rank
+FROM (
+    SELECT
+        hs.horse_id,
+        h.name                 AS horse_name,
+        rc.card_date,
+        rc.race_number,
+        rc.stakes_name,
+        rc.distance_furlongs,
+        rc.surface,
+        hs.finish_position,
+        hs.speed_figure,
+        hs.beyer_figure,
+        hs.lengths_behind,
+        hs.earned_purse,
+        ROW_NUMBER() OVER (
+            PARTITION BY hs.horse_id
+            ORDER BY rc.card_date DESC, rc.race_number DESC
+        ) AS recency_rank
+    FROM horse_starts hs
+    JOIN race_cards rc ON hs.card_id  = rc.card_id
+    JOIN horses     h  ON hs.horse_id = h.horse_id
+) inner_q
+WHERE inner_q.recency_rank <= 5;
+
+
+-- v_workout_30: real (non-synthetic) workouts in a rolling 30-day window.
+-- synthetic=0 filter excludes records seeded by migrate_schema.py.
+-- NOTE: returns 0 rows for seed-only installs (no real workout records).
+CREATE VIEW IF NOT EXISTS v_workout_30 AS
+SELECT
+    w.workout_id,
+    w.horse_id,
+    h.name     AS horse_name,
+    w.workout_date,
+    w.distance_furlongs,
+    w.time_seconds,
+    ROUND(w.time_seconds / w.distance_furlongs, 2) AS secs_per_furlong,
+    w.work_grade,
+    w.surface,
+    w.hand_timed,
+    t.abbrev   AS track_abbrev
+FROM  workouts w
+JOIN  horses   h  ON w.horse_id  = h.horse_id
+LEFT JOIN tracks t ON w.track_id = t.track_id
+WHERE w.synthetic = 0
+  AND julianday('now') - julianday(w.workout_date) <= 30;
+
+
+-- v_connections_180: trainer-jockey pair stats over rolling 180 days.
+-- Derived purely from horse_starts and entries.
+-- NOTE: returns 0 rows for seed-only installs (horse_starts is empty).
+CREATE VIEW IF NOT EXISTS v_connections_180 AS
+SELECT
+    e.trainer_id,
+    ptr.full_name   AS trainer,
+    e.jockey_id,
+    pjk.full_name   AS jockey,
+    COUNT(*)        AS starts_180,
+    SUM(CASE WHEN hs.finish_position = 1 THEN 1 ELSE 0 END)  AS wins_180,
+    SUM(CASE WHEN hs.finish_position <= 3 THEN 1 ELSE 0 END) AS itm_180,
+    ROUND(
+        CAST(SUM(CASE WHEN hs.finish_position = 1 THEN 1 ELSE 0 END) AS REAL)
+        / NULLIF(COUNT(*), 0), 3
+    ) AS win_pct_180,
+    ROUND(
+        CAST(SUM(CASE WHEN hs.finish_position <= 3 THEN 1 ELSE 0 END) AS REAL)
+        / NULLIF(COUNT(*), 0), 3
+    ) AS itm_pct_180
+FROM  horse_starts hs
+JOIN  entries     e   ON hs.entry_id  = e.entry_id
+JOIN  race_cards  rc  ON hs.card_id   = rc.card_id
+JOIN  people      ptr ON e.trainer_id = ptr.person_id
+JOIN  people      pjk ON e.jockey_id  = pjk.person_id
+WHERE julianday('now') - julianday(rc.card_date) <= 180
+GROUP BY e.trainer_id, e.jockey_id;

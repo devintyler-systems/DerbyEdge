@@ -23,3 +23,14 @@ def init_db() -> None:
     conn.commit()
     conn.close()
     print(f"[init_db] V1 schema applied at {DB_PATH}")
+
+
+def get_derby_card_id(stakes_name: str = "Kentucky Derby") -> int | None:
+    """Return the card_id for the first matching stakes race, or None."""
+    conn = get_connection()
+    row  = conn.execute(
+        "SELECT card_id FROM race_cards WHERE stakes_name=? LIMIT 1",
+        (stakes_name,),
+    ).fetchone()
+    conn.close()
+    return row["card_id"] if row else None
