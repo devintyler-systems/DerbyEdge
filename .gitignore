@@ -1,8 +1,60 @@
-.venv/
+# Python
 __pycache__/
-*.pyc
+*.py[cod]
 *.pyo
 *.pyd
+
+# Virtual environments
+.venv/
+venv/
+env/
+ENV/
+
+# Local databases
 db/derbyedge.db
+*.db
+*.sqlite
+*.sqlite3
+
+# Model artifacts
 saved_models/*.pkl
+saved_models/*.joblib
+saved_models/*.bin
+
+# Generated outputs
+output/*.csv
+output/*.md
+output/*.html
+output/*.png
+output/*.json
+
+# Keep selected release artifacts if you want them versioned
+!output/v1_acceptance_checklist.md
+!output/derby_2026_board.md
+!output/model_evaluation_dirt_route.md
+
+# Test / coverage / cache
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+.coverage.*
+htmlcov/
+.cache/
+
+# Jupyter
+.ipynb_checkpoints/
+
+# Environment / secrets
+.env
+.env.*
+.streamlit/secrets.toml
+
+# Logs
+*.log
+
+# OS / editor
 .DS_Store
+Thumbs.db
+.vscode/
+.idea/
