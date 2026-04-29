@@ -2,12 +2,19 @@
 DerbyEdge V1  —  Scorer
 src/models/scorer.py
 
-Loads (or builds) a model artifact for a race card, produces calibrated
-win probabilities, fair odds, model edge, bet tags, and writes outputs to:
-  - DB: score_runs + entry_scores
-  - output/derby_2026_board.csv
-  - output/derby_2026_board.md
-  - output/model_evaluation_{race_type}.md
+Bet-tag thresholds:
+  bet     : model_edge >= +0.025
+  underlay: model_edge <  -0.015
+  neutral : -0.015 <= model_edge < +0.025
+
+Confidence tiers (seed-only install):
+  medium : dist_starts >= 2 AND all model features non-null
+  low    : dist_starts <= 1 (distance_fit based on stamina_index only)
+  high   : not possible until horse_starts table is populated
+
+Missing-data flags are per-horse text labels combining:
+  - Global (every horse in seed-only install): the 5 most impactful PLACEHOLDERs
+  - Per-horse: dist_fit_single_start when dist_starts <= 1
 """
 
 import datetime
@@ -22,6 +29,7 @@ from src.models.trainer import (
     ModelArtifact,
     TRAIN_CONFIGS,
     compute_feature_importances,
+    compute_group_scores,
     register_model,
     save_artifact,
     train_or_build,
@@ -30,6 +38,27 @@ from src.utils.db import get_connection, get_derby_card_id
 
 ROOT       = Path(__file__).resolve().parents[2]
 OUTPUT_DIR = ROOT / "output"
+
+# Critical PLACEHOLDER features (most impactful if they were available)
+CRITICAL_MISSING = [
+    "no_race_splits",       # pace_early_mean_3 / pace_mid_mean_3
+    "no_workout_detail",    # bullet_30d / days_since_last_work
+    "no_connections_stats", # trainer_jockey_itm_cond / jockey_route_cond
+    "no_track_form",        # churchill_readiness
+    "no_post_bias",         # post_win_bias
+]
+
+# Feature-catalog tier lookup (for diagnostic footer)
+_FEATURE_TIER = {
+    "speed_best_3": "DEGRADED", "speed_last": "IMPLEMENTED",
+    "pace_fit_score": "IMPLEMENTED", "distance_fit": "DEGRADED",
+    "surface_fit": "DEGRADED", "derby_override_score": "DEGRADED",
+    "work_readiness_score": "DEGRADED", "form_cycle_idx": "DEGRADED",
+    "beyer_last": "IMPLEMENTED", "class_delta": "DEGRADED",
+    "traffic_resilience_proxy": "DEGRADED", "market_implied_prob": "IMPLEMENTED",
+    "trainer_intent_proxy": "DEGRADED", "horses_beaten_pct_last": "DEGRADED",
+    "career_win_pct": "IMPLEMENTED", "finish_energy_proxy": "DEGRADED",
+}
 
 
 # ---------------------------------------------------------------------------
@@ -42,24 +71,96 @@ def _place_show_probs(win_probs: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
     return place / place.sum(), show / show.sum()
 
 
+def _bet_tag(edge: float, bet_threshold: float, underlay_threshold: float) -> str:
+    if edge >= bet_threshold:
+        return "bet"
+    if edge < underlay_threshold:
+        return "underlay"
+    return "neutral"
+
+
+def _model_confidence(dist_starts: int, career_starts: int, has_null_model_feat: bool) -> str:
+    """
+    Confidence tiers for seed-only mode.
+    'high' is not possible until horse_starts is populated.
+    """
+    if has_null_model_feat:
+        return "low"
+    if dist_starts <= 1:
+        return "low"     # distance_fit unreliable with <= 1 start at this trip
+    return "medium"      # no "high" possible without horse_starts
+
+
+def _missing_flags(dist_starts: int) -> str:
+    flags = list(CRITICAL_MISSING)
+    if dist_starts <= 1:
+        flags.append("dist_fit_single_start")
+    return ",".join(flags)
+
+
+def _compute_confidence_and_flags(
+    feat_df:    pd.DataFrame,
+    entries_df: pd.DataFrame,
+    model_features: list[str],
+) -> pd.DataFrame:
+    """
+    Return DataFrame with entry_id, model_confidence, missing_data_flags,
+    confidence_flag (0/1 for DB).
+    """
+    # model features we actually care about for null check
+    check_cols = [c for c in model_features if c in feat_df.columns]
+
+    rows = []
+    for _, erow in entries_df.iterrows():
+        eid = int(erow["entry_id"])
+        frow = feat_df[feat_df["entry_id"] == eid]
+        if frow.empty:
+            rows.append({"entry_id": eid, "model_confidence": "low",
+                         "missing_data_flags": ",".join(CRITICAL_MISSING),
+                         "confidence_flag": 0})
+            continue
+
+        fr = frow.iloc[0]
+        has_null = any(
+            fr.get(c) is None or (isinstance(fr.get(c), float) and np.isnan(fr.get(c)))
+            for c in check_cols
+        )
+        dist_starts   = int(erow.get("dist_starts") or 0)
+        career_starts = int(erow.get("career_starts") or 0)
+
+        confidence = _model_confidence(dist_starts, career_starts, has_null)
+        flags      = _missing_flags(dist_starts)
+        conf_flag  = 1 if confidence == "medium" else 0
+
+        rows.append({
+            "entry_id":          eid,
+            "model_confidence":  confidence,
+            "missing_data_flags": flags,
+            "confidence_flag":   conf_flag,
+        })
+
+    return pd.DataFrame(rows)
+
+
+# ---------------------------------------------------------------------------
+# Pre-race evaluation metrics
+# ---------------------------------------------------------------------------
 def _compute_metrics(
     win_probs:    np.ndarray,
     market_probs: np.ndarray,
     artifact:     ModelArtifact,
 ) -> dict:
-    """
-    Pre-race diagnostics only — no actual race outcomes available yet.
-    Outcome-based metrics (log_loss, brier, top1) are explicitly N/A.
-    """
     from scipy.stats import kendalltau
 
-    tau, _   = kendalltau(win_probs, market_probs)
-    edges    = win_probs - market_probs
-    bet_mask = edges >= artifact.config["bet_edge_threshold"]
-    ul_mask  = edges <= artifact.config["underlay_edge_threshold"]
+    tau, _  = kendalltau(win_probs, market_probs)
+    edges   = win_probs - market_probs
+    bet_thr = artifact.config["bet_edge_threshold"]
+    ul_thr  = artifact.config["underlay_edge_threshold"]
 
     # KL divergence: KL(model || market)
-    kl = float(np.sum(win_probs * np.log(np.maximum(win_probs / np.maximum(market_probs, 1e-9), 1e-9))))
+    kl = float(np.sum(
+        win_probs * np.log(np.maximum(win_probs / np.maximum(market_probs, 1e-9), 1e-9))
+    ))
 
     return {
         "model_type":        artifact.model_type,
@@ -72,8 +173,8 @@ def _compute_metrics(
         "mean_edge_abs":     round(float(np.abs(edges).mean()), 4),
         "max_positive_edge": round(float(edges.max()), 4),
         "max_negative_edge": round(float(edges.min()), 4),
-        "bet_count":         int(bet_mask.sum()),
-        "underlay_count":    int(ul_mask.sum()),
+        "bet_count":         int((edges >= bet_thr).sum()),
+        "underlay_count":    int((edges < ul_thr).sum()),
         # Outcome-based: not available until race is run
         "log_loss":          None,
         "brier_score":       None,
@@ -83,24 +184,20 @@ def _compute_metrics(
     }
 
 
-def _bet_tag(
-    edge: float,
-    bet_threshold: float,
-    underlay_threshold: float,
-) -> str:
-    if edge >= bet_threshold:
-        return "bet"
-    if edge <= underlay_threshold:
-        return "underlay"
-    return "neutral"
-
-
 # ---------------------------------------------------------------------------
-# Board and evaluation report writers
+# Board writers
 # ---------------------------------------------------------------------------
-def _write_board(board: pd.DataFrame, run_id: str, model_type: str) -> None:
+def _write_board(
+    board:       pd.DataFrame,
+    run_id:      str,
+    model_id:    int,
+    artifact:    ModelArtifact,
+    metrics:     dict,
+    score_ts:    str,
+) -> None:
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
+    # ── CSV ────────────────────────────────────────────────────────────────
     csv_cols = [
         "rank", "horse_name", "post_position",
         "trainer", "jockey",
@@ -108,20 +205,61 @@ def _write_board(board: pd.DataFrame, run_id: str, model_type: str) -> None:
         "model_win_prob_pct", "fair_odds",
         "pace_fit_score", "form_score", "surface_dist_fit",
         "value_score", "bet_tag",
+        "model_confidence", "missing_data_flags",
     ]
     board[csv_cols].to_csv(OUTPUT_DIR / "derby_2026_board.csv", index=False)
 
-    tag_icons = {"bet": "**BET**", "underlay": "~~UL~~", "neutral": "—"}
+    # ── Markdown ───────────────────────────────────────────────────────────
+    bet_horses = board[board["bet_tag"] == "bet"]["horse_name"].tolist()
+    ul_horses  = board[board["bet_tag"] == "underlay"]["horse_name"].tolist()
+    low_conf   = int((board["model_confidence"] == "low").sum())
+    top_row    = board[board["rank"] == 1].iloc[0]
+    top_value  = board.nlargest(1, "value_score").iloc[0]
+    bet_str    = ", ".join(bet_horses) if bet_horses else "none"
+    ul_str     = ", ".join(ul_horses)  if ul_horses  else "none"
+
+    tag_icons = {"bet": "**BET**", "underlay": "~~UL~~", "neutral": "--"}
+    conf_icons = {"high": "HIGH", "medium": "MED", "low": "LOW!"}
+
     lines = [
         "# DerbyEdge Engine — 2026 Kentucky Derby Board",
         "",
-        f"*Model: `{model_type}` | Run ID: `{run_id}` | Race: 2026-05-02 Churchill Downs*",
+        "## Board Summary",
         "",
-        "| Rank | Horse | Post | Trainer | Jockey | ML | Win% | Fair Odds | Pace Fit | Form | SuDist | Edge | Tag |",
-        "|------|-------|------|---------|--------|-----|------|-----------|----------|------|--------|------|-----|",
+        "| Field | Value |",
+        "|-------|-------|",
+        f"| Model type | `{artifact.model_type}` |",
+        f"| Version | `{artifact.version}` |",
+        f"| Score timestamp | {score_ts} |",
+        f"| Model ID | {model_id} |",
+        f"| Race | 2026 Kentucky Derby (G1) · Churchill Downs · 2026-05-02 |",
+        f"| Total horses | {len(board)} |",
+        f"| Bet-tagged | {metrics['bet_count']} ({bet_str}) |",
+        f"| Underlay-tagged | {metrics['underlay_count']} ({ul_str}) |",
+        f"| Top win probability | {top_row['horse_name']} {top_row['model_win_prob_pct']:.1f}% "
+        f"(fair {top_row['fair_odds']:.1f}-1) |",
+        f"| Top value score | {top_value['horse_name']} "
+        f"{'+' if top_value['value_score'] > 0 else ''}{top_value['value_score']:.3f} "
+        f"({top_value['bet_tag']}) |",
+        f"| Kendall tau vs market | {metrics['kendall_tau_vs_ml']:.4f} |",
+        f"| Mean abs edge | {metrics['mean_edge_abs']:.4f} |",
+        f"| Low-confidence entries | {low_conf} of {len(board)} "
+        f"(dist_starts <= 1; distance_fit unreliable) |",
+        "",
+        "---",
+        "",
+        "## Race Card",
+        "",
+        "**Bet thresholds:** BET >= +0.025  |  UNDERLAY < -0.015  |  NEUTRAL otherwise",
+        "",
+        "| Rank | Horse | Post | Trainer | Jockey | ML | Win% | Fair | PaceFit | Form | SuDist | Edge | Tag | Conf |",
+        "|------|-------|------|---------|--------|----|------|------|---------|------|--------|------|-----|------|",
     ]
+
     for _, r in board.iterrows():
         edge_str = f"+{r['value_score']:.3f}" if r['value_score'] > 0 else f"{r['value_score']:.3f}"
+        conf_str = conf_icons.get(r['model_confidence'], r['model_confidence'])
+        tag_str  = tag_icons.get(r['bet_tag'], r['bet_tag'])
         lines.append(
             f"| {int(r['rank'])} | **{r['horse_name']}** | {int(r['post_position'])} "
             f"| {r['trainer']} | {r['jockey']} "
@@ -132,47 +270,115 @@ def _write_board(board: pd.DataFrame, run_id: str, model_type: str) -> None:
             f"| {r['form_score']:.3f} "
             f"| {r['surface_dist_fit']:.3f} "
             f"| {edge_str} "
-            f"| {tag_icons.get(r['bet_tag'], r['bet_tag'])} |"
+            f"| {tag_str} "
+            f"| {conf_str} |"
         )
+
+    # ── Missing-data detail ────────────────────────────────────────────────
+    low_conf_horses = board[board["model_confidence"] == "low"]
+    if not low_conf_horses.empty:
+        lines += [
+            "",
+            "### Low-Confidence Entries",
+            "",
+            "These horses have `dist_starts <= 1`; their distance_fit score is based on "
+            "`stamina_index` alone (no race history at 1.25 miles).",
+            "",
+            "| Horse | Post | Dist Starts | Additional Missing Flags |",
+            "|-------|------|-------------|--------------------------|",
+        ]
+        for _, r in low_conf_horses.iterrows():
+            flags = r['missing_data_flags'].replace(
+                ",".join(CRITICAL_MISSING) + ",", ""
+            ).replace(",".join(CRITICAL_MISSING), "")
+            lines.append(
+                f"| {r['horse_name']} | {int(r['post_position'])} "
+                f"| {int(r.get('dist_starts_raw', 1))} "
+                f"| dist_fit_single_start |"
+            )
+
+    # ── Diagnostic footer ──────────────────────────────────────────────────
+    fi = sorted(artifact.feature_importances.items(), key=lambda x: -x[1])[:5]
+
+    lines += [
+        "",
+        "---",
+        "",
+        "## Diagnostics",
+        "",
+        "### Feature Tier Summary",
+        "",
+        "| Tier | Count | Meaning |",
+        "|------|-------|---------|",
+        "| IMPLEMENTED | 22 | Computed directly from seed columns |",
+        "| DEGRADED | 12 | Proxy formula from aggregate seed data; less precise than row-level history |",
+        "| PLACEHOLDER | 12 | Null; requires horse_starts / workouts / track_bias / trip_flags |",
+        "",
+        "### Top 5 Feature Importances",
+        "",
+        "| Feature | Weight | Tier |",
+        "|---------|--------|------|",
+    ]
+    for fname, fw in fi:
+        tier = _FEATURE_TIER.get(fname, "DEGRADED")
+        lines.append(f"| `{fname}` | {fw:.4f} | {tier} |")
+
+    lines += [
+        "",
+        "### Calibration",
+        "",
+        "| Parameter | Value |",
+        "|-----------|-------|",
+        f"| Method | temperature-scaled softmax |",
+        f"| Temperature | {artifact.temperature} |",
+        f"| Calibration target | overround-adjusted morning line |",
+        f"| Sum of win probabilities | {metrics['sum_win_prob']:.6f} |",
+        f"| KL divergence vs market | {metrics['kl_div_vs_ml']:.4f} |",
+        "",
+        "### Model Limitations",
+        "",
+        "> This baseline uses seed-aggregate features and has not been validated on historical Derby preps.",
+        "> Fair odds and value scores are **directional only**.",
+        "> The following features are unavailable until real historical data is loaded:",
+        "> race-by-race speed splits, bullet workout counts, trainer/jockey conditioned stats,",
+        "> Churchill Downs track form, post-position win bias, trip trouble flags.",
+        ">",
+        "> **Do not wager without manual audit of speed figures, trip notes, and trainer intent.**",
+    ]
 
     (OUTPUT_DIR / "derby_2026_board.md").write_text("\n".join(lines), encoding="utf-8")
     print(f"  [board]    board written -> {OUTPUT_DIR / 'derby_2026_board.md'}")
 
 
 def _write_eval_report(
-    metrics:      dict,
-    artifact:     ModelArtifact,
-    board:        pd.DataFrame,
+    metrics:   dict,
+    artifact:  ModelArtifact,
+    board:     pd.DataFrame,
+    model_id:  int,
 ) -> None:
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
     race_type = metrics["race_type_key"]
     path      = OUTPUT_DIR / f"model_evaluation_{race_type}.md"
 
-    # Determine model quality label
-    if metrics["training_rows"] >= 50:
-        quality = "TRAINED — XGBoost on historical races with rolling CV"
-    else:
-        quality = ("SEED-ONLY BASELINE — principled weighted composite from 46-feature "
-                   "catalog; no historical training data; probabilities are model-informed "
-                   "estimates, not calibrated predictions")
+    quality = (
+        "SEED-ONLY BASELINE — principled weighted composite from 46-feature "
+        "catalog; no historical training data; probabilities are model-informed "
+        "estimates, not calibrated predictions"
+    )
 
-    top5 = board.nsmallest(5, "rank")[
+    top5      = board.nsmallest(5, "rank")[
         ["rank", "horse_name", "model_win_prob_pct", "fair_odds", "value_score", "bet_tag"]
     ]
-    top3_value = board.nlargest(3, "value_score")[
+    top3_val  = board.nlargest(3, "value_score")[
         ["horse_name", "morning_line_odds", "model_win_prob_pct", "value_score", "bet_tag"]
     ]
-
-    # Feature importances sorted
-    fi = sorted(
-        artifact.feature_importances.items(), key=lambda x: -x[1]
-    )[:15]
+    fi = sorted(artifact.feature_importances.items(), key=lambda x: -x[1])[:15]
 
     lines = [
         f"# DerbyEdge Model Evaluation — {race_type}",
         "",
-        f"**Generated** : {datetime.datetime.utcnow().strftime('%Y-%m-%dT%H:%M:%SZ')}  ",
-        f"**Model name** : `{artifact.model_name}`  ",
+        f"**Generated** : {metrics.get('score_ts', 'N/A')}  ",
+        f"**Model name** : `{artifact.model_name}` (ID={model_id})  ",
         f"**Version**    : `{artifact.version}`  ",
         f"**Model type** : {metrics['model_type']}  ",
         "",
@@ -183,25 +389,24 @@ def _write_eval_report(
         "| Criterion | Status |",
         "|-----------|--------|",
         f"| Training rows | {metrics['training_rows']} (need >= 50 for XGBoost) |",
-        f"| Calibration method | temperature-scaled softmax (T={metrics['temperature']}) |",
+        f"| Calibration | temperature-scaled softmax (T={metrics['temperature']}) |",
         f"| Calibration target | overround-adjusted morning line |",
+        f"| Bet threshold | edge >= +{artifact.config['bet_edge_threshold']:.3f} |",
+        f"| Underlay threshold | edge < {artifact.config['underlay_edge_threshold']:.3f} |",
         f"| Outcome validation | NOT POSSIBLE — race not yet run (2026-05-02) |",
         "",
         "## Pre-Race Diagnostics",
         "",
-        "Outcome-based metrics (log_loss, Brier, top-1) require actual race results.",
-        "The metrics below are computable before the race.",
-        "",
         "| Metric | Value | Interpretation |",
         "|--------|-------|----------------|",
         f"| `sum_win_prob` | {metrics['sum_win_prob']:.6f} | Should be 1.000000 |",
-        f"| `kendall_tau_vs_ml` | {metrics['kendall_tau_vs_ml']:.4f} | Rank correlation with market; 1=identical, 0=no overlap |",
-        f"| `kl_div_vs_ml` | {metrics['kl_div_vs_ml']:.4f} | KL(model \\|\\| market); 0=identical, higher=more divergent |",
-        f"| `mean_edge_abs` | {metrics['mean_edge_abs']:.4f} | Mean absolute model-market divergence per horse |",
-        f"| `max_positive_edge` | {metrics['max_positive_edge']:.4f} | Best value play |",
+        f"| `kendall_tau_vs_ml` | {metrics['kendall_tau_vs_ml']:.4f} | Rank correlation with market |",
+        f"| `kl_div_vs_ml` | {metrics['kl_div_vs_ml']:.4f} | KL(model \\|\\| market) |",
+        f"| `mean_edge_abs` | {metrics['mean_edge_abs']:.4f} | Mean abs model-market divergence |",
+        f"| `max_positive_edge` | {metrics['max_positive_edge']:.4f} | Best value candidate |",
         f"| `max_negative_edge` | {metrics['max_negative_edge']:.4f} | Worst underlay |",
-        f"| `bet_count` | {metrics['bet_count']} | Horses with edge >= +{artifact.config['bet_edge_threshold']:.3f} |",
-        f"| `underlay_count` | {metrics['underlay_count']} | Horses with edge <= {artifact.config['underlay_edge_threshold']:.3f} |",
+        f"| `bet_count` | {metrics['bet_count']} | Horses with edge >= +0.025 |",
+        f"| `underlay_count` | {metrics['underlay_count']} | Horses with edge < -0.015 |",
         "",
         "## Post-Race Metrics (N/A — Race Not Run)",
         "",
@@ -215,13 +420,12 @@ def _write_eval_report(
         "",
         "## Top Feature Importances",
         "",
-        "Effective weight = within-group weight x group weight, normalized to sum 1.0.",
-        "",
-        "| Rank | Feature | Effective Weight |",
-        "|------|---------|-----------------|",
+        "| Rank | Feature | Weight | Tier |",
+        "|------|---------|--------|------|",
     ]
     for i, (fname, fw) in enumerate(fi, 1):
-        lines.append(f"| {i} | `{fname}` | {fw:.4f} |")
+        tier = _FEATURE_TIER.get(fname, "DEGRADED")
+        lines.append(f"| {i} | `{fname}` | {fw:.4f} | {tier} |")
 
     lines += [
         "",
@@ -243,18 +447,19 @@ def _write_eval_report(
     for _, r in top5.iterrows():
         edge_str = f"+{r['value_score']:.3f}" if r['value_score'] > 0 else f"{r['value_score']:.3f}"
         lines.append(
-            f"| {int(r['rank'])} | {r['horse_name']} | {r['model_win_prob_pct']:.1f}% "
+            f"| {int(r['rank'])} | {r['horse_name']} "
+            f"| {r['model_win_prob_pct']:.1f}% "
             f"| {r['fair_odds']:.1f}-1 | {edge_str} | {r['bet_tag']} |"
         )
 
     lines += [
         "",
-        "## Top 3 by Value Score (Model Edge)",
+        "## Top 3 by Value Score",
         "",
         "| Horse | ML Odds | Win% | Edge | Tag |",
         "|-------|---------|------|------|-----|",
     ]
-    for _, r in top3_value.iterrows():
+    for _, r in top3_val.iterrows():
         edge_str = f"+{r['value_score']:.3f}" if r['value_score'] > 0 else f"{r['value_score']:.3f}"
         lines.append(
             f"| {r['horse_name']} | {r['morning_line_odds']:.0f}-1 "
@@ -265,17 +470,13 @@ def _write_eval_report(
         "",
         "## Limitations",
         "",
-        "- This model is a **seed-only baseline**. It has no access to:",
-        "  - Race-by-race speed figures (horse_starts empty)",
-        "  - Real workout records (workouts empty)",
-        "  - Conditioned trainer/jockey stats (v_connections_180 empty)",
-        "  - Track bias (track_bias empty)",
-        "  - Trip flags (trip_flags empty)",
-        "- 12 of 46 features are PLACEHOLDER (null for all entries).",
-        "- 12 features are DEGRADED (proxy formulas from aggregate seed data).",
-        "- Calibration is a temperature-scaled softmax tuned to morning line spread,",
-        "  NOT isotonic regression calibrated against actual race outcomes.",
-        "- **Do not use these probabilities for real-money wagering without historical validation.**",
+        "- **Seed-only**: no access to race-by-race speed splits, real workout records,",
+        "  conditioned trainer/jockey stats, track bias, or trip flags.",
+        "- 12/46 features are PLACEHOLDER (null for all entries).",
+        "- 12/46 features are DEGRADED (proxy formulas from aggregate seed data).",
+        "- Calibration is temperature-scaled softmax tuned to morning line spread;",
+        "  NOT isotonic regression against actual race outcomes.",
+        "- **Do not use for real-money wagering without historical validation.**",
     ]
 
     path.write_text("\n".join(lines), encoding="utf-8")
@@ -289,14 +490,17 @@ def score_race(card_id: Optional[int] = None) -> pd.DataFrame:
     """
     Score a race card end-to-end.
 
-    1. Load feature store and v_entries_live
-    2. Build/load model artifact (seed_only_baseline if no history)
-    3. Calibrate win probabilities
-    4. Compute fair_odds, model_edge, bet_tags
-    5. Write to DB: score_runs + entry_scores
-    6. Write output files
-    Returns the sorted board DataFrame.
+    Stages:
+      1. Load feature store + v_entries_live
+      2. Build/load model artifact (seed_only_baseline when no history)
+      3. Calibrated win probabilities -> fair_odds, model_edge, bet_tags
+      4. Per-horse confidence and missing-data flags
+      5. Write DB: score_runs + entry_scores
+      6. Write outputs: board CSV/MD + evaluation MD
+
+    Returns sorted board DataFrame (one row per entry, ranked by win_prob).
     """
+    score_ts = datetime.datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ")
     conn = get_connection()
 
     if card_id is None:
@@ -305,7 +509,7 @@ def score_race(card_id: Optional[int] = None) -> pd.DataFrame:
         conn.close()
         raise RuntimeError("No Kentucky Derby card found — run ingest first.")
 
-    # ── Load feature store ─────────────────────────────────────────────────
+    # ── Load data ──────────────────────────────────────────────────────────
     feat_df = pd.read_sql(
         "SELECT * FROM feature_store WHERE card_id=? ORDER BY post_position",
         conn, params=(card_id,),
@@ -314,21 +518,18 @@ def score_race(card_id: Optional[int] = None) -> pd.DataFrame:
         conn.close()
         raise RuntimeError(f"No features for card_id={card_id} — run build_features first.")
 
-    # ── Load live entries (for trainer/jockey names + morning line) ────────
     entries_df = pd.read_sql(
         "SELECT * FROM v_entries_live WHERE card_id=? ORDER BY post_position",
         conn, params=(card_id,),
     )
 
-    # Determine race type from race_cards
     rc = conn.execute(
         "SELECT surface, distance_furlongs FROM race_cards WHERE card_id=?",
         (card_id,),
     ).fetchone()
-    surface        = rc["surface"] if rc else "dirt"
-    dist_furlongs  = float(rc["distance_furlongs"]) if rc else 10.0
-    dist_cat       = "sprint" if dist_furlongs < 8.5 else "route"
-    race_type_key  = f"{surface}_{dist_cat}"
+    surface       = rc["surface"] if rc else "dirt"
+    dist_furlongs = float(rc["distance_furlongs"]) if rc else 10.0
+    race_type_key = f"{surface}_{'sprint' if dist_furlongs < 8.5 else 'route'}"
 
     print(f"  [scorer]   card_id={card_id}  race_type={race_type_key}  "
           f"entries={len(feat_df)}")
@@ -346,55 +547,55 @@ def score_race(card_id: Optional[int] = None) -> pd.DataFrame:
     ml_implied   = feat_df["market_implied_prob"].astype(float).values
     market_probs = ml_implied / ml_implied.sum()
 
-    # ── Derived scoring columns ────────────────────────────────────────────
-    fair_odds    = np.round(1.0 / np.maximum(win_probs, 1e-9) - 1.0, 2)
-    model_edge   = np.round(win_probs - market_probs, 4)
+    # ── Derived scoring ────────────────────────────────────────────────────
+    fair_odds          = np.round(1.0 / np.maximum(win_probs, 1e-9) - 1.0, 2)
+    model_edge         = np.round(win_probs - market_probs, 4)
     place_probs, show_probs = _place_show_probs(win_probs)
 
-    bet_threshold      = config["bet_edge_threshold"]
-    underlay_threshold = config["underlay_edge_threshold"]
-    bet_tags = [_bet_tag(e, bet_threshold, underlay_threshold) for e in model_edge]
+    bet_thr  = config["bet_edge_threshold"]
+    ul_thr   = config["underlay_edge_threshold"]
+    bet_tags = [_bet_tag(e, bet_thr, ul_thr) for e in model_edge]
+    rank_arr = pd.Series(win_probs).rank(ascending=False, method="min").astype(int).values
 
     # ── Group scores for board columns ─────────────────────────────────────
-    from src.models.trainer import compute_group_scores
-    group_scores = compute_group_scores(feat_df, config)
-    form_score_arr     = group_scores.get("form_class",     np.zeros(len(feat_df)))
-    surf_dist_score_arr = group_scores.get("distance_surface", np.zeros(len(feat_df)))
+    group_scores     = compute_group_scores(feat_df, config)
+    form_arr         = group_scores.get("form_class",      np.zeros(len(feat_df)))
+    surf_dist_arr    = group_scores.get("distance_surface", np.zeros(len(feat_df)))
 
-    # ── Compute metrics ────────────────────────────────────────────────────
+    # ── Confidence + missing flags ─────────────────────────────────────────
+    model_feats = [
+        f for g in config["feature_groups"].values()
+        for f in g["features"]
+    ]
+    conf_df = _compute_confidence_and_flags(feat_df, entries_df, model_feats)
+
+    # ── Metrics ───────────────────────────────────────────────────────────
     metrics = _compute_metrics(win_probs, market_probs, artifact)
+    metrics["score_ts"] = score_ts
 
     # ── Save artifact + register model ────────────────────────────────────
     artifact_path = save_artifact(artifact)
     model_id      = register_model(artifact, artifact_path, metrics, conn)
     print(f"  [scorer]   model_id={model_id}  artifact={artifact_path.name}")
 
-    # ── Score run record ───────────────────────────────────────────────────
+    # ── DB writes ──────────────────────────────────────────────────────────
     run_id = str(uuid.uuid4())[:8]
     conn.execute(
-        """
-        INSERT INTO score_runs (run_id, card_id, model_id, model_type)
-        VALUES (?,?,?,?)
-        """,
+        "INSERT INTO score_runs (run_id, card_id, model_id, model_type) VALUES (?,?,?,?)",
         (run_id, card_id, model_id, artifact.model_type),
     )
 
-    # ── Entry scores record ────────────────────────────────────────────────
-    conn.execute("DELETE FROM entry_scores WHERE run_id IN "
-                 "(SELECT run_id FROM score_runs WHERE card_id=? AND run_id != ?)",
-                 (card_id, run_id))
+    # Purge stale runs for this card (keep only latest)
+    conn.execute(
+        "DELETE FROM entry_scores WHERE run_id IN "
+        "(SELECT run_id FROM score_runs WHERE card_id=? AND run_id != ?)",
+        (card_id, run_id),
+    )
 
-    rank_arr = pd.Series(win_probs).rank(ascending=False, method="min").astype(int).values
-
-    for i, row in entries_df.iterrows():
-        idx = int(feat_df[feat_df["entry_id"] == row["entry_id"]].index[0]
-                  if not feat_df[feat_df["entry_id"] == row["entry_id"]].empty
-                  else i)
-        missing_flag = int(any(
-            feat_df.iloc[idx][f] is None or
-            (isinstance(feat_df.iloc[idx][f], float) and np.isnan(feat_df.iloc[idx][f]))
-            for f in config["feature_groups"]["speed_quality"]["features"]
-        ))
+    for i, (_, erow) in enumerate(entries_df.iterrows()):
+        eid = int(erow["entry_id"])
+        conf_row  = conf_df[conf_df["entry_id"] == eid]
+        conf_flag = int(conf_row["confidence_flag"].iloc[0]) if not conf_row.empty else 0
         conn.execute(
             """
             INSERT INTO entry_scores (
@@ -407,22 +608,22 @@ def score_race(card_id: Optional[int] = None) -> pd.DataFrame:
             ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
             """,
             (
-                run_id, int(row["entry_id"]), row["horse_name"], int(row["post_position"]),
-                float(row["morning_line_odds"]),
-                round(float(win_probs[idx]),   6),
-                round(float(place_probs[idx]), 6),
-                round(float(show_probs[idx]),  6),
-                round(float(feat_df.iloc[idx]["pace_fit_score"]) if feat_df.iloc[idx]["pace_fit_score"] is not None else 0.0, 4),
-                round(float(form_score_arr[idx]),      4),
-                round(float(surf_dist_score_arr[idx]), 4),
-                round(float(model_edge[idx]),  4),
-                round(float(market_probs[idx]), 6),
-                bet_tags[idx],
-                0,   # confidence_flag: 0 for seed-only baseline
-                missing_flag,
-                int(rank_arr[idx]),
-                row.get("trainer", ""),
-                row.get("jockey", ""),
+                run_id, eid, erow["horse_name"], int(erow["post_position"]),
+                float(erow["morning_line_odds"]),
+                round(float(win_probs[i]),    6),
+                round(float(place_probs[i]),  6),
+                round(float(show_probs[i]),   6),
+                round(float(feat_df.iloc[i]["pace_fit_score"]) if feat_df.iloc[i]["pace_fit_score"] is not None else 0.0, 4),
+                round(float(form_arr[i]),     4),
+                round(float(surf_dist_arr[i]), 4),
+                round(float(model_edge[i]),   4),
+                round(float(market_probs[i]), 6),
+                bet_tags[i],
+                conf_flag,
+                1,   # missing_data_flag=1 for all entries (PLACEHOLDERs are absent)
+                int(rank_arr[i]),
+                erow.get("trainer", ""),
+                erow.get("jockey", ""),
             ),
         )
 
@@ -433,6 +634,7 @@ def score_race(card_id: Optional[int] = None) -> pd.DataFrame:
     board = entries_df[[
         "entry_id", "horse_name", "post_position",
         "trainer", "jockey", "morning_line_odds",
+        "dist_starts",
     ]].copy().reset_index(drop=True)
 
     board["model_win_prob"]     = win_probs
@@ -441,21 +643,26 @@ def score_race(card_id: Optional[int] = None) -> pd.DataFrame:
     board["market_prob"]        = market_probs
     board["value_score"]        = model_edge
     board["bet_tag"]            = bet_tags
-    board["place_prob"]         = place_probs
-    board["show_prob"]          = show_probs
-    board["form_score"]         = np.round(form_score_arr, 4)
-    board["surface_dist_fit"]   = np.round(surf_dist_score_arr, 4)
+    board["form_score"]         = np.round(form_arr,      4)
+    board["surface_dist_fit"]   = np.round(surf_dist_arr, 4)
     board["pace_fit_score"]     = feat_df["pace_fit_score"].values
     board["rank"]               = rank_arr
+
+    # Merge confidence columns
+    conf_merge = conf_df[["entry_id", "model_confidence", "missing_data_flags"]]
+    board = board.merge(conf_merge, on="entry_id", how="left")
+    board["dist_starts_raw"] = board["dist_starts"]  # for low-conf table
 
     board = board.sort_values("rank").reset_index(drop=True)
 
     # ── Write outputs ──────────────────────────────────────────────────────
-    _write_board(board, run_id, artifact.model_type)
-    _write_eval_report(metrics, artifact, board)
+    _write_board(board, run_id, model_id, artifact, metrics, score_ts)
+    _write_eval_report(metrics, artifact, board, model_id)
 
+    low_conf_n = int((board["model_confidence"] == "low").sum())
     print(f"  [scorer]   run_id={run_id}  sum_win_prob={metrics['sum_win_prob']:.6f}  "
-          f"bets={metrics['bet_count']}  underlays={metrics['underlay_count']}")
+          f"bets={metrics['bet_count']}  underlays={metrics['underlay_count']}  "
+          f"low_conf={low_conf_n}")
 
     return board
 

@@ -218,8 +218,8 @@ TRAIN_CONFIGS: dict[str, dict] = {
             "bet_count",
             "underlay_count",
         ],
-        "bet_edge_threshold":     0.025,   # model > market by 2.5pp -> BET
-        "underlay_edge_threshold": -0.020,  # model < market by 2.0pp -> UNDERLAY
+        "bet_edge_threshold":      0.025,   # model > market by 2.5pp -> BET
+        "underlay_edge_threshold": -0.015,  # model < market by 1.5pp -> UNDERLAY
     }
     for key in FEATURE_GROUPS
 }
@@ -405,23 +405,41 @@ def save_artifact(artifact: ModelArtifact) -> Path:
 
 
 def register_model(
-    artifact:     ModelArtifact,
+    artifact:      ModelArtifact,
     artifact_path: Path,
-    metrics:      dict,
+    metrics:       dict,
     conn,
 ) -> int:
-    """Insert or replace a row in model_registry; return model_id."""
+    """
+    Upsert into model_registry without delete/re-insert.
+
+    INSERT OR REPLACE would delete the old row and bump AUTOINCREMENT,
+    breaking any score_runs rows that FK-reference the old model_id.
+    Instead: INSERT OR IGNORE to create if absent, then UPDATE metrics.
+    """
     conn.execute(
         """
-        INSERT OR REPLACE INTO model_registry (
-            model_name, model_family, version, artifact_path,
-            training_rows, log_loss, brier_score, calibration_error,
-            top1_hit_rate, edge_roi
-        ) VALUES (?,?,?,?,?,?,?,?,?,?)
+        INSERT OR IGNORE INTO model_registry (
+            model_name, model_family, version, artifact_path, training_rows
+        ) VALUES (?,?,?,?,?)
         """,
         (
             artifact.model_name,
             artifact.race_type_key,
+            artifact.version,
+            str(artifact_path),
+            artifact.training_rows,
+        ),
+    )
+    conn.execute(
+        """
+        UPDATE model_registry SET
+            version=?, artifact_path=?, training_rows=?,
+            log_loss=?, brier_score=?, calibration_error=?,
+            top1_hit_rate=?, edge_roi=?
+        WHERE model_name=?
+        """,
+        (
             artifact.version,
             str(artifact_path),
             artifact.training_rows,
@@ -430,6 +448,7 @@ def register_model(
             metrics.get("calibration_error"),
             metrics.get("top1_hit_rate"),
             metrics.get("edge_roi"),
+            artifact.model_name,
         ),
     )
     row = conn.execute(
