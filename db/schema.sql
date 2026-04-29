@@ -262,7 +262,7 @@ CREATE TABLE IF NOT EXISTS score_runs (
     model_id      INTEGER          REFERENCES model_registry(model_id),
     run_timestamp TEXT    NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
     model_type    TEXT    NOT NULL DEFAULT 'fallback'
-                  CHECK(model_type IN ('xgboost','fallback','derby_override')),
+                  CHECK(model_type IN ('xgboost','fallback','derby_override','seed_only_baseline')),
     created_at    TEXT    NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
 );
 
