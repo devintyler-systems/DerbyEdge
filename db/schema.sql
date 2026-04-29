@@ -316,6 +316,79 @@ CREATE TABLE IF NOT EXISTS entry_scores (
 );
 
 -- ============================================================
+-- 14. FEATURE_STORE
+--     One row per entry per build run.  All feature columns are
+--     nullable REAL; NULL means the feature could not be computed
+--     from available data (see feature_catalog.csv for null_reason).
+--     Tier labels: IMPLEMENTED | DEGRADED | PLACEHOLDER
+-- ============================================================
+CREATE TABLE IF NOT EXISTS feature_store (
+    feature_id      INTEGER PRIMARY KEY AUTOINCREMENT,
+    card_id         INTEGER NOT NULL REFERENCES race_cards(card_id),
+    entry_id        INTEGER NOT NULL REFERENCES entries(entry_id),
+    horse_id        INTEGER NOT NULL REFERENCES horses(horse_id),
+    horse_name      TEXT    NOT NULL,
+    post_position   INTEGER NOT NULL,
+    build_ts        TEXT    NOT NULL,
+    -- Speed / pace / form
+    speed_last                  REAL,   -- IMPLEMENTED
+    speed_best                  REAL,   -- IMPLEMENTED
+    speed_avg                   REAL,   -- IMPLEMENTED
+    beyer_last                  REAL,   -- IMPLEMENTED
+    speed_best_3                REAL,   -- DEGRADED: avg(best,last,avg); true best-3 needs horse_starts
+    pace_early_mean_3           REAL,   -- PLACEHOLDER: needs call-fraction times from horse_starts
+    pace_mid_mean_3             REAL,   -- PLACEHOLDER: needs call-fraction times from horse_starts
+    finish_energy_proxy         REAL,   -- DEGRADED: pace_style reserve + last_finish
+    form_cycle_idx              REAL,   -- DEGRADED: career_itm_pct weighted by last_finish
+    layoff_days                 INTEGER,-- IMPLEMENTED
+    career_win_pct              REAL,   -- IMPLEMENTED
+    career_itm_pct              REAL,   -- IMPLEMENTED
+    -- Class / field strength
+    class_delta                 REAL,   -- DEGRADED: z-score of career_earnings within field
+    field_strength_last         REAL,   -- PLACEHOLDER: needs competitors speed_figs from horse_starts
+    horses_beaten_pct_last      REAL,   -- DEGRADED: (typical_field - last_finish) / (field-1)
+    field_size_exp              REAL,   -- DEGRADED: career_starts normalized
+    -- Workouts / readiness
+    works_30d                   INTEGER,-- IMPLEMENTED (aggregate count from seed)
+    bullet_30d                  INTEGER,-- PLACEHOLDER: needs workouts table grade='B'
+    days_since_last_work        INTEGER,-- PLACEHOLDER: needs workouts table
+    work_readiness_score        REAL,   -- DEGRADED: works_30d count + gate_class
+    -- Connections
+    trainer_intent_proxy        REAL,   -- DEGRADED: work_load + freshness
+    trainer_jockey_itm_cond     REAL,   -- PLACEHOLDER: needs horse_starts conditioned stats
+    jockey_route_cond           REAL,   -- PLACEHOLDER: needs horse_starts conditioned stats
+    trainer_derby_cond          REAL,   -- PLACEHOLDER: needs horse_starts at Churchill/10f+
+    -- Fit
+    surface_fit                 REAL,   -- DEGRADED: dirt_win_pct with sample weighting
+    distance_fit                REAL,   -- DEGRADED: stamina_index + dist_win_pct
+    route_progression           REAL,   -- DEGRADED: distance_fit (route context)
+    pedigree_route_proxy        REAL,   -- DEGRADED: sire-line route aptitude lookup
+    -- Post / trip / bias
+    post_win_bias               REAL,   -- PLACEHOLDER: needs track_bias or post history
+    gate_reliability            REAL,   -- DEGRADED: gate_class normalized
+    trouble_recovery_proxy      REAL,   -- PLACEHOLDER: needs trip_flags
+    traffic_resilience_proxy    REAL,   -- DEGRADED: pace_style + field_size_exp
+    -- Race shape (computed across full field)
+    early_intent                REAL,   -- IMPLEMENTED: pace_style -> 0-1 scale
+    run_style_bucket            TEXT,   -- IMPLEMENTED: pace_style pass-through
+    pace_pressure               REAL,   -- IMPLEMENTED: (front+presser)/field_size
+    lone_speed_edge             INTEGER,-- IMPLEMENTED: 1 if only front-runner
+    collapse_risk               REAL,   -- IMPLEMENTED: pace_pressure alias
+    pace_fit_score              REAL,   -- IMPLEMENTED: style x field shape matrix
+    -- Market / publicness
+    market_implied_prob         REAL,   -- IMPLEMENTED: 1/(odds+1)
+    morning_line_rank           INTEGER,-- IMPLEMENTED: rank by implied_prob within field
+    publicness_score            REAL,   -- DEGRADED: market_prob / career_win_pct
+    public_underlay_penalty     REAL,   -- DEGRADED: z-score of publicness within field
+    -- Derby override
+    classic_distance_projection REAL,   -- DEGRADED: stamina_index + dist_win_pct
+    churchill_readiness         REAL,   -- PLACEHOLDER: needs Churchill historical data
+    jan_apr_improvement_curve   REAL,   -- PLACEHOLDER: needs sequential speed figs
+    derby_override_score        REAL,   -- DEGRADED: weighted composite of available proxies
+    UNIQUE(card_id, entry_id)
+);
+
+-- ============================================================
 -- INDEXES
 -- ============================================================
 -- race_cards
@@ -346,6 +419,10 @@ CREATE INDEX IF NOT EXISTS idx_es_run_rank     ON entry_scores(run_id, rank);
 
 -- score_runs
 CREATE INDEX IF NOT EXISTS idx_sr_card         ON score_runs(card_id);
+
+-- feature_store
+CREATE INDEX IF NOT EXISTS idx_fs_card         ON feature_store(card_id);
+CREATE INDEX IF NOT EXISTS idx_fs_entry        ON feature_store(entry_id);
 
 -- ============================================================
 -- VIEWS
