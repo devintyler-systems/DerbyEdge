@@ -201,6 +201,55 @@ FEATURE_GROUPS: dict[str, dict] = {
     },
 }
 
+# ---------------------------------------------------------------------------
+# Derby override feature groups — used when is_derby_context() returns True.
+# Weights differ from dirt_route to emphasize classic distance fit, traffic
+# resilience, and pedigree while reducing market anchoring.
+# ---------------------------------------------------------------------------
+DERBY_OVERRIDE_FEATURE_GROUPS: dict = {
+    "speed_quality": {
+        "group_weight": 0.22,   # dirt_route: 0.25 — speed universal but not sole determinant at 1.25mi
+        "features": {"speed_best_3": 0.40, "speed_last": 0.35, "beyer_last": 0.25},
+    },
+    "form_class": {
+        "group_weight": 0.15,   # dirt_route: 0.18 — recent form matters less vs. stamina fit
+        "features": {
+            "form_cycle_idx":         0.35,
+            "class_delta":            0.30,
+            "horses_beaten_pct_last": 0.20,
+            "career_win_pct":         0.15,
+        },
+    },
+    "distance_surface": {
+        "group_weight": 0.22,   # dirt_route: 0.17 — classic distance projection is the key Derby ask
+        "features": {"distance_fit": 0.60, "surface_fit": 0.40},
+    },
+    "race_shape": {
+        "group_weight": 0.18,   # dirt_route: 0.15 — 20-horse field amplifies traffic risk
+        "features": {
+            "pace_fit_score":          0.60,
+            "traffic_resilience_proxy": 0.40,  # elevated vs 0.35 base
+        },
+    },
+    "readiness": {
+        "group_weight": 0.12,   # dirt_route: 0.13
+        "features": {
+            "work_readiness_score": 0.50,
+            "trainer_intent_proxy": 0.30,
+            "finish_energy_proxy":  0.20,
+        },
+    },
+    "derby_override": {
+        "group_weight": 0.09,   # dirt_route: 0.07 — expanded; Derby sub-components carry more signal
+        "features": {"derby_override_score": 1.00},
+    },
+    "market_prior": {
+        "group_weight": 0.02,   # dirt_route: 0.05 — reduce anchoring; public_underlay_penalty
+                                 # already embedded in derby_override_score
+        "features": {"market_implied_prob": 1.00},
+    },
+}
+
 TRAIN_CONFIGS: dict[str, dict] = {
     key: {
         "race_type_key":    key,
@@ -222,6 +271,16 @@ TRAIN_CONFIGS: dict[str, dict] = {
         "underlay_edge_threshold": -0.015,  # model < market by 1.5pp -> UNDERLAY
     }
     for key in FEATURE_GROUPS
+}
+
+# Derby override config — shares all TRAIN_CONFIGS["dirt_route"] settings but
+# substitutes DERBY_OVERRIDE_FEATURE_GROUPS and bumps the model name.
+DERBY_TRAIN_CONFIG: dict = {
+    **TRAIN_CONFIGS["dirt_route"],
+    "feature_groups": DERBY_OVERRIDE_FEATURE_GROUPS,
+    "model_name":     "derby_override_v1",
+    "model_family":   "dirt_route",
+    "race_type_key":  "dirt_route",
 }
 
 

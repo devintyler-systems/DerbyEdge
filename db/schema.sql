@@ -257,13 +257,14 @@ CREATE TABLE IF NOT EXISTS model_registry (
 --     to the model used and the timestamp of the run.
 -- ============================================================
 CREATE TABLE IF NOT EXISTS score_runs (
-    run_id        TEXT    PRIMARY KEY,
-    card_id       INTEGER NOT NULL REFERENCES race_cards(card_id),
-    model_id      INTEGER          REFERENCES model_registry(model_id),
-    run_timestamp TEXT    NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
-    model_type    TEXT    NOT NULL DEFAULT 'fallback'
-                  CHECK(model_type IN ('xgboost','fallback','derby_override','seed_only_baseline')),
-    created_at    TEXT    NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
+    run_id                TEXT    PRIMARY KEY,
+    card_id               INTEGER NOT NULL REFERENCES race_cards(card_id),
+    model_id              INTEGER          REFERENCES model_registry(model_id),
+    run_timestamp         TEXT    NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+    model_type            TEXT    NOT NULL DEFAULT 'fallback'
+                          CHECK(model_type IN ('xgboost','fallback','derby_override','seed_only_baseline')),
+    derby_override_active INTEGER NOT NULL DEFAULT 0 CHECK(derby_override_active IN (0,1)),
+    created_at            TEXT    NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
 );
 
 -- ============================================================

@@ -28,11 +28,13 @@ import pandas as pd
 from src.models.trainer import (
     ModelArtifact,
     TRAIN_CONFIGS,
+    DERBY_TRAIN_CONFIG,
     compute_feature_importances,
     compute_group_scores,
     register_model,
     save_artifact,
     train_or_build,
+    build_seed_baseline,
 )
 from src.utils.db import get_connection, get_derby_card_id
 
@@ -48,6 +50,21 @@ CRITICAL_MISSING = [
     "no_post_bias",         # post_win_bias
 ]
 
+# Derby-specific PLACEHOLDER flags (added on top of CRITICAL_MISSING)
+DERBY_EXTRA_MISSING = [
+    "no_jan_apr_curve",       # jan_apr_improvement_curve: sequential speed progression
+    "no_churchill_readiness", # churchill_readiness: Churchill Downs specific form
+]
+
+# Derby context detection criteria
+_DERBY_CRITERIA = {
+    "surface":           "dirt",
+    "min_furlongs":      9.5,      # 1.25 miles = 10f; allow slight tolerance
+    "min_field_size":    18,
+    "stakes_contains":   "derby",  # case-insensitive substring
+    "track_abbrev":      "CD",     # Churchill Downs
+}
+
 # Feature-catalog tier lookup (for diagnostic footer)
 _FEATURE_TIER = {
     "speed_best_3": "DEGRADED", "speed_last": "IMPLEMENTED",
@@ -59,6 +76,36 @@ _FEATURE_TIER = {
     "trainer_intent_proxy": "DEGRADED", "horses_beaten_pct_last": "DEGRADED",
     "career_win_pct": "IMPLEMENTED", "finish_energy_proxy": "DEGRADED",
 }
+
+
+# ---------------------------------------------------------------------------
+# Derby context detection
+# ---------------------------------------------------------------------------
+def is_derby_context(conn, card_id: int) -> bool:
+    """
+    Return True when the race card matches all Derby context criteria:
+    dirt, >= 9.5 furlongs, >= 18 runners, stakes name contains 'derby',
+    at Churchill Downs (abbrev 'CD').
+    """
+    row = conn.execute(
+        """
+        SELECT rc.surface, rc.distance_furlongs, rc.field_size,
+               rc.stakes_name, t.abbrev AS track_abbrev
+        FROM race_cards rc
+        JOIN tracks t ON rc.track_id = t.track_id
+        WHERE rc.card_id = ?
+        """,
+        (card_id,),
+    ).fetchone()
+    if not row:
+        return False
+    return (
+        str(row["surface"] or "") == _DERBY_CRITERIA["surface"]
+        and float(row["distance_furlongs"] or 0) >= _DERBY_CRITERIA["min_furlongs"]
+        and int(row["field_size"] or 0) >= _DERBY_CRITERIA["min_field_size"]
+        and _DERBY_CRITERIA["stakes_contains"] in str(row["stakes_name"] or "").lower()
+        and str(row["track_abbrev"] or "") == _DERBY_CRITERIA["track_abbrev"]
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -79,44 +126,61 @@ def _bet_tag(edge: float, bet_threshold: float, underlay_threshold: float) -> st
     return "neutral"
 
 
-def _model_confidence(dist_starts: int, career_starts: int, has_null_model_feat: bool) -> str:
+def _model_confidence(
+    dist_starts: int,
+    career_starts: int,
+    has_null_model_feat: bool,
+    derby_override: bool = False,
+    pedigree_route_proxy: Optional[float] = None,
+) -> str:
     """
     Confidence tiers for seed-only mode.
     'high' is not possible until horse_starts is populated.
+
+    Derby tightening (derby_override=True):
+      - dist_starts <= 1: always low
+      - dist_starts == 2: low unless pedigree_route_proxy >= 0.75
+      - dist_starts >= 3: medium (if model features present)
     """
     if has_null_model_feat:
         return "low"
     if dist_starts <= 1:
-        return "low"     # distance_fit unreliable with <= 1 start at this trip
-    return "medium"      # no "high" possible without horse_starts
+        return "low"
+    if derby_override and dist_starts == 2:
+        if pedigree_route_proxy is None or pedigree_route_proxy < 0.75:
+            return "low"   # limited route experience, weak pedigree
+    return "medium"
 
 
-def _missing_flags(dist_starts: int) -> str:
+def _missing_flags(dist_starts: int, derby_override: bool = False) -> str:
     flags = list(CRITICAL_MISSING)
+    if derby_override:
+        flags.extend(DERBY_EXTRA_MISSING)
     if dist_starts <= 1:
         flags.append("dist_fit_single_start")
     return ",".join(flags)
 
 
 def _compute_confidence_and_flags(
-    feat_df:    pd.DataFrame,
-    entries_df: pd.DataFrame,
+    feat_df:        pd.DataFrame,
+    entries_df:     pd.DataFrame,
     model_features: list[str],
+    derby_override: bool = False,
 ) -> pd.DataFrame:
     """
     Return DataFrame with entry_id, model_confidence, missing_data_flags,
     confidence_flag (0/1 for DB).
     """
-    # model features we actually care about for null check
     check_cols = [c for c in model_features if c in feat_df.columns]
 
     rows = []
     for _, erow in entries_df.iterrows():
-        eid = int(erow["entry_id"])
+        eid  = int(erow["entry_id"])
         frow = feat_df[feat_df["entry_id"] == eid]
         if frow.empty:
+            base_flags = CRITICAL_MISSING + (DERBY_EXTRA_MISSING if derby_override else [])
             rows.append({"entry_id": eid, "model_confidence": "low",
-                         "missing_data_flags": ",".join(CRITICAL_MISSING),
+                         "missing_data_flags": ",".join(base_flags),
                          "confidence_flag": 0})
             continue
 
@@ -127,16 +191,26 @@ def _compute_confidence_and_flags(
         )
         dist_starts   = int(erow.get("dist_starts") or 0)
         career_starts = int(erow.get("career_starts") or 0)
+        ped_proxy     = fr.get("pedigree_route_proxy")
+        if ped_proxy is not None:
+            try:
+                ped_proxy = float(ped_proxy)
+            except (TypeError, ValueError):
+                ped_proxy = None
 
-        confidence = _model_confidence(dist_starts, career_starts, has_null)
-        flags      = _missing_flags(dist_starts)
-        conf_flag  = 1 if confidence == "medium" else 0
+        confidence = _model_confidence(
+            dist_starts, career_starts, has_null,
+            derby_override=derby_override,
+            pedigree_route_proxy=ped_proxy,
+        )
+        flags     = _missing_flags(dist_starts, derby_override=derby_override)
+        conf_flag = 1 if confidence == "medium" else 0
 
         rows.append({
-            "entry_id":          eid,
-            "model_confidence":  confidence,
+            "entry_id":           eid,
+            "model_confidence":   confidence,
             "missing_data_flags": flags,
-            "confidence_flag":   conf_flag,
+            "confidence_flag":    conf_flag,
         })
 
     return pd.DataFrame(rows)
@@ -531,16 +605,23 @@ def score_race(card_id: Optional[int] = None) -> pd.DataFrame:
     dist_furlongs = float(rc["distance_furlongs"]) if rc else 10.0
     race_type_key = f"{surface}_{'sprint' if dist_furlongs < 8.5 else 'route'}"
 
+    # ── Derby override detection ───────────────────────────────────────────
+    derby_active = is_derby_context(conn, card_id)
     print(f"  [scorer]   card_id={card_id}  race_type={race_type_key}  "
-          f"entries={len(feat_df)}")
+          f"entries={len(feat_df)}  derby_override={derby_active}")
 
     # ── Build model ────────────────────────────────────────────────────────
-    artifact, win_probs = train_or_build(
-        feat_df=feat_df,
-        entries_df=entries_df,
-        race_type_key=race_type_key,
-        conn=conn,
-    )
+    if derby_active:
+        # Use Derby-specific weight config; skip XGBoost path for Derby override
+        artifact, win_probs = build_seed_baseline(feat_df, entries_df, DERBY_TRAIN_CONFIG)
+        print(f"  [scorer]   Derby override active — using {DERBY_TRAIN_CONFIG['model_name']}")
+    else:
+        artifact, win_probs = train_or_build(
+            feat_df=feat_df,
+            entries_df=entries_df,
+            race_type_key=race_type_key,
+            conn=conn,
+        )
     config = artifact.config
 
     # ── Market probs (overround-adjusted) ─────────────────────────────────
@@ -567,7 +648,8 @@ def score_race(card_id: Optional[int] = None) -> pd.DataFrame:
         f for g in config["feature_groups"].values()
         for f in g["features"]
     ]
-    conf_df = _compute_confidence_and_flags(feat_df, entries_df, model_feats)
+    conf_df = _compute_confidence_and_flags(feat_df, entries_df, model_feats,
+                                             derby_override=derby_active)
 
     # ── Metrics ───────────────────────────────────────────────────────────
     metrics = _compute_metrics(win_probs, market_probs, artifact)
@@ -581,8 +663,9 @@ def score_race(card_id: Optional[int] = None) -> pd.DataFrame:
     # ── DB writes ──────────────────────────────────────────────────────────
     run_id = str(uuid.uuid4())[:8]
     conn.execute(
-        "INSERT INTO score_runs (run_id, card_id, model_id, model_type) VALUES (?,?,?,?)",
-        (run_id, card_id, model_id, artifact.model_type),
+        "INSERT INTO score_runs (run_id, card_id, model_id, model_type, derby_override_active) "
+        "VALUES (?,?,?,?,?)",
+        (run_id, card_id, model_id, artifact.model_type, int(derby_active)),
     )
 
     # Purge stale runs for this card (keep only latest)

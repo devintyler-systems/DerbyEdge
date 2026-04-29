@@ -125,7 +125,8 @@ def load_board() -> tuple[pd.DataFrame | None, dict | None]:
             """
             SELECT mr.model_id, mr.model_name, mr.model_family, mr.version,
                    mr.training_rows,
-                   sr.run_id, sr.run_timestamp, sr.model_type
+                   sr.run_id, sr.run_timestamp, sr.model_type,
+                   sr.derby_override_active
             FROM score_runs sr
             JOIN model_registry mr ON sr.model_id = mr.model_id
             WHERE sr.run_id = ?
@@ -227,6 +228,17 @@ def _conf_label(flag: int) -> str:
     return "medium" if flag == 1 else "low"
 
 
+def _safe_num(val, ndigits: int = 4):
+    """Round numeric values; return non-numeric values (strings, etc.) unchanged."""
+    if val is None:
+        return None
+    if isinstance(val, float) and np.isnan(val):
+        return None
+    if isinstance(val, (int, float)):
+        return round(float(val), ndigits)
+    return val
+
+
 def _plotly_dark() -> dict:
     return dict(
         plot_bgcolor="rgba(0,0,0,0)",
@@ -280,11 +292,17 @@ with st.sidebar:
     if meta:
         st.markdown("**Model Run**")
         model_type = meta.get("model_type", "N/A")
-        is_seed = "seed_only" in str(model_type)
-        badge_cls = "badge-seed" if is_seed else "badge-xgb"
-        badge_label = "SEED-ONLY" if is_seed else "XGBOOST"
+        is_seed    = "seed_only" in str(model_type)
+        derby_on   = bool(meta.get("derby_override_active", 0))
+        badge_cls  = "badge-seed" if is_seed else "badge-xgb"
+        badge_lbl  = "SEED-ONLY" if is_seed else "XGBOOST"
+        derby_badge = (
+            ' <span class="status-badge" style="background:#1a2535;color:#c9a227;'
+            'border:1px solid #c9a22788;">DERBY OVERRIDE</span>'
+            if derby_on else ""
+        )
         st.markdown(
-            f'<span class="status-badge {badge_cls}">{badge_label}</span>',
+            f'<span class="status-badge {badge_cls}">{badge_lbl}</span>{derby_badge}',
             unsafe_allow_html=True,
         )
         st.caption(
@@ -362,6 +380,19 @@ with tab1:
         f"{TAG_ICON.get(top_horse['bet_tag'], top_horse['bet_tag'])}"
     )
     st.divider()
+
+    # ── Derby override banner ──────────────────────────────────────────────
+    if meta and meta.get("derby_override_active"):
+        st.markdown(
+            '<div style="background:#1a2535;border-left:3px solid #c9a227;'
+            'padding:8px 12px;border-radius:0 6px 6px 0;font-size:.85rem;'
+            'color:#c9a227;margin-bottom:8px;">'
+            '🏇 <strong>Derby Override Active</strong> — weights shifted: '
+            'distance/surface +5pp · race shape +3pp · market prior −3pp · '
+            'confidence tightened (route starts ≥ 3, or ≥ 2 + pedigree ≥ 0.75)'
+            '</div>',
+            unsafe_allow_html=True,
+        )
 
     # ── Board thresholds reminder ──────────────────────────────────────────
     st.markdown(
@@ -599,7 +630,7 @@ with tab2:
                 imp  = importances.get(col, 0.0)
                 feat_rows.append({
                     "feature":    col,
-                    "value":      round(float(val), 4) if val is not None else None,
+                    "value":      _safe_num(val),
                     "tier":       tier,
                     "in_model":   imp > 0,
                     "importance": imp,
@@ -648,16 +679,59 @@ with tab2:
     else:
         st.info("Run build_features.py to populate the feature store.")
 
+    # ── Derby sub-components ───────────────────────────────────────────────
+    if meta and meta.get("derby_override_active") and not feat_df.empty:
+        h_feats_derby = feat_df[feat_df["horse_name"] == horse["horse_name"]]
+        if not h_feats_derby.empty:
+            dr = h_feats_derby.iloc[0]
+            derby_cols = [
+                ("classic_distance_projection", "Classic Distance Proj.",
+                 "stamina_index + dist_win_pct; key Derby stamina ask"),
+                ("pedigree_route_proxy",         "Pedigree Route Aptitude",
+                 "sire-line route score; 0.90=Tapit/Curlin, 0.72=default"),
+                ("traffic_resilience_proxy",     "Traffic Resilience",
+                 "pace style + field-size experience; elevated weight in Derby"),
+                ("gate_reliability",             "Gate Reliability",
+                 "gate_class normalized; high = clean break expected"),
+                ("derby_override_score",         "Derby Override Composite",
+                 "weighted avg of the four sub-components above"),
+                ("public_underlay_penalty",      "Public Underlay Penalty",
+                 "z-score of publicness; >0.5 = horse is overhyped vs. ability"),
+                ("jan_apr_improvement_curve",    "Jan–Apr Improvement Curve",
+                 "PLACEHOLDER — needs sequential speed figs from horse_starts"),
+                ("churchill_readiness",          "Churchill Readiness",
+                 "PLACEHOLDER — needs Churchill Downs historical form"),
+            ]
+            derby_rows = []
+            for feat_col, label, note in derby_cols:
+                raw = dr.get(feat_col)
+                val = _safe_num(raw)
+                null_reason = "PLACEHOLDER — no historical data" if val is None else ""
+                derby_rows.append({
+                    "Sub-Component": label,
+                    "Value":         val,
+                    "Note":          note,
+                    "Status":        "❌ NULL" if val is None else "✅",
+                })
+            with st.expander("🏇 Derby Override Sub-Components", expanded=True):
+                st.caption(
+                    "Weight shifts vs base dirt_route: distance/surface +5pp · "
+                    "race shape +3pp · derby_override +2pp · market prior −3pp"
+                )
+                derby_df = pd.DataFrame(derby_rows)
+                st.dataframe(derby_df, use_container_width=True, hide_index=True,
+                             column_config={
+                                 "Value": st.column_config.NumberColumn(format="%.4f"),
+                             })
+
     # Missing data flags
     if horse["missing_data_flag"] == 1:
         conf_lbl = _conf_label(horse["confidence_flag"])
-        flags_str = (
-            "dist_fit_single_start, no_race_splits, no_workout_detail, "
-            "no_connections_stats, no_track_form, no_post_bias"
-            if conf_lbl == "low" else
-            "no_race_splits, no_workout_detail, no_connections_stats, "
-            "no_track_form, no_post_bias"
-        )
+        is_derby_run = bool(meta.get("derby_override_active", 0)) if meta else False
+        base_flags = "no_race_splits, no_workout_detail, no_connections_stats, no_track_form, no_post_bias"
+        derby_flags = ", no_jan_apr_curve, no_churchill_readiness" if is_derby_run else ""
+        single_start = ", dist_fit_single_start" if conf_lbl == "low" else ""
+        flags_str = base_flags + derby_flags + single_start
         st.markdown(
             f'<div class="warn-banner">⚠ Missing data flags: {flags_str}</div>',
             unsafe_allow_html=True,
@@ -765,6 +839,32 @@ with tab3:
                 )
 
     st.divider()
+
+    # ── Derby override weight comparison ───────────────────────────────────
+    if meta and meta.get("derby_override_active") and artifact is not None:
+        st.subheader("🏇 Derby Override — Weight Shifts vs Base dirt_route")
+        st.caption(
+            "Confidence tightened: medium requires dist_starts ≥ 3, "
+            "or dist_starts = 2 with pedigree_route_proxy ≥ 0.75"
+        )
+        from src.models.trainer import TRAIN_CONFIGS
+        base_groups  = TRAIN_CONFIGS["dirt_route"]["feature_groups"]
+        derby_groups = artifact.config.get("feature_groups", {})
+        wt_rows = []
+        for gname in base_groups:
+            bw = base_groups[gname]["group_weight"]
+            dw = derby_groups.get(gname, {}).get("group_weight", bw)
+            delta = dw - bw
+            wt_rows.append({
+                "Group":      gname,
+                "Base":       f"{bw:.0%}",
+                "Derby":      f"{dw:.0%}",
+                "Δ":          f"{delta:+.0%}" if delta != 0 else "—",
+            })
+        st.dataframe(
+            pd.DataFrame(wt_rows), use_container_width=True, hide_index=True
+        )
+        st.divider()
 
     # ── Feature tier summary ───────────────────────────────────────────────
     st.subheader("Feature Tier Summary")

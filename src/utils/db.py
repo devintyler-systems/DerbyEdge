@@ -22,7 +22,22 @@ def init_db() -> None:
     conn.executescript(SCHEMA_PATH.read_text(encoding="utf-8"))
     conn.commit()
     conn.close()
+    _migrate_db()
     print(f"[init_db] V1 schema applied at {DB_PATH}")
+
+
+def _migrate_db() -> None:
+    """Apply additive column migrations that CREATE TABLE IF NOT EXISTS cannot cover."""
+    conn = sqlite3.connect(DB_PATH)
+    cols = {row[1] for row in conn.execute("PRAGMA table_info(score_runs)").fetchall()}
+    if "derby_override_active" not in cols:
+        conn.execute(
+            "ALTER TABLE score_runs ADD COLUMN "
+            "derby_override_active INTEGER NOT NULL DEFAULT 0"
+        )
+        conn.commit()
+        print("[migrate_db] Added score_runs.derby_override_active")
+    conn.close()
 
 
 def get_derby_card_id(stakes_name: str = "Kentucky Derby") -> int | None:
