@@ -1,6 +1,6 @@
 # DerbyEdge ETL Validation Report
 
-**Generated**: 2026-04-29 08:32 UTC  
+**Generated**: 2026-04-29 08:42 UTC  
 **Source**   : `C:\Projects\derbyedge-engine\data\seeds\derby_2026_field.csv`  
 **Race**     : 2026 Kentucky Derby (G1) — Churchill Downs, 2026-05-02  
 
