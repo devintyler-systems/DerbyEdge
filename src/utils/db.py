@@ -29,14 +29,25 @@ def init_db() -> None:
 def _migrate_db() -> None:
     """Apply additive column migrations that CREATE TABLE IF NOT EXISTS cannot cover."""
     conn = sqlite3.connect(DB_PATH)
-    cols = {row[1] for row in conn.execute("PRAGMA table_info(score_runs)").fetchall()}
-    if "derby_override_active" not in cols:
+
+    cols_sr = {row[1] for row in conn.execute("PRAGMA table_info(score_runs)").fetchall()}
+    if "derby_override_active" not in cols_sr:
         conn.execute(
             "ALTER TABLE score_runs ADD COLUMN "
             "derby_override_active INTEGER NOT NULL DEFAULT 0"
         )
         conn.commit()
         print("[migrate_db] Added score_runs.derby_override_active")
+
+    cols_es = {row[1] for row in conn.execute("PRAGMA table_info(entry_scores)").fetchall()}
+    if "low_conf_bet_block" not in cols_es:
+        conn.execute(
+            "ALTER TABLE entry_scores ADD COLUMN "
+            "low_conf_bet_block INTEGER NOT NULL DEFAULT 0"
+        )
+        conn.commit()
+        print("[migrate_db] Added entry_scores.low_conf_bet_block")
+
     conn.close()
 
 

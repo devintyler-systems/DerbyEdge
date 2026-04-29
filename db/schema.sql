@@ -309,6 +309,7 @@ CREATE TABLE IF NOT EXISTS entry_scores (
                         CHECK(bet_tag IN ('bet','neutral','underlay','no_data') OR bet_tag IS NULL),
     confidence_flag     INTEGER NOT NULL DEFAULT 0 CHECK(confidence_flag IN (0,1)),
     missing_data_flag   INTEGER NOT NULL DEFAULT 0 CHECK(missing_data_flag IN (0,1)),
+    low_conf_bet_block  INTEGER NOT NULL DEFAULT 0 CHECK(low_conf_bet_block IN (0,1)),
     rank                INTEGER,
     trainer_name        TEXT,
     jockey_name         TEXT,

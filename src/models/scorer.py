@@ -280,7 +280,7 @@ def _write_board(
         "morning_line_odds",
         "model_win_prob_pct", "fair_odds",
         "pace_fit_score", "form_score", "surface_dist_fit",
-        "value_score", "bet_tag",
+        "value_score", "bet_tag", "low_conf_bet_block",
         "model_confidence", "missing_data_flags",
     ]
     board[csv_cols].to_csv(OUTPUT_DIR / "derby_2026_board.csv", index=False)
@@ -294,8 +294,12 @@ def _write_board(
     bet_str    = ", ".join(bet_horses) if bet_horses else "none"
     ul_str     = ", ".join(ul_horses)  if ul_horses  else "none"
 
-    tag_icons = {"bet": "**BET**", "underlay": "~~UL~~", "neutral": "--"}
+    tag_icons  = {"bet": "**BET**", "underlay": "~~UL~~", "neutral": "--"}
     conf_icons = {"high": "HIGH", "medium": "MED", "low": "LOW!"}
+    blocked_n  = int(board.get("low_conf_bet_block", pd.Series(dtype=int)).sum()) \
+                 if "low_conf_bet_block" in board.columns else 0
+    blocked_horses = board[board.get("low_conf_bet_block", pd.Series(dtype=int)) == 1]["horse_name"].tolist() \
+                     if "low_conf_bet_block" in board.columns else []
 
     lines = [
         "# DerbyEdge Engine — 2026 Kentucky Derby Board",
@@ -312,6 +316,7 @@ def _write_board(
         f"| Total horses | {len(board)} |",
         f"| Bet-tagged | {metrics['bet_count']} ({bet_str}) |",
         f"| Underlay-tagged | {metrics['underlay_count']} ({ul_str}) |",
+        f"| Low-conf BET blocked | {blocked_n} ({', '.join(blocked_horses) if blocked_horses else 'none'}) |",
         f"| Top win probability | {top_row['horse_name']} {top_row['model_win_prob_pct']:.1f}% "
         f"(fair {top_row['fair_odds']:.1f}-1) |",
         f"| Top value score | {top_value['horse_name']} "
@@ -335,7 +340,7 @@ def _write_board(
     for _, r in board.iterrows():
         edge_str = f"+{r['value_score']:.3f}" if r['value_score'] > 0 else f"{r['value_score']:.3f}"
         conf_str = conf_icons.get(r['model_confidence'], r['model_confidence'])
-        tag_str  = tag_icons.get(r['bet_tag'], r['bet_tag'])
+        tag_str  = "--[B]" if r.get("low_conf_bet_block", 0) else tag_icons.get(r['bet_tag'], r['bet_tag'])
         lines.append(
             f"| {int(r['rank'])} | **{r['horse_name']}** | {int(r['post_position'])} "
             f"| {r['trainer']} | {r['jockey']} "
@@ -420,6 +425,14 @@ def _write_board(
         "> Churchill Downs track form, post-position win bias, trip trouble flags.",
         ">",
         "> **Do not wager without manual audit of speed figures, trip notes, and trainer intent.**",
+        "",
+        "### Low-Confidence BET Guardrail",
+        "",
+        "> Low-confidence entries (`conf == LOW`) with a raw edge ≥ +0.025 are **NOT** auto-tagged BET.",
+        "> Their apparent edge comes from the odds-floor vs market probability gap, not from model signal.",
+        "> These entries are downgraded to `neutral` and flagged with `low_conf_bet_block = 1`.",
+        "> Tag column shows `--[B]` for blocked entries.",
+        "> To elevate after manual review, override the bet_tag in the database directly.",
     ]
 
     (OUTPUT_DIR / "derby_2026_board.md").write_text("\n".join(lines), encoding="utf-8")
@@ -653,9 +666,31 @@ def score_race(card_id: Optional[int] = None) -> pd.DataFrame:
     conf_df = _compute_confidence_and_flags(feat_df, entries_df, model_feats,
                                              derby_override=derby_active)
 
+    # ── Low-confidence BET guardrail ──────────────────────────────────────
+    # LOW-conf entries owe their raw BET edge purely to the odds-floor vs the
+    # market probability gap, not to real model signal.  Force them to neutral
+    # and record the block so operators can manually elevate after review.
+    _conf_by_eid = {
+        int(r["entry_id"]): r["model_confidence"]
+        for _, r in conf_df.iterrows()
+    }
+    final_bet_tags     = []
+    low_conf_bet_block = []
+    for i, (_, erow) in enumerate(entries_df.iterrows()):
+        raw_tag = bet_tags[i]
+        conf    = _conf_by_eid.get(int(erow["entry_id"]), "low")
+        if conf == "low" and raw_tag == "bet":
+            final_bet_tags.append("neutral")
+            low_conf_bet_block.append(1)
+        else:
+            final_bet_tags.append(raw_tag)
+            low_conf_bet_block.append(0)
+
     # ── Metrics ───────────────────────────────────────────────────────────
     metrics = _compute_metrics(win_probs, market_probs, artifact)
-    metrics["score_ts"] = score_ts
+    metrics["score_ts"]          = score_ts
+    metrics["bet_count"]         = sum(1 for t in final_bet_tags if t == "bet")
+    metrics["blocked_bet_count"] = sum(low_conf_bet_block)
 
     # ── Save artifact + register model ────────────────────────────────────
     artifact_path = save_artifact(artifact)
@@ -688,9 +723,9 @@ def score_race(card_id: Optional[int] = None) -> pd.DataFrame:
                 morning_line_odds, win_probability, place_probability, show_probability,
                 pace_fit_score, form_score, surface_dist_fit, value_score,
                 market_implied_prob, bet_tag,
-                confidence_flag, missing_data_flag, rank,
+                confidence_flag, missing_data_flag, low_conf_bet_block, rank,
                 trainer_name, jockey_name
-            ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+            ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
             """,
             (
                 run_id, eid, erow["horse_name"], int(erow["post_position"]),
@@ -703,9 +738,10 @@ def score_race(card_id: Optional[int] = None) -> pd.DataFrame:
                 round(float(surf_dist_arr[i]), 4),
                 round(float(model_edge[i]),   4),
                 round(float(market_probs[i]), 6),
-                bet_tags[i],
+                final_bet_tags[i],
                 conf_flag,
                 1,   # missing_data_flag=1 for all entries (PLACEHOLDERs are absent)
+                int(low_conf_bet_block[i]),
                 int(rank_arr[i]),
                 erow.get("trainer", ""),
                 erow.get("jockey", ""),
@@ -727,7 +763,8 @@ def score_race(card_id: Optional[int] = None) -> pd.DataFrame:
     board["fair_odds"]          = fair_odds
     board["market_prob"]        = market_probs
     board["value_score"]        = model_edge
-    board["bet_tag"]            = bet_tags
+    board["bet_tag"]            = final_bet_tags
+    board["low_conf_bet_block"] = low_conf_bet_block
     board["form_score"]         = np.round(form_arr,      4)
     board["surface_dist_fit"]   = np.round(surf_dist_arr, 4)
     board["pace_fit_score"]     = feat_df["pace_fit_score"].values
@@ -745,9 +782,10 @@ def score_race(card_id: Optional[int] = None) -> pd.DataFrame:
     _write_eval_report(metrics, artifact, board, model_id)
 
     low_conf_n = int((board["model_confidence"] == "low").sum())
+    blocked_n = metrics.get("blocked_bet_count", 0)
     print(f"  [scorer]   run_id={run_id}  sum_win_prob={metrics['sum_win_prob']:.6f}  "
-          f"bets={metrics['bet_count']}  underlays={metrics['underlay_count']}  "
-          f"low_conf={low_conf_n}")
+          f"bets={metrics['bet_count']}  blocked={blocked_n}  "
+          f"underlays={metrics['underlay_count']}  low_conf={low_conf_n}")
 
     return board
 

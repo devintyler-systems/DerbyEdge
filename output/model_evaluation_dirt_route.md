@@ -1,6 +1,6 @@
 # DerbyEdge Model Evaluation — dirt_route
 
-**Generated** : 2026-04-29T08:32:24Z  
+**Generated** : 2026-04-29T08:42:27Z  
 **Model name** : `derby_override_v1` (ID=1)  
 **Version**    : `1.0.0-seed-only`  
 **Model type** : seed_only_baseline  
@@ -28,7 +28,7 @@
 | `mean_edge_abs` | 0.0217 | Mean abs model-market divergence |
 | `max_positive_edge` | 0.0276 | Best value candidate |
 | `max_negative_edge` | -0.0544 | Worst underlay |
-| `bet_count` | 2 | Horses with edge >= +0.025 |
+| `bet_count` | 0 | Horses with edge >= +0.025 |
 | `underlay_count` | 5 | Horses with edge < -0.015 |
 
 ## Post-Race Metrics (N/A — Race Not Run)
@@ -87,8 +87,8 @@
 
 | Horse | ML Odds | Win% | Edge | Tag |
 |-------|---------|------|------|-----|
-| Intrepido | 50-1 | 4.3% | +0.028 | bet |
-| Six Speed | 50-1 | 4.3% | +0.028 | bet |
+| Intrepido | 50-1 | 4.3% | +0.028 | neutral |
+| Six Speed | 50-1 | 4.3% | +0.028 | neutral |
 | Further Ado | 6-1 | 13.2% | +0.021 | neutral |
 
 ## Limitations

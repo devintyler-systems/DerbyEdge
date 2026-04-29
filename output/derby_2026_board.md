@@ -6,14 +6,15 @@
 |-------|-------|
 | Model type | `seed_only_baseline` |
 | Version | `1.0.0-seed-only` |
-| Score timestamp | 2026-04-29T08:32:24Z |
+| Score timestamp | 2026-04-29T08:42:27Z |
 | Model ID | 1 |
 | Race | 2026 Kentucky Derby (G1) · Churchill Downs · 2026-05-02 |
 | Total horses | 20 |
-| Bet-tagged | 2 (Intrepido, Six Speed) |
+| Bet-tagged | 0 (none) |
 | Underlay-tagged | 5 (Renegade, Commandment, Chief Wallabee, The Puma, Emerging Market) |
+| Low-conf BET blocked | 2 (Intrepido, Six Speed) |
 | Top win probability | Renegade 13.4% (fair 6.4-1) |
-| Top value score | Intrepido +0.028 (bet) |
+| Top value score | Intrepido +0.028 (neutral) |
 | Kendall tau vs market | 0.4908 |
 | Mean abs edge | 0.0217 |
 | Low-confidence entries | 16 of 20 (dist_starts <= 1; distance_fit unreliable) |
@@ -41,8 +42,8 @@
 | 13 | **Wonder Dean** | 10 | Daisuke Takayanagi | Ryusei Sakai | 30-1 | 4.3% | 22.2-1 | 0.650 | 0.526 | 0.491 | +0.018 | -- | LOW! |
 | 14 | **Pavlovian** | 16 | Doug O'Neill | Edward Maldonado | 30-1 | 4.3% | 22.2-1 | 0.650 | 0.526 | 0.491 | +0.018 | -- | LOW! |
 | 15 | **Golden Tempo** | 19 | Cherie deVaux | Jose Ortiz | 30-1 | 4.3% | 22.2-1 | 0.650 | 0.526 | 0.491 | +0.018 | -- | LOW! |
-| 16 | **Intrepido** | 3 | Jeff Mullins | Hector Berrios | 50-1 | 4.3% | 22.3-1 | 0.650 | 0.526 | 0.491 | +0.028 | **BET** | LOW! |
-| 17 | **Six Speed** | 17 | Bhupat Seemar | Brian Hernandez Jr. | 50-1 | 4.3% | 22.3-1 | 0.650 | 0.526 | 0.491 | +0.028 | **BET** | LOW! |
+| 16 | **Intrepido** | 3 | Jeff Mullins | Hector Berrios | 50-1 | 4.3% | 22.3-1 | 0.650 | 0.526 | 0.491 | +0.028 | --[B] | LOW! |
+| 17 | **Six Speed** | 17 | Bhupat Seemar | Brian Hernandez Jr. | 50-1 | 4.3% | 22.3-1 | 0.650 | 0.526 | 0.491 | +0.028 | --[B] | LOW! |
 | 18 | **Chief Wallabee** | 12 | Bill Mott | Junior Alvarado | 8-1 | 3.2% | 30.1-1 | 0.900 | 0.299 | 0.226 | -0.054 | ~~UL~~ | LOW! |
 | 19 | **The Puma** | 9 | Gustavo Delgado | Javier Castellano | 10-1 | 2.1% | 46.6-1 | 0.750 | 0.290 | 0.136 | -0.050 | ~~UL~~ | LOW! |
 | 20 | **Emerging Market** | 15 | Chad Brown | Flavien Prat | 15-1 | 0.7% | 148.0-1 | 0.600 | 0.278 | 0.000 | -0.042 | ~~UL~~ | MED |
@@ -111,3 +112,11 @@ These horses have `dist_starts <= 1`; their distance_fit score is based on `stam
 > Churchill Downs track form, post-position win bias, trip trouble flags.
 >
 > **Do not wager without manual audit of speed figures, trip notes, and trainer intent.**
+
+### Low-Confidence BET Guardrail
+
+> Low-confidence entries (`conf == LOW`) with a raw edge ≥ +0.025 are **NOT** auto-tagged BET.
+> Their apparent edge comes from the odds-floor vs market probability gap, not from model signal.
+> These entries are downgraded to `neutral` and flagged with `low_conf_bet_block = 1`.
+> Tag column shows `--[B]` for blocked entries.
+> To elevate after manual review, override the bet_tag in the database directly.
