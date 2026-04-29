@@ -1,6 +1,6 @@
 # DerbyEdge Model Evaluation — dirt_route
 
-**Generated** : 2026-04-29T02:00:31Z  
+**Generated** : 2026-04-29T08:32:24Z  
 **Model name** : `derby_override_v1` (ID=1)  
 **Version**    : `1.0.0-seed-only`  
 **Model type** : seed_only_baseline  
@@ -12,7 +12,7 @@
 | Criterion | Status |
 |-----------|--------|
 | Training rows | 0 (need >= 50 for XGBoost) |
-| Calibration | temperature-scaled softmax (T=2.81) |
+| Calibration | temperature-scaled softmax (T=4.15) |
 | Calibration target | overround-adjusted morning line |
 | Bet threshold | edge >= +0.025 |
 | Underlay threshold | edge < -0.015 |
@@ -23,13 +23,13 @@
 | Metric | Value | Interpretation |
 |--------|-------|----------------|
 | `sum_win_prob` | 1.000000 | Should be 1.000000 |
-| `kendall_tau_vs_ml` | 0.8405 | Rank correlation with market |
-| `kl_div_vs_ml` | 0.0186 | KL(model \|\| market) |
-| `mean_edge_abs` | 0.0080 | Mean abs model-market divergence |
-| `max_positive_edge` | 0.0182 | Best value candidate |
-| `max_negative_edge` | -0.0344 | Worst underlay |
-| `bet_count` | 0 | Horses with edge >= +0.025 |
-| `underlay_count` | 2 | Horses with edge < -0.015 |
+| `kendall_tau_vs_ml` | 0.4908 | Rank correlation with market |
+| `kl_div_vs_ml` | 0.1573 | KL(model \|\| market) |
+| `mean_edge_abs` | 0.0217 | Mean abs model-market divergence |
+| `max_positive_edge` | 0.0276 | Best value candidate |
+| `max_negative_edge` | -0.0544 | Worst underlay |
+| `bet_count` | 2 | Horses with edge >= +0.025 |
+| `underlay_count` | 5 | Horses with edge < -0.015 |
 
 ## Post-Race Metrics (N/A — Race Not Run)
 
@@ -77,19 +77,19 @@
 
 | Rank | Horse | Win% | Fair Odds | Edge | Tag |
 |------|-------|------|-----------|------|-----|
-| 1 | Commandment | 11.9% | 7.4-1 | +0.016 | neutral |
-| 2 | Further Ado | 11.2% | 7.9-1 | +0.010 | neutral |
-| 3 | Renegade | 10.9% | 8.1-1 | -0.034 | underlay |
-| 4 | Valiant Knight | 8.5% | 10.7-1 | +0.005 | neutral |
-| 5 | The Puma | 6.7% | 14.0-1 | +0.001 | neutral |
+| 1 | Renegade | 13.4% | 6.4-1 | -0.021 | underlay |
+| 2 | Further Ado | 13.2% | 6.5-1 | +0.021 | neutral |
+| 3 | Commandment | 6.7% | 13.9-1 | -0.044 | underlay |
+| 4 | So Happy | 4.4% | 21.9-1 | -0.005 | neutral |
+| 5 | Danon Bourbon | 4.3% | 22.0-1 | +0.006 | neutral |
 
 ## Top 3 by Value Score
 
 | Horse | ML Odds | Win% | Edge | Tag |
 |-------|---------|------|------|-----|
-| Silver Bullet | 25-1 | 4.6% | +0.018 | neutral |
-| Commandment | 6-1 | 11.9% | +0.016 | neutral |
-| Further Ado | 6-1 | 11.2% | +0.010 | neutral |
+| Intrepido | 50-1 | 4.3% | +0.028 | bet |
+| Six Speed | 50-1 | 4.3% | +0.028 | bet |
+| Further Ado | 6-1 | 13.2% | +0.021 | neutral |
 
 ## Limitations
 

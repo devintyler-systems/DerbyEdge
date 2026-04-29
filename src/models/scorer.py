@@ -189,8 +189,10 @@ def _compute_confidence_and_flags(
             fr.get(c) is None or (isinstance(fr.get(c), float) and np.isnan(fr.get(c)))
             for c in check_cols
         )
-        dist_starts   = int(erow.get("dist_starts") or 0)
-        career_starts = int(erow.get("career_starts") or 0)
+        def _int_or_zero(v):
+            return 0 if (v is None or (isinstance(v, float) and np.isnan(v))) else int(v)
+        dist_starts   = _int_or_zero(erow.get("dist_starts"))
+        career_starts = _int_or_zero(erow.get("career_starts"))
         ped_proxy     = fr.get("pedigree_route_proxy")
         if ped_proxy is not None:
             try:
@@ -367,7 +369,7 @@ def _write_board(
             ).replace(",".join(CRITICAL_MISSING), "")
             lines.append(
                 f"| {r['horse_name']} | {int(r['post_position'])} "
-                f"| {int(r.get('dist_starts_raw', 1))} "
+                f"| {int(r.get('dist_starts_raw') or 0) if not (isinstance(r.get('dist_starts_raw'), float) and np.isnan(r.get('dist_starts_raw') or 0)) else 0} "
                 f"| dist_fit_single_start |"
             )
 
@@ -636,7 +638,7 @@ def score_race(card_id: Optional[int] = None) -> pd.DataFrame:
     bet_thr  = config["bet_edge_threshold"]
     ul_thr   = config["underlay_edge_threshold"]
     bet_tags = [_bet_tag(e, bet_thr, ul_thr) for e in model_edge]
-    rank_arr = pd.Series(win_probs).rank(ascending=False, method="min").astype(int).values
+    rank_arr = pd.Series(win_probs).rank(ascending=False, method="first").astype(int).values
 
     # ── Group scores for board columns ─────────────────────────────────────
     group_scores     = compute_group_scores(feat_df, config)

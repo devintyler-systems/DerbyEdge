@@ -1,6 +1,6 @@
 # DerbyEdge ETL Validation Report
 
-**Generated**: 2026-04-29 02:00 UTC  
+**Generated**: 2026-04-29 08:32 UTC  
 **Source**   : `C:\Projects\derbyedge-engine\data\seeds\derby_2026_field.csv`  
 **Race**     : 2026 Kentucky Derby (G1) — Churchill Downs, 2026-05-02  
 
@@ -9,14 +9,14 @@
 | Field | Count |
 |-------|-------|
 | Source rows | 20 |
-| Horses (new) | 20 |
-| Horses (pre-existing) | 0 |
-| Entries (new) | 20 |
-| Entries (pre-existing) | 0 |
-| Odds snapshots | 20 |
-| Trainers (new) | 15 |
-| Jockeys (new) | 20 |
-| Owners (new) | 18 |
+| Horses (new) | 0 |
+| Horses (pre-existing) | 20 |
+| Entries (new) | 0 |
+| Entries (pre-existing) | 20 |
+| Odds snapshots | 0 |
+| Trainers (new) | 0 |
+| Jockeys (new) | 0 |
+| Owners (new) | 0 |
 
 ## Validation Status
 
@@ -45,7 +45,7 @@
 | ✓ **PASS** | All entries have trainer_id |  |
 | ✓ **PASS** | All entries have jockey_id |  |
 | ✓ **PASS** | Post positions 1-20 complete, no gaps |  |
-| ✓ **PASS** | Morning line overround in expected range (1.00-1.35) | Sum of implied probs = 1.3908 |
+| ✓ **PASS** | Morning line overround in expected range (1.00-1.35) | Sum of implied probs = 1.2836 |
 | ✓ **PASS** | Odds snapshots loaded (morning line) | 20 snapshots for 20 entries |
 | i **INFO** | horse_starts populated | 0 rows — historical result data required for v_horse_last_5 and v_connections_180 |
 | i **INFO** | workouts (real, synthetic=0) populated | 0 real rows, 0 synthetic rows — real workout records required for v_workout_30; aggregate counts are in entries.workouts_30 |
@@ -81,3 +81,27 @@ They will be filled when real historical data is imported.
 | `workouts_30` (aggregate count) | Derby seed CSV | `entries` |
 | `stamina_index`, `gate_class`, `pace_style` | Derby seed CSV | `entries` |
 | Morning line odds snapshot | Derived from `morning_line_odds` | `odds_snapshots` |
+
+### Partial null columns in source
+
+- career_starts: 70% null in source
+- career_wins: 70% null in source
+- career_places: 70% null in source
+- career_shows: 70% null in source
+- career_earnings: 70% null in source
+- last_race_days_ago: 70% null in source
+- last_race_finish: 70% null in source
+- last_race_speed_figure: 70% null in source
+- best_speed_figure: 70% null in source
+- avg_speed_figure: 70% null in source
+- beyer_speed_figure: 70% null in source
+- dirt_starts: 70% null in source
+- dirt_wins: 70% null in source
+- dist_starts: 70% null in source
+- dist_wins: 70% null in source
+- wet_starts: 70% null in source
+- wet_wins: 70% null in source
+- workouts_past_30: 70% null in source
+- gate_class: 70% null in source
+- stamina_index: 70% null in source
+- pace_style: 70% null in source
