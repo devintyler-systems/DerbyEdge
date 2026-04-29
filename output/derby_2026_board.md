@@ -6,8 +6,8 @@
 |-------|-------|
 | Model type | `seed_only_baseline` |
 | Version | `1.0.0-seed-only` |
-| Score timestamp | 2026-04-29T01:26:46Z |
-| Model ID | 3 |
+| Score timestamp | 2026-04-29T02:00:31Z |
+| Model ID | 1 |
 | Race | 2026 Kentucky Derby (G1) · Churchill Downs · 2026-05-02 |
 | Total horses | 20 |
 | Bet-tagged | 0 (none) |

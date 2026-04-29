@@ -1,6 +1,6 @@
 # DerbyEdge ETL Validation Report
 
-**Generated**: 2026-04-28 23:56 UTC  
+**Generated**: 2026-04-29 02:00 UTC  
 **Source**   : `C:\Projects\derbyedge-engine\data\seeds\derby_2026_field.csv`  
 **Race**     : 2026 Kentucky Derby (G1) — Churchill Downs, 2026-05-02  
 
@@ -9,14 +9,14 @@
 | Field | Count |
 |-------|-------|
 | Source rows | 20 |
-| Horses (new) | 0 |
-| Horses (pre-existing) | 20 |
-| Entries (new) | 0 |
-| Entries (pre-existing) | 20 |
-| Odds snapshots | 0 |
-| Trainers (new) | 0 |
-| Jockeys (new) | 0 |
-| Owners (new) | 0 |
+| Horses (new) | 20 |
+| Horses (pre-existing) | 0 |
+| Entries (new) | 20 |
+| Entries (pre-existing) | 0 |
+| Odds snapshots | 20 |
+| Trainers (new) | 15 |
+| Jockeys (new) | 20 |
+| Owners (new) | 18 |
 
 ## Validation Status
 

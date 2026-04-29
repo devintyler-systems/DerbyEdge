@@ -1,7 +1,7 @@
 # DerbyEdge Model Evaluation — dirt_route
 
-**Generated** : 2026-04-29T01:26:46Z  
-**Model name** : `derby_override_v1` (ID=3)  
+**Generated** : 2026-04-29T02:00:31Z  
+**Model name** : `derby_override_v1` (ID=1)  
 **Version**    : `1.0.0-seed-only`  
 **Model type** : seed_only_baseline  
 
