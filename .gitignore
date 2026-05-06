@@ -58,3 +58,20 @@ htmlcov/
 Thumbs.db
 .vscode/
 .idea/
+
+# Local Claude / AI artifacts
+.claude/
+
+# Local racing data / downloads
+2023 Racing Results/
+Sportsbook_Screenshots/
+data/processed/
+data/raw/
+samples/
+
+# Local docs / binaries
+*.xlsx
+*.pdf
+
+# Stray malformed files from bad path pastes
+C*
