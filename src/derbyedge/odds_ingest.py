@@ -132,6 +132,38 @@ def adapter_manual_csv(csv_path: str | Path,
 
 
 # ---------------------------------------------------------------------------
+# Record filter — call between adapter_manual_csv and write_snapshots
+
+def filter_records(
+    records: list[OddsRecord],
+    valid_books: set[str] | None = None,
+) -> tuple[list[OddsRecord], list[OddsRecord], list[OddsRecord]]:
+    """Partition records into (kept, bad_book, null_odds).
+
+    Rules:
+      unknown book_id   → skip: phantom book in devig_proportional group corrupts
+                          market_prob for all runners in that race/book.
+      null decimal_odds → skip: one null makes devig_proportional return all-NaN
+                          for the whole (race_id, book_id) group.
+      null entry_id     → keep: falls off the entries-spine merge in
+                          build_odds_features; safe to store, may resolve later.
+
+    If valid_books is None the book_id check is skipped entirely.
+    """
+    kept:      list[OddsRecord] = []
+    bad_book:  list[OddsRecord] = []
+    null_odds: list[OddsRecord] = []
+    for r in records:
+        if valid_books is not None and r.book_id not in valid_books:
+            bad_book.append(r)
+        elif r.decimal_odds is None:
+            null_odds.append(r)
+        else:
+            kept.append(r)
+    return kept, bad_book, null_odds
+
+
+# ---------------------------------------------------------------------------
 # HTTP adapter scaffolding — DOES NOT FETCH IN CLOUD ENVIRONMENT.
 # Endpoints are stable enough to document but require a real session.
 
@@ -225,7 +257,20 @@ def main(argv: list[str] | None = None) -> int:
     conn = sqlite3.connect(db_path)
     try:
         recs = adapter_manual_csv(csv_path, conn=conn)
-        n = write_snapshots(conn, recs)
+        try:
+            cur = conn.execute("SELECT book_id FROM markets")
+            valid_books: set[str] | None = {row[0] for row in cur.fetchall()}
+        except Exception:
+            valid_books = None
+        kept, bad_book, null_odds = filter_records(recs, valid_books)
+        if bad_book:
+            print(
+                f"Skipped {len(bad_book)} rows — unknown book_id(s): "
+                f"{', '.join(sorted({r.book_id for r in bad_book}))}"
+            )
+        if null_odds:
+            print(f"Skipped {len(null_odds)} rows — no readable odds value")
+        n = write_snapshots(conn, kept)
         print(f"Wrote {n} snapshot rows from {csv_path}")
     finally:
         conn.close()

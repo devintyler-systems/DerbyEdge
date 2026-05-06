@@ -36,7 +36,7 @@ from derbyedge.scoring import score_entries
 from derbyedge.edge_calc import build_edge_table
 from derbyedge.chaos_patch import apply_derby_chaos_patch
 from derbyedge.odds_math import kelly_fraction
-from derbyedge.odds_ingest import adapter_manual_csv, write_snapshots
+from derbyedge.odds_ingest import adapter_manual_csv, write_snapshots, filter_records
 from derbyedge.odds_features import build_odds_features, write_odds_features
 from derbyedge.evaluation import calibration_table
 from derbyedge.screenshot_ingest import ingest_screenshot
@@ -222,23 +222,81 @@ if uploaded is not None:
         target.write_bytes(uploaded.getvalue())
         conn = get_conn()
         recs = adapter_manual_csv(target, conn=conn)
-        n_unresolved = sum(1 for r in recs if r.entry_id is None)
-        n_snap = write_snapshots(conn, recs)
-        feats = build_odds_features(conn)
+
+        n_total = len(recs)
+
+        try:
+            _vb = pd.read_sql_query("SELECT book_id FROM markets", conn)
+            valid_books: set | None = set(_vb["book_id"].tolist())
+        except Exception:
+            valid_books = None  # skip book validation; don't reject everything
+
+        kept, bad_book, null_odds_recs = filter_records(recs, valid_books)
+
+        n_written    = len(kept)
+        n_unresolved = sum(1 for r in kept if r.entry_id is None)
+        n_bad_book   = len(bad_book)
+        n_null_odds  = len(null_odds_recs)
+
+        n_snap = write_snapshots(conn, kept)
+        feats  = build_odds_features(conn)
         n_feat = write_odds_features(conn, feats)
         st.session_state["odds_cache_buster"] += 1
         score_race.clear()
+
+        summary = (
+            f"{n_total} rows in file — "
+            f"{n_written} written ({n_unresolved} unmatched to DB entries), "
+            f"{n_bad_book} skipped (unknown book_id), "
+            f"{n_null_odds} skipped (no readable odds). "
+            f"{n_feat} feature rows updated."
+        )
+
+        issues = []
+        if bad_book:
+            blank_book = [r for r in bad_book if not r.book_id]
+            wrong_book = [r for r in bad_book if r.book_id]
+            valid_str = (
+                ", ".join(sorted(valid_books))
+                if valid_books is not None
+                else "unknown (markets table unavailable)"
+            )
+            if blank_book:
+                issues.append(
+                    f"{len(blank_book)} row(s) had a missing book_id and were not written "
+                    f"(valid values: {valid_str})."
+                )
+            if wrong_book:
+                wrong_ids = sorted({r.book_id for r in wrong_book})
+                issues.append(
+                    f"Unknown book_id(s): {', '.join(f'`{b}`' for b in wrong_ids)} — "
+                    f"valid values: {valid_str}. "
+                    "Those rows were not written (would corrupt devig math)."
+                )
+        if null_odds_recs:
+            issues.append(
+                f"{n_null_odds} row(s) had no readable odds value and were not written "
+                "(a single null row corrupts market probability for all entries in that race/book)."
+            )
         if n_unresolved:
+            pairs = [
+                f"{r.race_id}#{r.program_number}"
+                for r in kept if r.entry_id is None
+            ]
+            pair_str = ", ".join(pairs[:10])
+            if len(pairs) > 10:
+                pair_str += ", …"
+            issues.append(
+                f"{n_unresolved} written row(s) had no matching entry "
+                f"(stored, but won't appear in edge sheet): {pair_str}"
+            )
+
+        if issues:
             st.sidebar.warning(
-                f"Ingested {n_snap} snapshots → {n_feat} feature rows. "
-                f"⚠️ {n_unresolved}/{n_snap} rows had no matching entry "
-                f"(race_id or program_number didn't match DB). "
-                f"Those odds won't appear in the edge sheet."
+                summary + "\n\n" + "\n\n".join(f"⚠️ {i}" for i in issues)
             )
         else:
-            st.sidebar.success(
-                f"Ingested {n_snap} snapshots → {n_feat} feature rows. Edges refreshed."
-            )
+            st.sidebar.success(summary + " Edges refreshed.")
     except Exception as e:
         st.sidebar.error(f"Upload failed: {e}")
 
