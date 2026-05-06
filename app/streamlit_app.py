@@ -435,6 +435,15 @@ if hide_no_market:
 if tag_filter:
     view_df = view_df[view_df["tag_live"].isin(tag_filter)]
 
+if view_df.empty and not disp.empty:
+    st.info(
+        f"No entries matched the tag filter {tag_filter!r}. "
+        "Showing all entries — use 'Show tags' in the sidebar to narrow down."
+    )
+    view_df = disp[table_cols].copy()
+    if hide_no_market:
+        view_df = view_df[view_df["tag_live"] != "NO_MARKET"]
+
 view_df = view_df.sort_values("model_prob_display", ascending=False)
 
 # Build raw export frame BEFORE pretty formatting
