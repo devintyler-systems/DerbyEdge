@@ -1,0 +1,10 @@
+book_id,race_id,program_number,decimal_odds,american_odds,morning_line,is_morning_line,is_scratched,captured_at
+morningline,CD|2026-05-02|12,1,,,4-1,1,0,
+morningline,CD|2026-05-02|12,2,,,6-1,1,0,
+morningline,CD|2026-05-02|12,3,,,8-1,1,0,
+fanduel,CD|2026-05-02|12,1,5.5,,,0,0,
+fanduel,CD|2026-05-02|12,2,7.0,,,0,0,
+fanduel,CD|2026-05-02|12,3,10.0,,,0,0,
+draftkings,CD|2026-05-02|12,1,,400,,0,0,
+draftkings,CD|2026-05-02|12,2,,650,,0,0,
+draftkings,CD|2026-05-02|12,3,,900,,0,0,
