@@ -5,6 +5,8 @@ src/app/app.py
 Run: streamlit run src/app/app.py
 """
 
+import math
+import os
 import pickle
 import sys
 from pathlib import Path
@@ -19,6 +21,14 @@ import plotly.graph_objects as go
 import streamlit as st
 
 from src.utils.db import get_connection
+from src.derbyedge.odds_math import kelly_fraction
+from src.derbyedge.chaos_patch import apply_derby_chaos_patch
+from src.services.odds_intake import (
+    generate_template,
+    ingest_odds_csv,
+    load_live_odds_by_pp,
+)
+from src.services.screenshot_ingest import ingest_sportsbook_screenshot
 
 # ── Page config ────────────────────────────────────────────────────────────────
 st.set_page_config(
@@ -266,6 +276,91 @@ def _style_board(df: pd.DataFrame) -> "pd.Styler":
     return df.style.apply(_row, axis=1)
 
 
+def _apply_chaos(df: pd.DataFrame, chaos_index: float) -> pd.DataFrame:
+    """Map board_df columns to chaos patch schema and apply. Returns df with added columns."""
+    ch = df.copy()
+    n = max(len(ch), 1)
+
+    ch["WinProb_base"]       = ch["win_probability"]
+    ch["PaceFit_score"]      = ch.get("pace_fit_score",    pd.Series(0.5, index=ch.index)).fillna(0.5) * 10
+    ch["DevCurve_score"]     = ch.get("form_score",        pd.Series(0.5, index=ch.index)).fillna(0.5) * 10
+    ch["FinishEnergy_score"] = ch.get("form_score",        pd.Series(0.5, index=ch.index)).fillna(0.5) * 10
+    ch["DistanceProj_score"] = ch.get("surface_dist_fit",  pd.Series(0.5, index=ch.index)).fillna(0.5) * 10
+
+    mkt = ch.get("market_implied_prob", pd.Series(1.0 / n, index=ch.index)).fillna(1.0 / n)
+    eq  = 1.0 / n
+    ch["Publicness_score"] = mkt.apply(
+        lambda p: round(max(0.0, min(10.0, 5.0 + 2.5 * math.log2(max(p, 1e-6) / eq))), 2)
+    )
+
+    last_spd = ch.get("last_speed_fig", pd.Series(0, index=ch.index)).fillna(0).astype(float)
+    avg_spd  = ch.get("avg_speed_fig",  pd.Series(0, index=ch.index)).fillna(0).astype(float)
+    std_spd  = float(last_spd.std()) if last_spd.std() > 0 else 1.0
+    ch["late_fig_z"] = ((last_spd - avg_spd) / std_spd).fillna(0.0)
+
+    ps = ch.get("pace_style", pd.Series("stalker", index=ch.index)).fillna("stalker")
+    med_pp = float(ch.get("post_position", pd.Series(10, index=ch.index)).median() or 10)
+    pp_col = ch.get("post_position", pd.Series(10, index=ch.index))
+    ch["FavRailCloserFlag"]    = (ps == "closer").astype(int)
+    ch["FavTacticalInnerFlag"] = ((ps == "presser") & (pp_col <= med_pp)).astype(int)
+    ch["FavTacticalOuterFlag"] = ((ps == "front")   | ((ps == "presser") & (pp_col > med_pp))).astype(int)
+
+    try:
+        patched = apply_derby_chaos_patch(ch, chaos_index=chaos_index)
+        out = df.copy()
+        out["chaos_win_prob"]  = patched["WinProb_final"].values
+        out["dark_horse_flag"] = patched["DarkHorseFlag"].values
+        out["dark_horse_tier"] = patched["DarkHorseTier"].values
+    except Exception:
+        out = df.copy()
+        out["chaos_win_prob"]  = df["win_probability"]
+        out["dark_horse_flag"] = False
+        out["dark_horse_tier"] = "none"
+    return out
+
+
+def _add_kelly(
+    df: pd.DataFrame,
+    bankroll: float,
+    max_kelly_pct: float,
+    live_odds_by_pp: dict,
+) -> pd.DataFrame:
+    """Add kelly_frac and stake_dollar columns. Only BET-tagged rows get a non-zero stake."""
+    cap = max_kelly_pct / 100.0
+    kelly_fracs, stakes = [], []
+
+    for _, row in df.iterrows():
+        model_p = float(row.get("win_probability") or 0)
+        pp      = row.get("post_position")
+        lo      = live_odds_by_pp.get(pp) if pp else None
+        tag     = row.get("bet_tag", "neutral")
+
+        if tag != "bet" or model_p <= 0:
+            kelly_fracs.append(0.0)
+            stakes.append(0.0)
+            continue
+
+        if lo and lo.get("decimal_odds"):
+            dec = float(lo["decimal_odds"])
+        else:
+            mkt = row.get("market_implied_prob")
+            dec = (1.0 / mkt) if mkt and mkt > 0 else None
+
+        if dec is None:
+            kelly_fracs.append(0.0)
+            stakes.append(0.0)
+            continue
+
+        kf = kelly_fraction(model_p, dec, cap=cap)
+        kelly_fracs.append(kf)
+        stakes.append(round(kf * bankroll, 2))
+
+    out = df.copy()
+    out["kelly_frac"]   = kelly_fracs
+    out["stake_dollar"] = stakes
+    return out
+
+
 # ── Sidebar ────────────────────────────────────────────────────────────────────
 with st.sidebar:
     st.markdown('<p class="console-title">⚙ DerbyEdge</p>', unsafe_allow_html=True)
@@ -318,6 +413,29 @@ with st.sidebar:
     filt_bet_only = st.checkbox("Bet candidates only",     value=False)
 
     st.divider()
+    st.markdown("**Bankroll & Kelly**")
+    bankroll = st.number_input(
+        "Bankroll ($)", min_value=0, max_value=1_000_000, value=1_000, step=100,
+        help="Total betting bankroll. Stake$ = bankroll × capped Kelly fraction.",
+    )
+    max_kelly_pct = st.slider(
+        "Kelly cap (%)", 1, 25, 5, 1,
+        help="Hard cap per bet as % of bankroll. 5% ≈ quarter-Kelly for racing.",
+    )
+
+    st.divider()
+    st.markdown("**Derby Chaos Overlay**")
+    chaos_on = st.toggle(
+        "Apply chaos patch", value=False,
+        help="Reallocate win mass toward dark-horse beneficiaries under high-chaos field conditions.",
+    )
+    chaos_idx = st.slider(
+        "Chaos index", 0.0, 1.0, 0.85, 0.05,
+        disabled=not chaos_on,
+        help="0 = deterministic chalk race · 1 = maximum chaos. Activates at ≥ 0.70.",
+    )
+
+    st.divider()
     if st.button("↺ Refresh data", use_container_width=True):
         st.cache_data.clear()
         st.rerun()
@@ -329,6 +447,18 @@ catalog  = load_catalog()
 artifact = load_artifact()
 db_stats = load_db_stats()
 
+# Live odds from Market Intake uploads (keyed by post_position)
+_live_odds_by_pp: dict = {}
+try:
+    _conn_lo = get_connection()
+    _ri = load_race_info()
+    _card_id = _ri.get("card_id") if _ri else None
+    if _card_id:
+        _live_odds_by_pp = load_live_odds_by_pp(_conn_lo, int(_card_id))
+    _conn_lo.close()
+except Exception:
+    pass
+
 # ── Header ─────────────────────────────────────────────────────────────────────
 st.markdown('<p class="console-title">DerbyEdge — 2026 Kentucky Derby</p>',
             unsafe_allow_html=True)
@@ -339,9 +469,13 @@ if meta:
         f"{meta.get('run_timestamp', '')[:19]} UTC"
     )
 
-tab1, tab2, tab3, tab4 = st.tabs(
-    ["📋 Race Board", "🔍 Entry Details", "🧪 Model Diagnostics", "📖 Methodology"]
-)
+tab1, tab2, tab3, tab4, tab5 = st.tabs([
+    "📋 Race Board",
+    "🔍 Entry Details",
+    "🧪 Model Diagnostics",
+    "📖 Methodology",
+    "📥 Market Intake",
+])
 
 # ── TAB 1: Race Board ──────────────────────────────────────────────────────────
 with tab1:
@@ -403,14 +537,38 @@ with tab1:
         unsafe_allow_html=True,
     )
 
+    # ── Chaos overlay + Kelly ─────────────────────────────────────────────
+    if chaos_on:
+        disp = _apply_chaos(disp, chaos_idx)
+        st.markdown(
+            '<div style="background:#1a2a1a;border-left:3px solid #4caf50;'
+            'padding:8px 12px;border-radius:0 6px 6px 0;font-size:.85rem;'
+            'color:#81c784;margin-bottom:8px;">'
+            f'🌀 <strong>Chaos overlay active</strong> — index {chaos_idx:.2f} · '
+            'win mass reallocated toward dark-horse beneficiaries'
+            '</div>',
+            unsafe_allow_html=True,
+        )
+
+    disp = _add_kelly(disp, float(bankroll), float(max_kelly_pct), _live_odds_by_pp)
+    has_live_odds = bool(_live_odds_by_pp)
+    has_kelly = bankroll > 0
+
     # ── Build display frame ────────────────────────────────────────────────
-    tbl = disp[[
+    base_cols = [
         "rank", "horse_name", "post_position",
         "morning_line_odds", "win_probability",
         "fair_odds", "value_score", "bet_tag",
         "pace_fit_score", "form_score", "surface_dist_fit",
         "confidence_flag", "trainer", "jockey",
-    ]].copy()
+    ]
+    optional_cols = []
+    if chaos_on:
+        optional_cols += ["chaos_win_prob", "dark_horse_flag", "dark_horse_tier"]
+    if has_kelly:
+        optional_cols += ["kelly_frac", "stake_dollar"]
+
+    tbl = disp[base_cols + [c for c in optional_cols if c in disp.columns]].copy()
 
     tbl["Tag"]  = tbl["bet_tag"].map(TAG_ICON)
     tbl["Conf"] = tbl["confidence_flag"].map(CONF_ICON)
@@ -418,7 +576,7 @@ with tab1:
     tbl["ML"]   = tbl["morning_line_odds"].apply(lambda x: f"{x:.0f}-1")
     tbl["Edge"] = tbl["value_score"].apply(_edge_str)
 
-    display_cols = {
+    display_cols: dict = {
         "rank":            "Rank",
         "horse_name":      "Horse",
         "post_position":   "Post",
@@ -434,19 +592,33 @@ with tab1:
         "form_score":      "Form",
         "surface_dist_fit":"SuDist",
     }
-    show = tbl[list(display_cols.keys())].rename(columns=display_cols)
-
-    styled = _style_board(
-        tbl[["rank", "bet_tag", "confidence_flag"]].rename(
-            columns={"rank": "rank", "bet_tag": "bet_tag", "confidence_flag": "confidence_flag"}
+    if chaos_on and "chaos_win_prob" in tbl.columns:
+        tbl["Chaos%"] = (tbl["chaos_win_prob"] * 100).round(2)
+        display_cols["Chaos%"] = "Chaos%"
+    if chaos_on and "dark_horse_tier" in tbl.columns:
+        display_cols["dark_horse_tier"] = "DH Tier"
+    if has_kelly and "stake_dollar" in tbl.columns:
+        tbl["Stake$"] = tbl["stake_dollar"].apply(
+            lambda x: f"${x:,.2f}" if x > 0 else "—"
         )
-    )
+        display_cols["Stake$"] = "Stake$"
+        odds_src = "live odds" if has_live_odds else "ML proxy"
+        st.markdown(
+            f'<div class="info-banner">💰 Kelly stakes — bankroll ${bankroll:,} · '
+            f'cap {max_kelly_pct}% · odds source: <strong>{odds_src}</strong></div>',
+            unsafe_allow_html=True,
+        )
+
+    col_order = [c for c in display_cols if c in tbl.columns]
+    show = tbl[col_order].rename(columns=display_cols)
+
     st.dataframe(
         show,
         use_container_width=True,
         hide_index=True,
         column_config={
             "Win %":     st.column_config.NumberColumn("Win %",     format="%.2f"),
+            "Chaos%":    st.column_config.NumberColumn("Chaos%",    format="%.2f"),
             "Fair Odds": st.column_config.NumberColumn("Fair Odds", format="%.1f"),
             "Pace Fit":  st.column_config.NumberColumn("Pace Fit",  format="%.3f"),
             "Form":      st.column_config.NumberColumn("Form",      format="%.3f"),
@@ -472,6 +644,13 @@ with tab1:
         text=chart_df["win_pct"].apply(lambda x: f"{x:.1f}%"),
         textposition="outside",
     ))
+    if chaos_on and "chaos_win_prob" in chart_df.columns:
+        fig.add_trace(go.Scatter(
+            y=chart_df["horse_name"],
+            x=(chart_df["chaos_win_prob"] * 100),
+            name="Chaos%", mode="markers",
+            marker=dict(symbol="star", size=10, color="#81c784"),
+        ))
     fig.add_trace(go.Scatter(
         y=chart_df["horse_name"], x=chart_df["market_pct"],
         name="Market %", mode="markers",
@@ -483,6 +662,47 @@ with tab1:
         **_plotly_dark(),
     )
     st.plotly_chart(fig, use_container_width=True)
+
+    # ── Odds drift sparkline (if live odds uploaded) ───────────────────────
+    if has_live_odds:
+        st.subheader("Live Odds vs Morning Line")
+        try:
+            _conn_drift = get_connection()
+            _ri_drift = load_race_info()
+            _cid_drift = _ri_drift.get("card_id")
+            if _cid_drift:
+                drift_rows = _conn_drift.execute(
+                    """SELECT lo.post_position, h.name AS horse_name,
+                              lo.decimal_odds, lo.book_id, lo.captured_at
+                       FROM live_odds lo
+                       JOIN entries e ON lo.entry_id = e.entry_id
+                       JOIN horses h ON e.horse_id = h.horse_id
+                       WHERE lo.card_id = ?
+                       ORDER BY lo.captured_at""",
+                    (int(_cid_drift),),
+                ).fetchall()
+                _conn_drift.close()
+                if drift_rows:
+                    drift_df = pd.DataFrame(drift_rows, columns=[
+                        "post_position", "horse_name", "decimal_odds", "book_id", "captured_at"
+                    ])
+                    drift_df["captured_at"] = pd.to_datetime(drift_df["captured_at"])
+                    fig_drift = go.Figure()
+                    for horse, grp in drift_df.groupby("horse_name"):
+                        fig_drift.add_trace(go.Scatter(
+                            x=grp["captured_at"], y=grp["decimal_odds"],
+                            name=horse, mode="lines+markers",
+                        ))
+                    fig_drift.update_layout(
+                        height=320,
+                        yaxis=dict(autorange="reversed", title="Decimal odds (lower = shorter)"),
+                        xaxis_title="Time",
+                        legend=dict(orientation="h", y=-0.2),
+                        **_plotly_dark(),
+                    )
+                    st.plotly_chart(fig_drift, use_container_width=True)
+        except Exception:
+            pass
 
     # ── Low-confidence notice ──────────────────────────────────────────────
     low_conf_horses = board_df[board_df["confidence_flag"] == 0]["horse_name"].tolist()
@@ -1012,3 +1232,238 @@ When that happens:
         "DerbyEdge V1 · seed_only_baseline · "
         "No cloud. No APIs. No subscriptions. For operator use only."
     )
+
+# ── TAB 5: Market Intake ───────────────────────────────────────────────────────
+with tab5:
+    st.markdown(
+        '<p class="console-title">Market Intake</p>', unsafe_allow_html=True
+    )
+    st.markdown(
+        '<p class="console-sub">Upload live odds · download template · ingest sportsbook screenshot</p>',
+        unsafe_allow_html=True,
+    )
+
+    _ri5 = load_race_info()
+    _card_id5 = _ri5.get("card_id") if _ri5 else None
+
+    if not _card_id5:
+        st.markdown(
+            '<div class="warn-banner">⚠ No race card loaded. '
+            'Run the pipeline first.</div>',
+            unsafe_allow_html=True,
+        )
+        st.stop()
+
+    _conn5 = get_connection()
+
+    # ── Section 1: Odds template download ─────────────────────────────────
+    st.subheader("1 · Odds Template")
+    st.caption(
+        "Download a pre-filled CSV for the current race. "
+        "Fill in decimal_odds or american_odds for each horse, then upload below."
+    )
+    try:
+        tmpl_bytes = generate_template(_conn5, int(_card_id5))
+        st.download_button(
+            label="⬇ Download odds template CSV",
+            data=tmpl_bytes,
+            file_name="derby_odds_template.csv",
+            mime="text/csv",
+            use_container_width=True,
+        )
+    except Exception as e:
+        st.markdown(
+            f'<div class="warn-banner">⚠ Template generation failed: {e}</div>',
+            unsafe_allow_html=True,
+        )
+
+    st.divider()
+
+    # ── Section 2: Live odds CSV upload ───────────────────────────────────
+    st.subheader("2 · Upload Live Odds CSV")
+    st.markdown(
+        '<div class="info-banner">ℹ Columns required: <code>post_position</code> '
+        'plus one of <code>decimal_odds</code> / <code>american_odds</code> / '
+        '<code>morning_line</code>. Valid book_id values: fanduel, draftkings, '
+        'twinspires, betmgm, betonline, caesars, manual.</div>',
+        unsafe_allow_html=True,
+    )
+    odds_file = st.file_uploader(
+        "Upload odds CSV", type=["csv"],
+        key="odds_csv_uploader",
+        label_visibility="collapsed",
+    )
+    if odds_file is not None:
+        try:
+            result = ingest_odds_csv(odds_file.getvalue(), _conn5, int(_card_id5))
+            st.success(f"Inserted {result['n_inserted']} odds rows.")
+            if result["skip_book"]:
+                st.markdown(
+                    f'<div class="warn-banner">⚠ Skipped {len(result["skip_book"])} rows — '
+                    f'unknown book_id(s): '
+                    f'{", ".join(sorted({r["book"] for r in result["skip_book"]}))}. '
+                    f'Use a valid book name.</div>',
+                    unsafe_allow_html=True,
+                )
+            if result["skip_odds"]:
+                st.markdown(
+                    f'<div class="warn-banner">⚠ Skipped {len(result["skip_odds"])} rows — '
+                    f'no readable odds value (check decimal_odds / american_odds columns).'
+                    f'</div>',
+                    unsafe_allow_html=True,
+                )
+            if result["skip_entry"]:
+                st.markdown(
+                    f'<div class="warn-banner">⚠ Skipped {len(result["skip_entry"])} rows — '
+                    f'post_position not found in current race card: '
+                    f'{result["skip_entry"]}.</div>',
+                    unsafe_allow_html=True,
+                )
+            if result["n_inserted"] > 0:
+                st.markdown(
+                    '<div class="info-banner">ℹ Refresh the Race Board tab '
+                    '(↺ button in sidebar) to see live odds and Kelly stakes.</div>',
+                    unsafe_allow_html=True,
+                )
+        except ValueError as e:
+            st.markdown(
+                f'<div class="warn-banner">⚠ CSV format error: {e}</div>',
+                unsafe_allow_html=True,
+            )
+        except Exception as e:
+            st.markdown(
+                f'<div class="warn-banner">⚠ Upload failed: {e}</div>',
+                unsafe_allow_html=True,
+            )
+
+    # Current snapshot preview
+    try:
+        snap_preview = _conn5.execute(
+            """SELECT lo.post_position, h.name AS horse, lo.book_id,
+                      lo.decimal_odds, lo.american_odds, lo.captured_at
+               FROM live_odds lo
+               JOIN entries e ON lo.entry_id = e.entry_id
+               JOIN horses h ON e.horse_id = h.horse_id
+               WHERE lo.card_id = ? AND lo.is_scratched = 0
+               ORDER BY lo.captured_at DESC, lo.post_position""",
+            (int(_card_id5),),
+        ).fetchall()
+        if snap_preview:
+            snap_df = pd.DataFrame(snap_preview, columns=[
+                "Post", "Horse", "Book", "Dec Odds", "Am Odds", "Captured At"
+            ])
+            with st.expander(f"Current snapshots — {len(snap_df)} rows"):
+                st.dataframe(snap_df, use_container_width=True, hide_index=True)
+    except Exception:
+        pass
+
+    st.divider()
+
+    # ── Section 3: Screenshot ingest ──────────────────────────────────────
+    st.subheader("3 · Sportsbook Screenshot Ingest")
+    st.markdown(
+        '<div class="info-banner">ℹ Upload a sportsbook race-card screenshot. '
+        'Claude Vision extracts horse names and odds; the runner list is then '
+        'fuzzy-matched against this DB to check for past-performance history. '
+        'Requires <code>ANTHROPIC_API_KEY</code> in environment.</div>',
+        unsafe_allow_html=True,
+    )
+
+    _api_key = os.environ.get("ANTHROPIC_API_KEY", "")
+    if not _api_key:
+        st.markdown(
+            '<div class="warn-banner">⚠ ANTHROPIC_API_KEY not set — '
+            'screenshot ingest is disabled. Set the key in your shell or '
+            '.streamlit/secrets.toml.</div>',
+            unsafe_allow_html=True,
+        )
+    else:
+        st.markdown(
+            '<div class="info-banner">ANTHROPIC_API_KEY detected.</div>',
+            unsafe_allow_html=True,
+        )
+
+    screen_file = st.file_uploader(
+        "Upload screenshot", type=["png", "jpg", "jpeg", "webp"],
+        key="screenshot_uploader",
+        label_visibility="collapsed",
+        disabled=not _api_key,
+    )
+
+    if screen_file is not None and _api_key:
+        with st.spinner("Parsing screenshot with Claude Vision…"):
+            sr = ingest_sportsbook_screenshot(
+                screen_file.getvalue(),
+                _conn5,
+                api_key=_api_key,
+            )
+
+        if not sr["ok"]:
+            st.markdown(
+                f'<div class="warn-banner">⚠ Parse failed: {sr["error"]}</div>',
+                unsafe_allow_html=True,
+            )
+        else:
+            track_label = sr.get("track_name") or "Unknown track"
+            race_label  = f"R{sr.get('race_number') or '?'}"
+            date_label  = sr.get("race_date") or "unknown date"
+            st.success(
+                f"Parsed: {track_label} · {race_label} · {date_label} · "
+                f"{len(sr['runners'])} runners extracted."
+            )
+
+            runners = sr["runners"]
+            no_pp   = [r for r in runners if not r["has_pp_history"] and not r["is_scratched"]]
+            with_pp = [r for r in runners if r["has_pp_history"]]
+
+            if no_pp:
+                st.markdown(
+                    f'<div class="warn-banner">⚠ <strong>'
+                    f'{len(no_pp)} runner{"s" if len(no_pp) != 1 else ""} without PP history</strong> '
+                    f'— model will fall back to base-rate prior for these entries:<br>'
+                    f'{", ".join(r["horse_name"] for r in no_pp)}</div>',
+                    unsafe_allow_html=True,
+                )
+
+            runner_rows = []
+            for r in runners:
+                if r["is_scratched"]:
+                    pp_badge = "SCRATCHED"
+                elif r["has_pp_history"]:
+                    pp_badge = f"PP OK ({len(r['last_5'])})"
+                else:
+                    pp_badge = "NO PP"
+                runner_rows.append({
+                    "#": r["program_number"],
+                    "Horse": r["horse_name"],
+                    "DB Match": r.get("matched_name") or "—",
+                    "Score": f"{r['match_score']:.2f}" if r["match_score"] else "—",
+                    "ML": r["morning_line"] or "—",
+                    "Odds": r["current_odds"] or "—",
+                    "PP": pp_badge,
+                    "Warning": r["warning"] or "",
+                })
+
+            runner_df = pd.DataFrame(runner_rows)
+
+            def _pp_style(row):
+                pp = row.get("PP", "")
+                if pp.startswith("NO PP"):
+                    return ["background-color:rgba(210,153,34,.12)"] * len(row)
+                if pp == "SCRATCHED":
+                    return ["color:#6e7681"] * len(row)
+                return [""] * len(row)
+
+            styled_runners = runner_df.style.apply(_pp_style, axis=1)
+            st.dataframe(styled_runners, use_container_width=True, hide_index=True)
+
+            if with_pp:
+                with st.expander(f"PP history ({len(with_pp)} runners with data)"):
+                    for r in with_pp:
+                        if not r["last_5"]:
+                            continue
+                        st.markdown(f"**{r['horse_name']}** → matched `{r['matched_name']}`")
+                        pp_df = pd.DataFrame(r["last_5"])
+                        st.dataframe(pp_df, use_container_width=True, hide_index=True)
+
+    _conn5.close()
