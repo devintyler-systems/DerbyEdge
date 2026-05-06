@@ -138,6 +138,10 @@ if view.empty:
 
 sel_label = st.sidebar.selectbox("Race", view["label"].tolist(), index=0)
 sel_race = view[view["label"] == sel_label].iloc[0]
+race_label_safe = (
+    f"{sel_race['race_date']}_{sel_race['track_id']}_R{sel_race['race_number']}"
+    .replace(" ", "_").replace("/", "-")
+)
 
 st.sidebar.divider()
 st.sidebar.subheader("Bankroll & Kelly")
@@ -171,6 +175,39 @@ tag_filter = st.sidebar.multiselect(
 hide_no_market = st.sidebar.checkbox("Hide entries with no market data", value=False)
 
 st.sidebar.divider()
+st.sidebar.subheader("Odds template for this race")
+try:
+    _tmpl_conn = get_conn()
+    _entries_df = pd.read_sql_query(
+        "SELECT program_number FROM entries WHERE race_id = ? ORDER BY program_number",
+        _tmpl_conn, params=[sel_race["race_id"]],
+    )
+    if _entries_df.empty:
+        st.sidebar.caption(f"No entries found for `{sel_race['race_id']}`.")
+    else:
+        _tmpl = _entries_df.copy()
+        _tmpl.insert(0, "race_id", sel_race["race_id"])
+        _tmpl.insert(0, "book_id", "fanduel")
+        _tmpl["decimal_odds"] = ""
+        _tmpl["american_odds"] = ""
+        _tmpl["is_scratched"] = 0
+        _tmpl["is_morning_line"] = 0
+        _tmpl["captured_at"] = ""
+        _tmpl = _tmpl[["book_id", "race_id", "program_number",
+                        "decimal_odds", "american_odds",
+                        "is_scratched", "is_morning_line", "captured_at"]]
+        _tmpl_csv = _tmpl.to_csv(index=False).encode("utf-8")
+        st.sidebar.caption(f"race_id: `{sel_race['race_id']}`")
+        st.sidebar.download_button(
+            label="⬇️ Download odds template (this race)",
+            data=_tmpl_csv,
+            file_name=f"odds_{race_label_safe}.csv",
+            mime="text/csv",
+        )
+except Exception as _e:
+    st.sidebar.caption(f"Template unavailable: {_e}")
+
+st.sidebar.divider()
 st.sidebar.subheader("Live odds upload")
 st.sidebar.caption(
     "Drop a CSV in the odds_template.csv schema "
@@ -185,14 +222,23 @@ if uploaded is not None:
         target.write_bytes(uploaded.getvalue())
         conn = get_conn()
         recs = adapter_manual_csv(target, conn=conn)
+        n_unresolved = sum(1 for r in recs if r.entry_id is None)
         n_snap = write_snapshots(conn, recs)
         feats = build_odds_features(conn)
         n_feat = write_odds_features(conn, feats)
         st.session_state["odds_cache_buster"] += 1
         score_race.clear()
-        st.sidebar.success(
-            f"Ingested {n_snap} snapshots → {n_feat} feature rows. Edges refreshed."
-        )
+        if n_unresolved:
+            st.sidebar.warning(
+                f"Ingested {n_snap} snapshots → {n_feat} feature rows. "
+                f"⚠️ {n_unresolved}/{n_snap} rows had no matching entry "
+                f"(race_id or program_number didn't match DB). "
+                f"Those odds won't appear in the edge sheet."
+            )
+        else:
+            st.sidebar.success(
+                f"Ingested {n_snap} snapshots → {n_feat} feature rows. Edges refreshed."
+            )
     except Exception as e:
         st.sidebar.error(f"Upload failed: {e}")
 
@@ -392,10 +438,6 @@ if tag_filter:
 view_df = view_df.sort_values("model_prob_display", ascending=False)
 
 # Build raw export frame BEFORE pretty formatting
-race_label_safe = (
-    f"{sel_race['race_date']}_{sel_race['track_id']}_R{sel_race['race_number']}"
-    .replace(" ", "_").replace("/", "-")
-)
 csv_bytes = view_df.to_csv(index=False).encode("utf-8")
 
 st.download_button(
@@ -536,30 +578,30 @@ st.subheader("Odds drift (per horse, last snapshots)")
 try:
     conn = get_conn()
     snaps = pd.read_sql_query(
-        """SELECT entry_id, snap_time, decimal_odds, book
+        """SELECT entry_id, captured_at, decimal_odds, book_id
            FROM odds_snapshots
            WHERE entry_id IN (SELECT entry_id FROM entries WHERE race_id = ?)
-           ORDER BY snap_time""",
+           ORDER BY captured_at""",
         conn, params=[sel_race["race_id"]],
     )
     if snaps.empty:
         st.caption("No odds snapshots ingested for this race.")
     else:
-        snaps["snap_time"] = pd.to_datetime(snaps["snap_time"])
+        snaps["captured_at"] = pd.to_datetime(snaps["captured_at"])
         snaps = snaps.merge(
             disp[["entry_id", "horse_name"]], on="entry_id", how="left"
         )
-        med = (snaps.groupby(["horse_name", "snap_time"])["decimal_odds"]
+        med = (snaps.groupby(["horse_name", "captured_at"])["decimal_odds"]
                     .median().reset_index())
         chart3 = (
             alt.Chart(med)
             .mark_line(point=True)
             .encode(
-                x=alt.X("snap_time:T", title="Time"),
+                x=alt.X("captured_at:T", title="Time"),
                 y=alt.Y("decimal_odds:Q", scale=alt.Scale(reverse=True),
                         title="Decimal odds (lower = shorter)"),
                 color=alt.Color("horse_name:N", legend=None),
-                tooltip=["horse_name", "snap_time:T",
+                tooltip=["horse_name", "captured_at:T",
                          alt.Tooltip("decimal_odds:Q", format=".2f")],
             )
             .properties(height=320)
