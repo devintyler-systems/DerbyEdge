@@ -58,3 +58,24 @@ htmlcov/
 Thumbs.db
 .vscode/
 .idea/
+
+# DerbyEdge repo-specific local artifacts
+Sportsbook_Screenshots/
+2023 Racing Results/
+
+# Large/raw racing data
+data/raw/historical_results/
+data/raw/*.xml
+data/raw/*.pdf
+data/raw/*.xlsx
+
+# Processed/intermediate data
+data/processed/
+
+# Local app/runtime artifacts
+.streamlit/
+!.streamlit/config.toml
+
+# Keep only intentional sample fixtures
+!samples/
+!samples/**
