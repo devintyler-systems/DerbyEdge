@@ -30,21 +30,17 @@ Requires: pip install pdfplumber
 from __future__ import annotations
 
 import io
+import logging
 import re
 from typing import Any
 
+_log = logging.getLogger(__name__)
+
 # ── Track code lookup ─────────────────────────────────────────────────────────
-_TRACK_CODES: dict[str, str] = {
-    "churchill":      "CD",  "pimlico":      "PIM", "belmont":    "BEL",
-    "keeneland":      "KEE", "santa anita":  "SA",  "gulfstream": "GP",
-    "aqueduct":       "AQU", "del mar":      "DMR", "saratoga":   "SAR",
-    "oaklawn":        "OP",  "fair grounds": "FG",  "turfway":    "TP",
-    "woodbine":       "WO",  "golden gate":  "GG",  "monmouth":   "MTH",
-    "penn national":  "PEN", "parx":         "PRX", "laurel":     "LRL",
-    "tampa bay":      "TAM", "charles town": "CT",  "remington":  "RP",
-    "hawthorne":      "HAW", "colonial":     "CNL", "suffolk":    "SUF",
-    "finger lakes":   "FL",  "presque isle": "PID", "evangeline": "EVD",
-}
+# Canonical registry lives in src/derbyedge/tracks.py.
+# TRACK_CODES is a flat {normalized_alias: code} dict used by the
+# substring-scan extractors below; resolve_track() handles full resolution.
+from src.derbyedge.tracks import TRACK_CODES as _TRACK_CODES, resolve_track as _resolve_track
 
 _MONTH_MAP: dict[str, int] = {
     "january":1,  "february":2,  "march":3,    "april":4,
@@ -323,51 +319,73 @@ def _extract_track_1stbet(text: str) -> tuple[str | None, str | None]:
 
 
 def _extract_1stbet_header(text: str) -> dict[str, Any]:
-    """Parse the 1/ST BET race-info line (line 2):
-        "5:10 PM 5 Horses CLM $14,000 1M Dirt / Sloppy"
-        "3:45 PM 8 Horses MSW $35,000 6F Turf / Firm"
+    """Parse the 1/ST BET race-info line (line 2).
+
+    Handles both spaced and compact pdfplumber outputs:
+      Spaced:  "5:10 PM 5 Horses CLM $14,000 1M Dirt / Sloppy"
+      Compact: "510 PM5 HorsesCLM38,0001MDirt Fast"
 
     Returns a dict with keys: field_size, race_type, purse_usd,
     distance_text, surface  (all optional, absent if not found).
     """
     result: dict[str, Any] = {}
-    # Find the header line: contains "X Horses" and a dollar amount
+    # Header line detection: "X Horses" is the most reliable anchor.
+    # Drop the \$ requirement — compact exports omit the dollar sign.
     header = None
     for line in text.splitlines()[:8]:
-        if re.search(r'\d+\s+Horses', line, re.I) and re.search(r'\$[\d,]+', line):
+        if re.search(r'\d+\s*Horses', line, re.I):
             header = line
             break
     if not header:
         return result
 
+    _log.debug("1stbet header line: %r", header)
+
     # Field size
-    m = re.search(r'(\d+)\s+Horses', header, re.I)
+    m = re.search(r'(\d+)\s*Horses', header, re.I)
     if m:
         result["field_size"] = int(m.group(1))
 
-    # Race class abbreviation
+    # Race class abbreviation — try with \b first, fall back to substring
     for abbr, full in _1STBET_CLASS_MAP.items():
-        if re.search(r'\b' + abbr + r'\b', header):
+        if re.search(r'\b' + abbr + r'\b', header) or abbr in header:
             result["race_type"] = full
             break
 
-    # Purse: "$14,000"
+    # Purse — try "$N,NNN" first; fall back to bare comma-number like "38,000"
+    # Track position to anchor the distance search after the purse.
+    purse_end = 0
     m = re.search(r'\$([\d,]+)', header)
     if m:
         try:
             result["purse_usd"] = int(m.group(1).replace(",", ""))
+            purse_end = m.end()
         except ValueError:
             pass
+    if not result.get("purse_usd"):
+        # Compact: "38,0001M" — purse is the comma-number before the distance token
+        m = re.search(r'(\d{1,3},\d{3})(?=\d*\s*[MF])', header)
+        if not m:
+            m = re.search(r'(\d{1,3},\d{3})', header)
+        if m:
+            try:
+                result["purse_usd"] = int(m.group(1).replace(",", ""))
+                purse_end = m.end()
+            except ValueError:
+                pass
 
-    # Distance — try compound fractions first: "1 1/16M", "1 1/8M"
+    # Distance — search in text AFTER purse position so "38,0001M" correctly
+    # yields distance "1M" not a false match inside the purse digits.
+    dist_src = header[purse_end:] if purse_end else header
+
     m = re.search(
-        r'\b1\s+(1/16|1/8|3/16|1/4|5/16|3/8|1/2|5/8|3/4)\s*M\b', header, re.I
+        r'(?<!\d)1\s*(1/16|1/8|3/16|1/4|5/16|3/8|1/2|5/8|3/4)\s*M', dist_src, re.I
     )
     if m:
         result["distance_text"] = f"1 {m.group(1)} Miles"
     else:
-        # Simple: "1M", "1.5M", "6F", "8.5F"
-        m = re.search(r'\b(\d+(?:\.\d+)?)\s*([FM])\b', header)
+        # Simple: "1M", "8F", "8.5F" — no \b after unit; unit may touch next word
+        m = re.search(r'(?<!\d)(\d+(?:\.\d+)?)\s*([FM])(?!\d)', dist_src)
         if m:
             val, unit = float(m.group(1)), m.group(2).upper()
             if unit == "M" and 0.25 <= val <= 3.0:
@@ -375,8 +393,8 @@ def _extract_1stbet_header(text: str) -> dict[str, Any]:
             elif unit == "F" and 2.0 <= val <= 20.0:
                 result["distance_text"] = f"{val:g} Furlongs"
 
-    # Surface
-    m = re.search(r'\b(Dirt|Turf|Synthetic)\b', header, re.I)
+    # Surface — no \b required; unit may be immediately adjacent ("1MDirt")
+    m = re.search(r'(Dirt|Turf|Synthetic|Tapeta)', dist_src, re.I)
     if m:
         result["surface"] = _SURFACE_NORM.get(m.group(1).lower(), m.group(1)[:1].upper())
 
@@ -522,6 +540,181 @@ def _parse_race_runners_1stbet(lines: list[str], warnings: list[str]) -> list[di
             "1/ST BET runner parse found no horse blocks — "
             "confirm this is a 1/ST BET race-detail page (not a card summary)."
         )
+    return runners
+
+
+def _parse_race_runners_1stbet_fallback(text: str, warnings: list[str]) -> list[dict]:
+    """Fallback 1/ST BET parser for continuous-stream PDF exports.
+
+    Handles spaced, semi-compact, and fully-compact pdfplumber outputs:
+      Layout A: "1 PP1 YOTOWIN J: Evin A. Roman T: Trainer ML 9/2"
+      Layout B: "1 PP1 YOTOWIN J: Evin A. Roman T: Trainer - ML 8"
+      Layout C: "1PP1YOTOWINJ Evin A. Roman T Rogelio Labra-ML 8"
+
+    Strategy:
+      1. Strip noise lines.
+      2. Join into one normalised string.
+      3. PRIMARY anchors: finditer on "(?<!\\d)\\d{1,2}\\s*PP\\d{1,2}(?!\\d)" —
+         handles both spaced ("1 PP1") and compact ("1PP1") without needing \\b.
+      4. SECONDARY anchors: bare "\\bPP\\d{1,2}\\b" if primary finds nothing.
+      5. Extract pp/horse/jockey/trainer/ml per segment.
+         - Horse: STRICT lookahead (\\s+ before J:/T:) for Layout A/B;
+           LENIENT lookahead ((?-i:...) proper-case check) for Layout C.
+         - J/T patterns accept both colon and no-colon forms.
+      6. Deduplicate by post_position — exactly one runner per PP number.
+      7. Field-level warnings for missing ML; runner kept regardless.
+    """
+
+    def _is_noise(line: str) -> bool:
+        s = line.strip()
+        if not s:
+            return True
+        if re.search(r'1/ST\s+BET\s*[-–]', s, re.I):
+            return True
+        if re.search(r'https?://\S+', s, re.I):
+            return True
+        if re.search(r'\d{1,2}/\d{1,2}/\d{2,4},?\s+\d{1,2}:\d{2}\s*[AaPp][Mm]', s):
+            return True
+        if re.match(r'^\d+/\d+$', s):
+            return True
+        return False
+
+    clean = ' '.join(ln for ln in text.splitlines() if not _is_noise(ln))
+    clean = re.sub(r'\s+', ' ', clean).strip()
+
+    # ── Anchor finding ───────────────────────────────────────────────────────
+    # Slice at "PP\d" positions so the preceding ML digit stays in the current
+    # segment (not stolen by the next anchor).  "1PP1YOTOWIN...ML 82PP2" →
+    # segment PP1 = "PP1YOTOWIN...ML 8", segment PP2 = "PP2INNISFREE...".
+    # (?!\d) prevents matching "PP10" as "PP1".
+    anchors = list(re.finditer(r'PP(\d{1,2})(?!\d)', clean))
+    _log.debug("1stbet fallback: PP anchors found: %d", len(anchors))
+
+    # Slice text between consecutive PP anchors
+    pp_segments: list[str] = []
+    for i, anc in enumerate(anchors):
+        start = anc.start()
+        end   = anchors[i + 1].start() if i + 1 < len(anchors) else len(clean)
+        pp_segments.append(clean[start:end].strip())
+
+    raw_runners: list[dict] = []
+    seen_names:  set[str]   = set()
+
+    for seg_idx, seg in enumerate(pp_segments):
+        # Locate PP{N} within this segment (may be "PP1" inside "1PP1...")
+        m_pp = re.search(r'PP\d+', seg)
+        if not m_pp:
+            continue
+        seg_pp = seg[m_pp.start():]   # "PP1YOTOWIN..." or "PP1 YOTOWIN..."
+
+        _log.debug("1stbet fallback seg[%d]: %r", seg_idx, seg_pp[:160])
+
+        # ── Horse extraction: STRICT then LENIENT ────────────────────────────
+        # STRICT (Layout A/B): requires \\s+ (space) before J:/T:/ML label.
+        # This prevents the horse name from stopping at "T" inside "WHAT ABOUT NOW".
+        m = re.search(
+            r'\bPP(?P<pp>\d+)\s*(?P<horse>[A-Z0-9\'\s]+?)'
+            r'(?=\s+(?:J:|T:|[-–]?\s*ML\b))',
+            seg_pp, re.I,
+        )
+        if not m:
+            # LENIENT (Layout C): J/T without colon, but require a proper-cased
+            # name to follow — (?-i:...) disables re.I for the case check,
+            # which distinguishes "T Rogelio" (trainer) from "T" in "WHAT ABOUT".
+            m = re.search(
+                r'\bPP(?P<pp>\d+)\s*(?P<horse>[A-Z0-9\'\s]+?)'
+                r'(?=(?-i:\s*J[:\s]+[A-Z][a-z]|\s*T[:\s]+[A-Z][a-z])|\s*[-–]?\s*ML\b)',
+                seg_pp, re.I,
+            )
+        if not m:
+            _log.debug("1stbet fallback: no horse match in seg[%d]: %r", seg_idx, seg_pp[:80])
+            continue
+
+        pp        = int(m.group('pp'))
+        horse_raw = m.group('horse').strip()
+        rest      = seg_pp[m.end():].strip()
+
+        is_scr = bool(re.search(r'\b(?:SCR|Scratch(?:ed)?)\b', seg, re.I))
+        if is_scr:
+            horse_raw = re.sub(r'\s*\b(?:SCR|Scratch(?:ed)?)\b\s*', ' ',
+                               horse_raw, flags=re.I).strip()
+
+        horse_name = horse_raw.title() if horse_raw == horse_raw.upper() else horse_raw
+        horse_name = re.sub(r'\s+', ' ', horse_name).strip()
+        if not horse_name or horse_name in seen_names:
+            continue
+        seen_names.add(horse_name)
+
+        # ── Jockey: J[:\\s] … stop before trainer or ML ──────────────────────
+        # (?-i:T[:\\s]+[A-Z][a-z]) ensures we stop at a proper-cased trainer
+        # name rather than "T" embedded inside a word in the jockey's name.
+        jockey = None
+        m_j = re.search(
+            r'J[:\s]\s*(.*?)(?=\s+(?-i:T[:\s]+[A-Z][a-z])|\s*[-–]?\s*ML\b|\Z)',
+            rest, re.I,
+        )
+        if m_j:
+            jockey = re.sub(r'\s+', ' ', m_j.group(1)).strip() or None
+
+        # ── Trainer: T[:\\s] … stop at ML or end ─────────────────────────────
+        trainer = None
+        m_t = re.search(r'T[:\s]\s*(.*?)(?=\s*[-–]?\s*ML\b|\Z)', rest, re.I)
+        if m_t:
+            trainer = re.sub(r'\s+', ' ', m_t.group(1)).strip() or None
+            if trainer:
+                trainer = re.sub(r'\s*[-–—]+\s*$', '', trainer).strip() or None
+
+        # ── Morning line: "-ML 8", "- ML 8", "ML 8", "-ML9/2" ───────────────
+        # In compact format the segment ends "ML {value}{next_prog_num}PP..." so
+        # next_prog_num bleeds into the ML capture.  Strip it when safe to do so.
+        next_pp_num = (
+            int(anchors[seg_idx + 1].group(1)) if seg_idx + 1 < len(anchors) else None
+        )
+        ml_str = ml_dec = None
+        pp_recap = ""
+        m_ml = re.search(r'[-–]?\s*ML\s*(\S+)', rest, re.I)
+        if m_ml:
+            raw_ml = m_ml.group(1).strip()
+            if next_pp_num is not None and raw_ml.endswith(str(next_pp_num)):
+                candidate = raw_ml[:-1]
+                if candidate and re.match(r'^\d+(?:/\d+)?$', candidate):
+                    raw_ml = candidate
+            ml_str, ml_dec = _parse_ml_1stbet(raw_ml)
+            pp_recap = rest[m_ml.end():].strip()
+            # Remove isolated program-number digit left by compact concatenation
+            if re.match(r'^\d{1,2}$', pp_recap):
+                pp_recap = ""
+        else:
+            warnings.append(
+                f"1/ST BET fallback: PP{pp} ({horse_name}) — no ML odds; runner kept"
+            )
+
+        runner = _runner_dict(pp, horse_name, jockey, trainer, ml_str, ml_dec, is_scr)
+        runner['ml'] = ml_str
+        if pp_recap:
+            runner['pp_recap'] = pp_recap
+        raw_runners.append(runner)
+
+    # ── Deduplication: exactly one runner per PP number (1–30) ───────────────
+    seen_pp: set[int] = set()
+    runners: list[dict] = []
+    for r in raw_runners:
+        pp = r['post_position']
+        if not (1 <= pp <= 30):
+            _log.debug("1stbet fallback: dropping out-of-range pp=%d (%s)", pp, r['horse_name'])
+            continue
+        if pp in seen_pp:
+            _log.debug("1stbet fallback: dropping duplicate pp=%d (%s)", pp, r['horse_name'])
+            continue
+        seen_pp.add(pp)
+        runners.append(r)
+
+    _log.debug("1stbet fallback: %d raw → %d deduped runners", len(raw_runners), len(runners))
+
+    if runners:
+        runners.sort(key=lambda r: r['post_position'])
+        warnings.append("1/ST BET fallback PP-anchor parser used.")
+
     return runners
 
 
@@ -879,7 +1072,11 @@ def parse_race_pdf(pdf_bytes: bytes) -> dict[str, Any]:
         surface       = hdr.get("surface") or _extract_surface(text)
         race_type     = hdr.get("race_type") or _extract_race_type(text)
         purse_usd     = hdr.get("purse_usd") or _extract_purse(text)
-        runners       = _parse_race_runners_1stbet(text.splitlines(), warnings)
+        runners_primary: list[dict] = _parse_race_runners_1stbet(text.splitlines(), warnings)
+        runners_fallback: list[dict] = []
+        if not runners_primary:
+            runners_fallback = _parse_race_runners_1stbet_fallback(text, warnings)
+        runners = runners_primary if runners_primary else runners_fallback
         # field_size from header is more reliable than counting runners
         # (includes scratches already present in the PDF)
         field_size_hdr = hdr.get("field_size")
@@ -892,7 +1089,9 @@ def parse_race_pdf(pdf_bytes: bytes) -> dict[str, Any]:
         surface       = _extract_surface(text)
         race_type     = _extract_race_type(text)
         purse_usd     = _extract_purse(text)
-        runners       = _parse_race_runners(text, warnings)
+        runners          = _parse_race_runners(text, warnings)
+        runners_primary: list[dict] = runners
+        runners_fallback: list[dict] = []
         field_size_hdr = None
 
     if not race_date:
@@ -911,6 +1110,16 @@ def parse_race_pdf(pdf_bytes: bytes) -> dict[str, Any]:
     active     = [r for r in runners if not r.get("is_scratched")]
     field_size = field_size_hdr or len(active)
 
+    # Validate parsed runner count against the header field size (1/ST BET path)
+    if field_size_hdr and runners:
+        if not (field_size_hdr - 1 <= len(runners) <= field_size_hdr + 1):
+            warnings.append(
+                f"Runner count mismatch: header says {field_size_hdr} horses "
+                f"but {len(runners)} were parsed — verify the PDF format."
+            )
+
+    _res = _resolve_track(track_name=track_name, track_code=track_code)
+
     return {
         "ok":            True,
         "error":         None,
@@ -924,9 +1133,16 @@ def parse_race_pdf(pdf_bytes: bytes) -> dict[str, Any]:
         "race_type":     race_type,
         "purse_usd":     purse_usd,
         "field_size":    field_size,
-        "runners":       runners,
-        "is_1stbet":     detected_1stbet,
+        "runners":          runners,
+        "runners_count":    len(runners),
+        "runners_primary":  runners_primary,
+        "runners_fallback": runners_fallback,
+        "is_1stbet":        detected_1stbet,
         "raw_text":      text,
+        # resolver enrichment — never overwrites the raw parsed fields above
+        "track_code_resolved":     _res["track_code"],
+        "track_name_canonical":    _res["track_name_canonical"],
+        "track_resolution_source": _res["resolution_source"],
     }
 
 

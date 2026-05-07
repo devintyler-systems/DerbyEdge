@@ -984,7 +984,7 @@ if meta:
         f"{meta.get('run_timestamp', '')[:19]} UTC"
     )
 
-tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9 = st.tabs([
+tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10 = st.tabs([
     "📋 Race Board",
     "🔍 Entry Details",
     "🧪 Model Diagnostics",
@@ -994,10 +994,31 @@ tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9 = st.tabs([
     "🏁 Results Import",
     "⚙ Admin",
     "📈 Calibration",
+    "❓ About & Help",
 ])
 
 # ── TAB 1: Race Board ──────────────────────────────────────────────────────────
+_ONBOARDING_KEY = "hide_new_here_onboarding"
+
 with tab1:
+    # ── New-user onboarding panel ─────────────────────────────────────────────
+    if not st.session_state.get(_ONBOARDING_KEY, False):
+        with st.container(border=True):
+            st.write("**New here? Start with these 3 steps**")
+            st.markdown(
+                "**1. Load a race** — Pick a track and race in the sidebar, "
+                "or import a race card / results PDF if it's not already in the list.\n\n"
+                "**2. Run the model & set Kelly** — Use **⚡ Rebuild features + rescore** "
+                "if needed, then set your bankroll and Kelly fraction. "
+                "The board will update with win % and suggested stakes.\n\n"
+                "**3. Check the Help tab** — Open the **❓ About & Help** tab for "
+                "explanations of Top Pick, favorites, fair odds, Kelly, chaos overlay, "
+                "and how to read the board."
+            )
+            if st.checkbox("Don't show this again", key="onboarding_checkbox"):
+                st.session_state[_ONBOARDING_KEY] = True
+                st.rerun()
+
     if board_df is None:
         # ── Unscored race: readiness + build/score actions ────────────────────
         _ru1, _ru2, _ru3, _ru4 = st.columns(4)
@@ -2084,6 +2105,9 @@ with tab5:
                 unsafe_allow_html=True,
             )
         else:
+            _p5_runners      = _pr5.get("runners") or []
+            _p5_runner_count = len(_p5_runners)
+
             if _pr5["warnings"]:
                 with st.expander(
                     f"⚠ Parse warnings ({len(_pr5['warnings'])})", expanded=True
@@ -2094,10 +2118,10 @@ with tab5:
             # Race preview
             st.markdown("**Race Preview**")
             _p51, _p52, _p53, _p54, _p55 = st.columns(5)
-            _p51.metric("Track",    _pr5.get("track_code") or _pr5.get("track_name") or "?")
+            _p51.metric("Track", _pr5.get("track_code") or _pr5.get("track_code_resolved") or _pr5.get("track_name") or "?")
             _p52.metric("Date",     _pr5.get("race_date") or "?")
             _p53.metric("Race",     f"R{_pr5['race_number']}" if _pr5.get("race_number") else "?")
-            _p54.metric("Runners",  _pr5.get("field_size", len(_pr5.get("runners", []))))
+            _p54.metric("Runners",  _p5_runner_count)
             _p55.metric("Distance", _pr5.get("distance_text") or "?")
             _p5_detail = [p for p in [
                 _pr5.get("surface"), _pr5.get("race_type"),
@@ -2107,26 +2131,61 @@ with tab5:
                 st.caption(" · ".join(_p5_detail))
 
             # Runners preview
-            if _pr5.get("runners"):
+            if _p5_runners:
                 st.markdown("**Runners**")
                 _p5_rows = [{
-                    "#":       r.get("program_number") or "?",
+                    "#":       r.get("program_number") or r.get("post_position") or "?",
                     "Horse":   r.get("horse_name") or "?",
                     "Jockey":  r.get("jockey") or "—",
                     "Trainer": r.get("trainer") or "—",
-                    "ML":      r.get("morning_line") or "—",
+                    "ML":      r.get("ml") or r.get("morning_line") or "—",
                     "SCR":     "✓" if r.get("is_scratched") else "",
-                } for r in _pr5["runners"]]
+                } for r in _p5_runners]
                 st.dataframe(
                     pd.DataFrame(_p5_rows),
                     use_container_width=True, hide_index=True,
                 )
+                for _p5r in _p5_runners:
+                    if _p5r.get("pp_recap"):
+                        with st.expander(f"📋 {_p5r.get('horse_name', '?')} — PP Recap"):
+                            st.caption(_p5r["pp_recap"])
+
+            # ── Debug expander (temporary) ────────────────────────────────────
+            with st.expander("🔍 Debug parse object"):
+                st.caption(f"Keys: {list(_pr5.keys())}")
+                st.caption(f"runners (canonical): {len(_pr5.get('runners') or [])}")
+                st.caption(f"runners_primary: {len(_pr5.get('runners_primary') or [])}")
+                st.caption(f"runners_fallback: {len(_pr5.get('runners_fallback') or [])}")
+
+            # ── Track code resolution & override ─────────────────────────────
+            _p5_parsed_code   = (_pr5.get("track_code") or "").strip().upper()
+            _p5_resolved_code = (_pr5.get("track_code_resolved") or "").strip().upper()
+            _p5_canonical     = _pr5.get("track_name_canonical") or ""
+            _p5_res_source    = _pr5.get("track_resolution_source") or "unresolved"
+
+            if _p5_res_source in ("alias_exact", "alias_fuzzy") and _p5_resolved_code:
+                st.caption(
+                    f"Track auto-resolved: **{_p5_resolved_code}** ({_p5_canonical}) "
+                    f"via {_p5_res_source}"
+                )
+
+            _p5_manual_code = st.text_input(
+                "Track code override",
+                value=_p5_parsed_code or _p5_resolved_code,
+                help=(
+                    "Auto-filled from the PDF or resolver. "
+                    "Edit only if the code is wrong or missing (e.g. type IND, PEN, SA)."
+                ),
+                key="pdf5_track_override",
+            ).strip().upper()
+
+            _p5_eff_code = _p5_manual_code or _p5_parsed_code or _p5_resolved_code
 
             # Race DB check
             _p5_exist_cid = None
-            if _pr5.get("track_code") and _pr5.get("race_date") and _pr5.get("race_number"):
+            if _p5_eff_code and _pr5.get("race_date") and _pr5.get("race_number"):
                 _p5_exist_cid = find_race_card(
-                    _conn5, _pr5["track_code"], _pr5["race_date"], int(_pr5["race_number"])
+                    _conn5, _p5_eff_code, _pr5["race_date"], int(_pr5["race_number"])
                 )
             if _p5_exist_cid:
                 st.markdown(
@@ -2145,13 +2204,13 @@ with tab5:
 
             # ── Create-button guardrail ────────────────────────────────────
             _p5_missing: list[str] = []
-            if not _pr5.get("track_code"):
+            if not _p5_eff_code:
                 _p5_missing.append("track code")
             if not _pr5.get("race_date"):
                 _p5_missing.append("race date")
             if not _pr5.get("race_number"):
                 _p5_missing.append("race number")
-            if not _pr5.get("runners"):
+            if not _p5_runners:
                 _p5_missing.append("runners (0 found)")
             _p5_can_create = len(_p5_missing) == 0
 
@@ -2176,8 +2235,8 @@ with tab5:
                     _p5_dist_yd = _rcb_parse_distance(_pr5.get("distance_text"))
                     _p5_cid, _, _p5_n, _p5_warns = find_or_create_race(
                         _conn5,
-                        _pr5["track_code"], _pr5["race_date"], int(_pr5["race_number"]),
-                        _pr5.get("runners") or [],
+                        _p5_eff_code, _pr5["race_date"], int(_pr5["race_number"]),
+                        _p5_runners,
                         distance_yards=_p5_dist_yd,
                         surface=_rcb_norm_surface(_pr5.get("surface") or ""),
                         stakes_name=_pr5.get("race_type") or None,
@@ -2194,7 +2253,7 @@ with tab5:
                         with st.spinner("Enriching entries with PP data…"):
                             _p5_enriched = enrich_runners_1stbet(
                                 _pr5["raw_text"],
-                                _pr5.get("runners") or [],
+                                _p5_runners,
                                 race_date=_pr5["race_date"],
                                 race_distance_yards=_p5_dist_yd or 1760,
                             )
@@ -2226,7 +2285,7 @@ with tab5:
                 ):
                     _p5_ts = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
                     _n_p5_odds = 0
-                    for _p5r in (_pr5.get("runners") or []):
+                    for _p5r in _p5_runners:
                         if _p5r.get("is_scratched"):
                             continue
                         _p5_dec = _p5r.get("morning_line_decimal")
@@ -3825,3 +3884,137 @@ with tab9:
             "TP = model top pick · PTF = post-time market favorite · "
             "Odds are decimal (e.g. 3.80 = 2.80/1)"
         )
+
+# ── TAB 10: About & Help ───────────────────────────────────────────────────────
+with tab10:
+    _h1, _h2, _h3 = st.columns([1, 6, 1])
+    with _h2:
+        st.markdown("""
+# DerbyEdge Operator Console — Overview
+
+DerbyEdge is a race-day decision engine for thoroughbred racing.
+It is built for people who want to bet smarter using structured probabilities and disciplined bankroll rules instead of gut feel.
+
+You don't need to write code. The app guides you through a simple loop:
+
+1. Load a race (from PDFs/screenshots).
+2. Let the model score every horse.
+3. See where the odds and your edge disagree.
+4. Decide whether to bet, how much, or to pass.
+5. After the race, import results and see how the model actually did.
+
+---
+
+## What DerbyEdge does
+
+DerbyEdge converts pre-race information into:
+
+- Win probabilities for every starter.
+- "Fair odds" (the price where a bet would be break-even).
+- Value tags that highlight potential overlays (value) and underlays (overbet horses).
+- Bankroll-safe bet sizes using fractional Kelly.
+
+It also ingests results so you can see, race by race:
+
+- Whether your top pick won or lost.
+- Whether the post-time favorite won or lost.
+- How "good" bets performed over time.
+
+---
+
+## Key concepts (plain language)
+
+- **Top Pick**
+  The horse with the highest model win probability for this race. This is the model's best guess, not necessarily the favorite or automatic bet.
+
+- **Morning-Line Favorite**
+  The horse the track's morning-line maker thought would be bet the hardest before the pools opened.
+
+- **Post-Time Favorite**
+  The actual favorite at race time, based on final official odds. This reflects what the betting public decided.
+
+- **Fair Odds**
+  The price where, given the model's win probability, a bet would be break-even in the long run. If the actual odds are higher than fair odds, the horse may be a value bet.
+
+- **Value / Edge**
+  How much better (or worse) the actual price is compared to fair odds.
+  - Positive edge: the market is paying you more than the model thinks the risk is worth.
+  - Negative edge: the horse is overbet; you are paying too much for its chance to win.
+
+- **Kelly (Bankroll fraction)**
+  A disciplined way to size bets based on edge and odds.
+  DerbyEdge uses fractional Kelly so you can choose, say, 25% of full Kelly, 10%, 5%, etc., to keep bet sizes conservative.
+
+- **Quality Tier**
+  A quick label of model confidence for this race:
+  - **seed_only** — thin data, seed priors. Treat with caution.
+  - **enriched_proxy** — model has extra information (recent form, basic PPs) but not full history.
+
+- **Chaos Overlay (for big fields only)**
+  An optional adjustment for large, messy races (like the Kentucky Derby). It looks for "dark horse" profiles that could benefit from traffic and pace chaos. On small, ordinary races, this is disabled or clearly marked as having no effect.
+
+---
+
+## Typical workflow for an everyday user
+
+1. **Pick a track and race**
+   Use the dropdown to select a track and race date, or import a new race from PDFs/screenshots if it's not already in the system.
+
+2. **Load odds and PPs**
+   - Morning-line odds come from race-card PDFs.
+   - Past performances (PPs) are pulled where available and converted into basic recent-form features.
+
+3. **Run the model**
+   Click to score the race. The board will show:
+   - Horse list with model win % and fair odds.
+   - Value tags highlighting potential opportunities.
+   - Model quality tier ("seed_only" vs "enriched_proxy").
+
+4. **Set bankroll and Kelly fraction**
+   Enter your total bankroll and choose a Kelly fraction (e.g., 10% of full Kelly).
+   DerbyEdge will propose stake sizes for each potential bet, with an option to see all the math.
+
+5. **Decide bets**
+   Review:
+   - Top Pick vs Favorites vs actual odds.
+   - Whether the model is confident (quality tier, missing data flags).
+   - Kelly-suggested stakes.
+   You can follow the suggestions, scale them down, or pass the race.
+
+6. **After the race: import results**
+   Load the results PDF. The app will:
+   - Match results to the race.
+   - Mark the winner, top pick outcome, and favorite outcome.
+   - Add the race to the Calibration tab.
+
+7. **Check Calibration**
+   On the 📈 Calibration tab, see:
+   - How often your top pick wins.
+   - How often the favorite wins.
+   - How the model is doing over time and by race type.
+
+---
+
+## How DerbyEdge is opinionated
+
+DerbyEdge is designed to protect you from common betting mistakes:
+
+- No auto-bet "locks" — the app never forces or auto-recommends "must bet" horses.
+- Honest about missing data — lower-confidence runs are labeled as such.
+- Scoped chaos — chaos overlays only apply where the race type justifies them.
+- Bankroll-first — Kelly sizing is intentionally fractional and capped.
+
+---
+
+## Where this is headed
+
+The current version is focused on:
+- Getting clean, truthful information in front of you.
+- Making it easy to load races, see the model view, size bets safely, and review outcomes.
+
+Future directions:
+- Deeper PP ingestion
+- Better pace/trip modeling
+- Multi-race daily cards and bet logging
+- Sharper calibration metrics and ROI analysis
+""")
