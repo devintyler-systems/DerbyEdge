@@ -161,6 +161,19 @@ def kelly_fraction(model_prob: float, decimal_odds: float, cap: float = 0.05) ->
     return round(min(f, cap), 4)
 
 
+def kelly_fraction_full(model_prob: float, decimal_odds: float) -> float:
+    """Full (uncapped) Kelly fraction f* = (b*p - q)/b, floored at 0.
+
+    Use this when you want to apply your own fractional multiplier rather
+    than a hard cap.  Returns 0.0 for -EV bets or invalid odds.
+    """
+    if decimal_odds <= 1.0:
+        return 0.0
+    b = decimal_odds - 1.0
+    f = (b * model_prob - (1.0 - model_prob)) / b
+    return round(max(f, 0.0), 6)
+
+
 def bet_tag(model_prob: float, market_prob: float, decimal_odds: float,
             min_edge: float = 0.20, strong_edge: float = 0.40) -> str:
     e = edge(model_prob, market_prob)

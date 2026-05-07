@@ -23,7 +23,7 @@ import plotly.graph_objects as go
 import streamlit as st
 
 from src.utils.db import get_connection
-from src.derbyedge.odds_math import kelly_fraction
+from src.derbyedge.odds_math import kelly_fraction, kelly_fraction_full
 from src.derbyedge.chaos_patch import apply_derby_chaos_patch
 from src.services.odds_intake import (
     delete_odds_for_race,
@@ -606,15 +606,28 @@ def _apply_chaos(df: pd.DataFrame, chaos_index: float) -> pd.DataFrame:
     return out
 
 
+_KELLY_SLIDER_MAX = 25.0   # slider value that equals full Kelly (multiplier 1.0)
+_KELLY_SAFETY_CAP = 0.25   # hard ceiling: never bet > 25% of bankroll on one bet
+_CHAOS_MIN_FIELD  = 10     # chaos patch designed for large fields; disable below this
+
+
 def _add_kelly(
     df: pd.DataFrame,
     bankroll: float,
-    max_kelly_pct: float,
+    kelly_pct: float,           # slider value 1-25 where 25 = full Kelly
     live_odds_by_pp: dict,
 ) -> pd.DataFrame:
-    """Add kelly_frac and stake_dollar columns. Only BET-tagged rows get a non-zero stake."""
-    cap = max_kelly_pct / 100.0
-    kelly_fracs, stakes = [], []
+    """Add kelly_frac / stake_dollar and debug columns to df.
+
+    kelly_pct is a fractional-Kelly multiplier: kelly_pct/25 of the full
+    Kelly fraction is used.  Every horse's stake scales proportionally —
+    halving kelly_pct halves all stakes.  A hard safety cap of 25% of
+    bankroll applies regardless of kelly_pct.
+
+    Debug columns added: full_kelly_frac, dec_odds_used, raw_stake.
+    """
+    multiplier   = kelly_pct / _KELLY_SLIDER_MAX   # e.g. 10/25 = 0.40
+    full_fracs, kelly_fracs, dec_odds_col, raw_stakes, stakes = [], [], [], [], []
 
     for _, row in df.iterrows():
         model_p = float(row.get("win_probability") or 0)
@@ -622,8 +635,8 @@ def _add_kelly(
         lo      = live_odds_by_pp.get(pp) if pp else None
 
         if model_p <= 0:
-            kelly_fracs.append(0.0)
-            stakes.append(0.0)
+            full_fracs.append(0.0); kelly_fracs.append(0.0)
+            dec_odds_col.append(None); raw_stakes.append(0.0); stakes.append(0.0)
             continue
 
         if lo and lo.get("decimal_odds"):
@@ -633,17 +646,26 @@ def _add_kelly(
             dec = (1.0 / mkt) if mkt and mkt > 0 else None
 
         if dec is None:
-            kelly_fracs.append(0.0)
-            stakes.append(0.0)
+            full_fracs.append(0.0); kelly_fracs.append(0.0)
+            dec_odds_col.append(None); raw_stakes.append(0.0); stakes.append(0.0)
             continue
 
-        kf = kelly_fraction(model_p, dec, cap=cap)
+        full_kf = kelly_fraction_full(model_p, dec)           # uncapped
+        raw_kf  = full_kf * multiplier                        # scaled, pre-cap
+        kf      = round(min(raw_kf, _KELLY_SAFETY_CAP), 4)   # safety cap
+
+        full_fracs.append(full_kf)
         kelly_fracs.append(kf)
+        dec_odds_col.append(round(dec, 3))
+        raw_stakes.append(round(raw_kf * bankroll, 4))
         stakes.append(round(kf * bankroll, 2))
 
     out = df.copy()
-    out["kelly_frac"]   = kelly_fracs
-    out["stake_dollar"] = stakes
+    out["full_kelly_frac"] = full_fracs
+    out["kelly_frac"]      = kelly_fracs
+    out["dec_odds_used"]   = dec_odds_col
+    out["raw_stake"]       = raw_stakes
+    out["stake_dollar"]    = stakes
     return out
 
 
@@ -881,17 +903,35 @@ with st.sidebar:
         "Bankroll ($)", min_value=0, max_value=1_000_000, value=1_000, step=100,
         help="Total betting bankroll. Stake$ = bankroll × capped Kelly fraction.",
     )
-    max_kelly_pct = st.slider(
-        "Kelly cap (%)", 1, 25, 5, 1,
-        help="Hard cap per bet as % of bankroll. 5% ≈ quarter-Kelly for racing.",
+    kelly_pct = st.slider(
+        "Kelly fraction", 1, 25, 5, 1,
+        help=(
+            "Fractional Kelly multiplier (1–25 where 25 = full Kelly). "
+            "25 ≈ full Kelly · 12 ≈ half Kelly · 6 ≈ quarter Kelly · 5 ≈ fifth Kelly. "
+            "All stakes scale proportionally — halving this halves every stake. "
+            "Hard cap: 25% of bankroll per bet regardless."
+        ),
     )
 
     st.divider()
     st.markdown("**Derby Chaos Overlay**")
+    _n_runners = _rdns.get("runners_loaded", 0)
+    _chaos_race_ok = _n_runners >= _CHAOS_MIN_FIELD
     chaos_on = st.toggle(
         "Apply chaos patch", value=False,
-        help="Reallocate win mass toward dark-horse beneficiaries.",
+        disabled=not _chaos_race_ok,
+        help=(
+            "Reallocate win mass toward dark-horse beneficiaries. "
+            f"Requires ≥{_CHAOS_MIN_FIELD} starters (3yo G1 dirt-route scope)."
+        ),
     )
+    if not _chaos_race_ok:
+        chaos_on = False  # override: widget may hold stale True from a prior race
+        _msg = (
+            f"Disabled — {_n_runners} starter(s). "
+            f"Chaos patch is designed for large-field stakes races (≥{_CHAOS_MIN_FIELD})."
+        ) if _n_runners > 0 else f"Disabled — no runners loaded (≥{_CHAOS_MIN_FIELD} required)."
+        st.caption(_msg)
     chaos_idx = st.slider(
         "Chaos index", 0.0, 1.0, 0.85, 0.05,
         disabled=not chaos_on,
@@ -1114,17 +1154,32 @@ with tab1:
         # ── Chaos overlay + Kelly ─────────────────────────────────────────────
         if chaos_on:
             disp = _apply_chaos(disp, chaos_idx)
-            st.markdown(
-                '<div style="background:#1a2a1a;border-left:3px solid #4caf50;'
-                'padding:8px 12px;border-radius:0 6px 6px 0;font-size:.85rem;'
-                'color:#81c784;margin-bottom:8px;">'
-                f'🌀 <strong>Chaos overlay active</strong> — index {chaos_idx:.2f} · '
-                'win mass reallocated toward dark-horse beneficiaries'
-                '</div>',
-                unsafe_allow_html=True,
-            )
+            _chaos_delta = (disp["chaos_win_prob"] - disp["win_probability"]).abs().sum()
+            _did_reallocate = _chaos_delta > 1e-4
+            if _did_reallocate:
+                st.markdown(
+                    '<div style="background:#1a2a1a;border-left:3px solid #4caf50;'
+                    'padding:8px 12px;border-radius:0 6px 6px 0;font-size:.85rem;'
+                    'color:#81c784;margin-bottom:8px;">'
+                    f'🌀 <strong>Chaos overlay active</strong> — index {chaos_idx:.2f} · '
+                    'win mass reallocated toward dark-horse beneficiaries'
+                    '</div>',
+                    unsafe_allow_html=True,
+                )
+            else:
+                st.markdown(
+                    '<div style="background:#1a1a1a;border-left:3px solid #888;'
+                    'padding:8px 12px;border-radius:0 6px 6px 0;font-size:.85rem;'
+                    'color:#aaa;margin-bottom:8px;">'
+                    f'🌀 <strong>Chaos overlay — no effect</strong> (index {chaos_idx:.2f}) · '
+                    'No dark-horse beneficiaries qualified. '
+                    'Requirements: win prob 1.5–12%, form ≥ 0.70, pace/dist fit ≥ 0.60. '
+                    'Win probabilities are unchanged.'
+                    '</div>',
+                    unsafe_allow_html=True,
+                )
 
-        disp = _add_kelly(disp, float(bankroll), float(max_kelly_pct), _live_odds_by_pp)
+        disp = _add_kelly(disp, float(bankroll), float(kelly_pct), _live_odds_by_pp)
         has_live_odds = bool(_live_odds_by_pp)
         has_kelly = bankroll > 0
 
@@ -1188,7 +1243,8 @@ with tab1:
             odds_src = "live odds" if has_live_odds else "ML proxy"
             st.markdown(
                 f'<div class="info-banner">💰 Kelly stakes — bankroll ${bankroll:,} · '
-                f'cap {max_kelly_pct}% · odds source: <strong>{odds_src}</strong></div>',
+                f'fraction {kelly_pct}/25 ({kelly_pct/25*100:.0f}% of full Kelly) · '
+                f'odds source: <strong>{odds_src}</strong></div>',
                 unsafe_allow_html=True,
             )
 
@@ -1208,6 +1264,44 @@ with tab1:
                 "SuDist":    st.column_config.NumberColumn("SuDist",    format="%.3f"),
             },
         )
+
+        # ── Kelly debug view ──────────────────────────────────────────────────
+        if has_kelly and st.checkbox("Show Kelly debug", key="kelly_debug", value=False):
+            _mult = kelly_pct / _KELLY_SLIDER_MAX
+            st.caption(
+                f"bankroll=${bankroll:,} · Kelly {kelly_pct}/25 · "
+                f"multiplier={_mult:.4f} · safety cap={_KELLY_SAFETY_CAP*100:.0f}%"
+            )
+            _dbg_cols = [
+                "horse_name", "win_probability", "market_implied_prob",
+                "dec_odds_used", "full_kelly_frac", "kelly_frac",
+                "raw_stake", "stake_dollar",
+            ]
+            _dbg = disp[[c for c in _dbg_cols if c in disp.columns]].copy()
+            _dbg.rename(columns={
+                "horse_name":        "Horse",
+                "win_probability":   "Model p",
+                "market_implied_prob": "Market p",
+                "dec_odds_used":     "Dec Odds",
+                "full_kelly_frac":   "Full Kelly f*",
+                "kelly_frac":        "Final Kelly f",
+                "raw_stake":         "Raw Stake ($)",
+                "stake_dollar":      "Stake$ (final)",
+            }, inplace=True)
+            st.dataframe(
+                _dbg,
+                use_container_width=True,
+                hide_index=True,
+                column_config={
+                    "Model p":       st.column_config.NumberColumn(format="%.4f"),
+                    "Market p":      st.column_config.NumberColumn(format="%.4f"),
+                    "Dec Odds":      st.column_config.NumberColumn(format="%.3f"),
+                    "Full Kelly f*": st.column_config.NumberColumn(format="%.6f"),
+                    "Final Kelly f": st.column_config.NumberColumn(format="%.4f"),
+                    "Raw Stake ($)": st.column_config.NumberColumn(format="%.4f"),
+                    "Stake$ (final)":st.column_config.NumberColumn(format="%.2f"),
+                },
+            )
 
         # ── Win probability bar chart ──────────────────────────────────────────
         st.subheader("Win Probability vs Market")
