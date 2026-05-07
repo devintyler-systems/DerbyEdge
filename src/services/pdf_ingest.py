@@ -718,6 +718,124 @@ def _parse_results_runners(text: str, warnings: list[str]) -> tuple[list[dict], 
     return runners, scratches
 
 
+# ── 1/ST BET / Equibase chart result parser ───────────────────────────────────
+
+def _parse_results_1stbet(text: str, warnings: list[str]) -> dict:
+    """Parse Equibase official chart PDFs (the format served by 1/ST BET results).
+
+    pdfplumber column extraction merges the 'Last Raced' column with each
+    result row, yielding lines like:
+        8Apr267PEN8 2 SpinningMusician(Beato,Inoel) 122 Lb 1 1 1 4 ... 0.80* 2p,...
+
+    Chart rows appear in finish order, so finish_position is assigned sequentially.
+    Returns {"finishers": list[dict], "scratches": list[str]}.
+    """
+    finishers: list[dict] = []
+    scratches: list[str] = []
+
+    lines = text.splitlines()
+
+    header_idx = -1
+    for i, line in enumerate(lines):
+        if re.search(r'Last\s+Raced\s+Pgm\s+Horse\s+Name', line, re.I):
+            header_idx = i
+            break
+    if header_idx == -1:
+        return {"finishers": [], "scratches": []}
+
+    _boundary = re.compile(
+        r'^(?:Fractional\s+Times?|Winner\b|Pgm\s+Horse(?:\s+Name|\s+Win)\b|'
+        r'Total\s+WPS|Past\s+Performance|Trainers?:|Owners?:|Footnotes?|Copyright)',
+        re.I,
+    )
+    body: list[str] = []
+    for line in lines[header_idx + 1:]:
+        if _boundary.match(line.strip()):
+            break
+        body.append(line)
+
+    # Each result row: {lastRaced}{raceRef} {pgm} {Name}({Jockey,Name}) {wgt} {ME} {pp} {rest…}
+    # Scratch line appears after the Fractional Times boundary in Equibase charts,
+    # so search the full text rather than just the body window.
+    re_scratch = re.compile(r'Scratched\s+Horse\(?s?\)?[:\s]+(.+)', re.I)
+    for line in lines:
+        ms = re_scratch.match(line.strip())
+        if ms:
+            for part in re.split(r',(?=\s*[A-Z])', ms.group(1)):
+                horse = re.sub(r'\s*\([^)]*\)\s*$', '', part).strip()
+                if horse:
+                    scratches.append(horse)
+
+    re_result = re.compile(
+        r'^\s*\d{1,2}[A-Za-z]{3}\d{2}\S*\s+'  # last-raced + race-ref (e.g. 8Apr267PEN8)
+        r'(\d{1,2})\s+'                          # group 1: program number
+        r'([A-Za-z]\S+?)'                         # group 2: HorseName (CamelCase, spaces removed by pdfplumber)
+        r'\(([^)]+)\)\s+'                         # group 3: Jockey,Name
+        r'\d{2,3}\s+'                             # weight
+        r'\S+\s+'                                  # M/E flags (e.g. Lb, Lbf)
+        r'(\d{1,2})\s+'                            # group 4: post position
+        r'(.+)$'                                   # group 5: Start..Fin Odds Comments
+    )
+
+    finish_pos = 0
+    for line in body:
+        stripped = line.strip()
+        if not stripped:
+            continue
+
+        mr = re_result.match(stripped)
+        if not mr:
+            continue
+
+        pgm      = int(mr.group(1))
+        pp       = int(mr.group(4))
+        raw_name = mr.group(2)
+        raw_jock = mr.group(3)
+        rest     = mr.group(5)
+
+        # Re-insert spaces lost to pdfplumber column compression (CamelCase → Title Case)
+        horse_name = re.sub(r'([a-z])([A-Z])', r'\1 \2', raw_name)
+        jockey     = re.sub(r',([A-Za-z])', r', \1', raw_jock)
+
+        # Odds = rightmost pure-numeric token (decimal or integer, optional trailing *)
+        # Fractional-position tokens contain "/" (e.g. 31/2, 53/4) and never match
+        odds_raw: str | None = None
+        for tok in rest.split():
+            if re.match(r'^\d+(?:\.\d+)?\*?$', tok):
+                odds_raw = tok
+
+        if odds_raw:
+            odds_str = odds_raw.rstrip('*')
+            odds_dec = _norm_odds(odds_str)
+        else:
+            odds_str = odds_dec = None
+            warnings.append(f"1/ST BET results: no odds token found for {horse_name}")
+
+        finish_pos += 1
+        finishers.append({
+            "program_number":        pgm,
+            "post_position":         pp,
+            "horse_name":            horse_name,
+            "finish_position":       finish_pos,
+            "official_finish":       finish_pos,
+            "final_odds":            odds_str,
+            "official_odds":         odds_str,
+            "official_odds_decimal": odds_dec,
+            "jockey":                jockey,
+            "trainer":               None,
+            "is_scratched":          False,
+            "is_disqualified":       False,
+            "beaten_lengths":        None,
+            "speed_figure":          None,
+            "beyer_figure":          None,
+            "earned_purse":          None,
+            "final_time":            None,
+            "comment":               None,
+        })
+
+    return {"finishers": finishers, "scratches": scratches}
+
+
 # ── Public API ────────────────────────────────────────────────────────────────
 
 def parse_race_pdf(pdf_bytes: bytes) -> dict[str, Any]:
@@ -875,7 +993,16 @@ def parse_results_pdf(pdf_bytes: bytes) -> dict[str, Any]:
     if not track_code:
         warnings.append("Could not extract track code")
 
-    runners, scratches = _parse_results_runners(text, warnings)
+    # 1/ST BET / Equibase chart: detected by the standard results-chart header
+    runners: list[dict] = []
+    scratches: list[dict] = []
+    if re.search(r'Last\s+Raced\s+Pgm\s+Horse\s+Name', text):
+        parsed = _parse_results_1stbet(text, warnings)
+        runners  = parsed["finishers"]
+        scratches = [{"horse_name": n, "is_scratched": True} for n in parsed["scratches"]]
+    if not runners:
+        runners, scratches = _parse_results_runners(text, warnings)
+
     finishers = [r for r in runners if not r.get("is_scratched")]
 
     return {

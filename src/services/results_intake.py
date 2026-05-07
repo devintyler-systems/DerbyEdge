@@ -293,6 +293,59 @@ def parse_results_csv(raw: bytes | str) -> tuple[list[ParseResult], list[ParseEr
     return parsed, errors
 
 
+# ── Row normalization ─────────────────────────────────────────────────────────
+
+def _normalize_result_row(row: dict) -> dict:
+    """Return row with all optional fields populated from safe defaults.
+
+    Allows ingest_results and preview_results_match to accept rows from both
+    parse_results_csv and parse_results_pdf without KeyError on absent fields.
+
+    Required keys (race_date, track_code, race_number, horse_name) use direct
+    indexing so callers still get an informative KeyError when truly missing.
+
+    Normalized schema
+    -----------------
+    race_date             str          YYYY-MM-DD
+    track_code            str          e.g. "PEN"
+    race_number           int
+    horse_name            str
+    finish_position       int | None
+    is_scratched          bool         default False
+    is_disqualified       bool         default False
+    coupled_entry         str | None   default None
+    official_odds_decimal float | None default None
+    post_position         int | None   default None
+    beaten_lengths        float | None default None
+    speed_figure          int | None   default None
+    beyer_figure          int | None   default None
+    final_time            str | None   default None
+    earned_purse          int | None   default None
+    comment               str | None   default None
+    """
+    return {
+        # Required
+        "race_date":             row["race_date"],
+        "track_code":            row["track_code"],
+        "race_number":           row["race_number"],
+        "horse_name":            row["horse_name"],
+        # Boolean flags
+        "is_scratched":          bool(row.get("is_scratched",    False)),
+        "is_disqualified":       bool(row.get("is_disqualified", False)),
+        "coupled_entry":         row.get("coupled_entry"),
+        # Finish / odds / figures
+        "finish_position":       row.get("finish_position"),
+        "official_odds_decimal": row.get("official_odds_decimal"),
+        "post_position":         row.get("post_position"),
+        "beaten_lengths":        row.get("beaten_lengths"),
+        "speed_figure":          row.get("speed_figure"),
+        "beyer_figure":          row.get("beyer_figure"),
+        "final_time":            row.get("final_time"),
+        "earned_purse":          row.get("earned_purse"),
+        "comment":               row.get("comment"),
+    }
+
+
 # ── DB lookup helpers ─────────────────────────────────────────────────────────
 def _find_card_id(
     conn: sqlite3.Connection,
@@ -360,6 +413,7 @@ def preview_results_match(
     horses_duplicate: list[dict] = []
 
     for row in parsed_rows:
+        row = _normalize_result_row(row)
         key = (row["track_code"], row["race_date"], row["race_number"])
 
         if key not in card_cache:
@@ -442,6 +496,7 @@ def ingest_results(
     card_cache: dict[tuple, int | None] = {}
 
     for row in parsed_rows:
+        row = _normalize_result_row(row)
         key = (row["track_code"], row["race_date"], row["race_number"])
         if key not in card_cache:
             card_cache[key] = _find_card_id(conn, *key)
@@ -625,8 +680,18 @@ def evaluate_score_run(
     )
     top_pick_finish = top.get("finish_position")
 
-    fav = min(active, key=lambda r: r["morning_line_odds"]) if active else top
-    fav_won = bool(winner_row and winner_row["horse_name"] == fav["horse_name"])
+    # ML favorite: lowest morning-line odds among non-confirmed-scratches.
+    # is_scratched=NULL (horse not in race_results) is treated as not-confirmed-scratch;
+    # confirmed scratches (is_scratched=1 from race_results) are excluded.
+    ml_pool = [r for r in data if not r.get("is_scratched") and r.get("morning_line_odds") is not None]
+    ml_fav  = min(ml_pool, key=lambda r: r["morning_line_odds"]) if ml_pool else None
+
+    # Post-time favorite: lowest official_odds_decimal among horses that actually started.
+    # official_odds_decimal is NULL for any horse not in race_results (scratches, etc.),
+    # so the odds filter alone is sufficient to exclude scratches.
+    ptf_pool = [r for r in data if not r.get("is_scratched") and r.get("official_odds_decimal") is not None]
+    ptf_fav  = min(ptf_pool, key=lambda r: r["official_odds_decimal"]) if ptf_pool else None
+    ptf_won  = bool(ptf_fav and winner_row and winner_row["horse_name"] == ptf_fav["horse_name"])
 
     # Top-3 hit rate
     top3_model  = {r["horse_name"] for r in data[:3]}
@@ -680,8 +745,10 @@ def evaluate_score_run(
         "top_pick":        top["horse_name"],
         "top_pick_finish": top_pick_finish,
         "top_pick_won":    top_pick_won,
-        "fav_name":        fav["horse_name"],
-        "fav_won":         fav_won,
+        "ml_favorite_name":        ml_fav["horse_name"] if ml_fav else None,
+        "post_time_favorite_name": ptf_fav["horse_name"] if ptf_fav else None,
+        "post_time_favorite_won":  ptf_won,
+        "post_time_favorite_odds": ptf_fav["official_odds_decimal"] if ptf_fav else None,
         "top3_hit":        top3_hit,
         "n_bets":          len(bet_rows),
         "n_bets_won":      len(bet_won),
@@ -690,6 +757,131 @@ def evaluate_score_run(
         "kelly_staked":    round(kelly_stake_total, 2),
         "full_results":    data,
     }
+
+
+_OUTCOMES_SQL = """
+WITH base AS (
+    SELECT
+        sr.run_id, sr.card_id, sr.run_timestamp, sr.model_type,
+        mr.model_name,
+        t.abbrev  AS track_code,
+        rc.card_date, rc.race_number, rc.distance_furlongs,
+        rc.surface, rc.race_class,
+        COALESCE(
+            rc.field_size,
+            (SELECT COUNT(*) FROM entries e WHERE e.card_id = rc.card_id AND e.scratch_flag = 0)
+        ) AS field_size,
+        es.rank, es.horse_name, es.win_probability, es.morning_line_odds,
+        rr.finish_position, rr.official_finish,
+        COALESCE(rr.is_scratched,    0) AS is_scratched,
+        COALESCE(rr.is_disqualified, 0) AS is_disqualified,
+        rr.official_odds_decimal
+    FROM score_runs sr
+    JOIN model_registry mr ON sr.model_id   = mr.model_id
+    JOIN race_cards     rc ON sr.card_id     = rc.card_id
+    JOIN tracks          t ON rc.track_id    = t.track_id
+    JOIN entry_scores   es ON es.run_id      = sr.run_id
+    LEFT JOIN race_results rr
+           ON rr.entry_id = es.entry_id AND rr.card_id = sr.card_id
+    WHERE EXISTS (SELECT 1 FROM race_results x WHERE x.card_id = sr.card_id)
+),
+tp AS (
+    SELECT run_id,
+           horse_name           AS top_pick_name,
+           win_probability      AS top_pick_win_prob,
+           finish_position      AS top_pick_finish_pos,
+           CASE WHEN official_finish = 1 AND is_disqualified = 0 THEN 1 ELSE 0 END AS top_pick_won
+    FROM base WHERE rank = 1
+),
+winner AS (
+    SELECT run_id,
+           horse_name              AS winner_name,
+           official_odds_decimal   AS winner_official_odds
+    FROM base
+    WHERE official_finish = 1 AND is_disqualified = 0 AND is_scratched = 0
+),
+ptf_rk AS (
+    SELECT run_id, horse_name, official_odds_decimal,
+           RANK() OVER (PARTITION BY run_id ORDER BY official_odds_decimal) AS rk
+    FROM base
+    WHERE official_odds_decimal IS NOT NULL AND is_scratched = 0
+),
+ptf AS (
+    SELECT run_id,
+           horse_name              AS post_time_favorite_name,
+           official_odds_decimal   AS post_time_favorite_odds
+    FROM ptf_rk WHERE rk = 1
+),
+ml_rk AS (
+    SELECT run_id, horse_name, finish_position,
+           RANK() OVER (PARTITION BY run_id ORDER BY morning_line_odds) AS rk
+    FROM base
+    WHERE morning_line_odds IS NOT NULL AND is_scratched = 0
+),
+mf AS (
+    SELECT run_id,
+           horse_name      AS ml_favorite_name,
+           finish_position AS ml_fav_finish_pos
+    FROM ml_rk WHERE rk = 1
+),
+meta AS (
+    SELECT DISTINCT run_id, card_id, run_timestamp, model_type, model_name,
+                    track_code, card_date, race_number, distance_furlongs,
+                    surface, race_class, field_size
+    FROM base
+)
+SELECT
+    meta.track_code,
+    meta.card_date                              AS race_date,
+    meta.race_number,
+    meta.distance_furlongs                      AS distance_f,
+    UPPER(SUBSTR(COALESCE(meta.surface,'?'),1,1)) AS surface_code,
+    meta.race_class                             AS race_type,
+    meta.field_size,
+    meta.model_type                             AS quality_tier,
+    meta.model_name,
+    meta.run_timestamp                          AS run_created_at,
+    tp.top_pick_name,
+    tp.top_pick_win_prob,
+    tp.top_pick_finish_pos,
+    tp.top_pick_won,
+    mf.ml_favorite_name,
+    mf.ml_fav_finish_pos                        AS ml_favorite_finish_pos,
+    CASE WHEN mf.ml_favorite_name = winner.winner_name THEN 1 ELSE 0 END AS ml_favorite_won,
+    ptf.post_time_favorite_name,
+    ptf.post_time_favorite_odds,
+    CASE WHEN ptf.post_time_favorite_name = winner.winner_name THEN 1 ELSE 0 END AS post_time_favorite_won,
+    winner.winner_name,
+    winner.winner_official_odds
+FROM meta
+LEFT JOIN tp     ON tp.run_id     = meta.run_id
+LEFT JOIN mf     ON mf.run_id     = meta.run_id
+LEFT JOIN ptf    ON ptf.run_id    = meta.run_id
+LEFT JOIN winner ON winner.run_id = meta.run_id
+ORDER BY meta.card_date DESC, meta.run_timestamp DESC
+LIMIT ?
+"""
+
+_OUTCOMES_COLS = [
+    "track_code", "race_date", "race_number", "distance_f", "surface_code",
+    "race_type", "field_size", "quality_tier", "model_name", "run_created_at",
+    "top_pick_name", "top_pick_win_prob", "top_pick_finish_pos", "top_pick_won",
+    "ml_favorite_name", "ml_favorite_finish_pos", "ml_favorite_won",
+    "post_time_favorite_name", "post_time_favorite_odds", "post_time_favorite_won",
+    "winner_name", "winner_official_odds",
+]
+
+
+def load_outcomes_frame(conn: sqlite3.Connection, limit: int = 100) -> list[dict]:
+    """Return one row per (race, score_run) with model vs market outcome data.
+
+    Only races that have race_results ingested are included.
+    """
+    try:
+        rows = conn.execute(_OUTCOMES_SQL, (limit,)).fetchall()
+        return [dict(zip(_OUTCOMES_COLS, r)) for r in rows]
+    except Exception:
+        return []
 
 
 def delete_results_for_race(conn: sqlite3.Connection, card_id: int) -> int:

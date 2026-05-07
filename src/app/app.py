@@ -51,6 +51,7 @@ from src.services.results_intake import (
     delete_results_for_race,
     evaluate_score_run,
     ingest_results,
+    load_outcomes_frame,
     load_results_summary,
     parse_results_csv,
     preview_results_match,
@@ -259,8 +260,20 @@ def load_race_info(card_id: int) -> dict:
                WHERE rc.card_id = ?""",
             (card_id,),
         ).fetchone()
+        result = dict(row) if row else {}
+        # Derive field_size from active entries when race_cards.field_size is NULL
+        if result and not result.get("field_size"):
+            try:
+                n = conn.execute(
+                    "SELECT COUNT(*) FROM entries WHERE card_id=? AND scratch_flag=0",
+                    (card_id,),
+                ).fetchone()[0]
+                if n:
+                    result["field_size"] = n
+            except Exception:
+                pass
         conn.close()
-        return dict(row) if row else {}
+        return result
     except Exception:
         return {}
 
@@ -347,30 +360,54 @@ def load_race_readiness(card_id: int) -> dict:
                 ).fetchone()[0]
             except Exception:
                 pass
-        n_lo = 0
+        # Live (post-time) odds — live_odds rows with is_morning_line=0
+        n_live = 0
         for _q in [
             "SELECT COUNT(DISTINCT post_position) FROM live_odds WHERE card_id=? AND is_morning_line=0",
             "SELECT COUNT(DISTINCT post_position) FROM live_odds WHERE card_id=?",
         ]:
             try:
-                n_lo = conn.execute(_q, (card_id,)).fetchone()[0]
+                n_live = conn.execute(_q, (card_id,)).fetchone()[0]
                 break
             except Exception:
                 continue
+        # Morning-line odds — entries.morning_line_odds (from race-card import)
+        # or official_odds_decimal from ingested results
+        n_ml = 0
+        try:
+            n_ml = conn.execute(
+                "SELECT COUNT(*) FROM entries"
+                " WHERE card_id=? AND morning_line_odds IS NOT NULL AND scratch_flag=0",
+                (card_id,),
+            ).fetchone()[0]
+        except Exception:
+            pass
+        if not n_ml:
+            try:
+                n_ml = conn.execute(
+                    "SELECT COUNT(*) FROM race_results"
+                    " WHERE card_id=? AND official_odds_decimal IS NOT NULL",
+                    (card_id,),
+                ).fetchone()[0]
+            except Exception:
+                pass
         conn.close()
         return {
-            "runners_loaded": n_entries,
-            "odds_loaded":    n_lo > 0,
-            "pp_loaded":      n_pp > 0,
-            "model_run":      n_runs > 0,
-            "n_pp_rows":      n_pp,
-            "n_odds_posts":   n_lo,
+            "runners_loaded":   n_entries,
+            "live_odds_loaded": n_live > 0,
+            "ml_odds_loaded":   n_ml > 0,
+            "odds_loaded":      n_live > 0 or n_ml > 0,
+            "pp_loaded":        n_pp > 0,
+            "model_run":        n_runs > 0,
+            "n_pp_rows":        n_pp,
+            "n_odds_posts":     n_live,
         }
     except Exception:
         return {
             "runners_loaded": 0, "odds_loaded": False,
-            "pp_loaded": False,  "model_run": False,
-            "n_pp_rows": 0,      "n_odds_posts": 0,
+            "live_odds_loaded": False, "ml_odds_loaded": False,
+            "pp_loaded": False, "model_run": False,
+            "n_pp_rows": 0, "n_odds_posts": 0,
         }
 
 
@@ -724,10 +761,19 @@ with st.sidebar:
         if race_info:
             st.markdown("**Race**")
             _race_name = race_info.get("stakes_name") or f"Race {race_info.get('race_number', 1)}"
-            st.markdown(f"**{_race_name}** ({race_info.get('race_class') or 'Unknown'})")
+            _race_cls  = race_info.get("race_class")
+            _cls_sfx   = f" ({_race_cls})" if _race_cls else ""
+            st.markdown(f"**{_race_name}**{_cls_sfx}")
+            _tname = race_info.get("track_name") or race_info.get("track_abbrev") or "Unknown"
+            _city, _state = race_info.get("city"), race_info.get("state")
+            if _city and _state:
+                _loc = f"{_tname} · {_city}, {_state}"
+            elif _city or _state:
+                _loc = f"{_tname} · {_city or _state}"
+            else:
+                _loc = _tname
             st.caption(
-                f"{race_info.get('track_name') or 'Unknown'} · "
-                f"{race_info.get('city') or 'Unknown'}, {race_info.get('state') or 'Unknown'}  \n"
+                f"{_loc}  \n"
                 f"{race_info.get('card_date') or 'Unknown'} · "
                 f"{race_info.get('distance_furlongs') or '?'}f "
                 f"{race_info.get('surface') or 'Unknown'} · "
@@ -740,12 +786,17 @@ with st.sidebar:
             cls = "badge-impl" if ok else "badge-phld"
             sym = "✓" if ok else "✗"
             return f'<span class="status-badge {cls}">{sym} {label}</span>'
+        _odds_label = (
+            "Odds"    if _rdns["live_odds_loaded"] else
+            "ML Odds" if _rdns["ml_odds_loaded"]   else
+            "Odds"
+        )
         st.markdown(
             " ".join([
                 _rbadge(_rdns["runners_loaded"] > 0, "Runners"),
-                _rbadge(_rdns["odds_loaded"],         "Odds"),
-                _rbadge(_rdns["pp_loaded"],           "PPs"),
-                _rbadge(_rdns["model_run"],           "Scored"),
+                _rbadge(_rdns["odds_loaded"],        _odds_label),
+                _rbadge(_rdns["pp_loaded"],          "PPs"),
+                _rbadge(_rdns["model_run"],          "Scored"),
             ]),
             unsafe_allow_html=True,
         )
@@ -893,7 +944,7 @@ if meta:
         f"{meta.get('run_timestamp', '')[:19]} UTC"
     )
 
-tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8 = st.tabs([
+tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9 = st.tabs([
     "📋 Race Board",
     "🔍 Entry Details",
     "🧪 Model Diagnostics",
@@ -902,6 +953,7 @@ tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8 = st.tabs([
     "📊 PP Import",
     "🏁 Results Import",
     "⚙ Admin",
+    "📈 Calibration",
 ])
 
 # ── TAB 1: Race Board ──────────────────────────────────────────────────────────
@@ -911,7 +963,10 @@ with tab1:
         _ru1, _ru2, _ru3, _ru4 = st.columns(4)
         _ru1.metric("Runners", _rdns["runners_loaded"] or "—",
                     delta="Loaded" if _rdns["runners_loaded"] else "Missing")
-        _ru2.metric("Live Odds", "✓" if _rdns["odds_loaded"] else "✗")
+        _ru2.metric(
+            "Live Odds" if _rdns["live_odds_loaded"] else "Odds",
+            "✓" if _rdns["live_odds_loaded"] else ("ML ✓" if _rdns["ml_odds_loaded"] else "✗"),
+        )
         _ru3.metric("PP History",
                     f"{_rdns['n_pp_rows']} rows" if _rdns["pp_loaded"] else "—")
         _ru4.metric("Score Run", "✓" if _rdns["model_run"] else "✗ Not yet")
@@ -3188,13 +3243,25 @@ with tab7:
                     _eval["top_pick"],
                     delta="WON ✓" if _eval["top_pick_won"] else f"Finished {_top_fin}" if _top_fin else "Scratched",
                     delta_color="normal" if _eval["top_pick_won"] else "inverse",
+                    help="Model's highest win-probability selection for this race",
                 )
-                _ev3.metric(
-                    "Favorite",
-                    _eval["fav_name"],
-                    delta="WON ✓" if _eval["fav_won"] else "Lost",
-                    delta_color="normal" if _eval["fav_won"] else "inverse",
-                )
+                _ptf = _eval.get("post_time_favorite_name")
+                if _ptf:
+                    _ev3.metric(
+                        "Post-Time Favorite",
+                        _ptf,
+                        delta="WON ✓" if _eval["post_time_favorite_won"] else "Lost",
+                        delta_color="normal" if _eval["post_time_favorite_won"] else "inverse",
+                        help="Lowest official win odds at race time · source: race_results.official_odds_decimal",
+                    )
+                else:
+                    _ev3.metric(
+                        "Morning-Line Favorite",
+                        _eval.get("ml_favorite_name") or "—",
+                        delta="Pre-race only",
+                        delta_color="off",
+                        help="No official odds in results · showing pre-race morning-line favorite",
+                    )
                 _ev4.metric(
                     "Top-3 Hit Rate",
                     f"{_eval['top3_hit']}/3",
@@ -3512,3 +3579,155 @@ with tab8:
                         )
 
         _conn8.close()
+
+# ── TAB 9: Calibration & Outcomes ─────────────────────────────────────────────
+with tab9:
+    import pandas as _pd
+
+    @st.cache_data(ttl=60)
+    def _load_outcomes(limit: int) -> list[dict]:
+        _c9 = get_connection()
+        _rows = load_outcomes_frame(_c9, limit=limit)
+        _c9.close()
+        return _rows
+
+    st.subheader("📈 Calibration & Outcomes")
+    st.caption(
+        "One row per scored race with results ingested. "
+        "Compares model top pick and market favorites against actual outcome."
+    )
+
+    # ── Filter strip ──────────────────────────────────────────────────────────
+    _cf1, _cf2, _cf3, _cf4 = st.columns([2, 2, 2, 1])
+    with _cf1:
+        _cal_tier = st.selectbox(
+            "Quality tier",
+            ["All", "enriched_proxy", "seed_only"],
+            key="cal_tier",
+        )
+    with _cf2:
+        _cal_limit = st.selectbox(
+            "Show last N races",
+            [25, 50, 100, 250],
+            index=1,
+            key="cal_limit",
+        )
+
+    _outcomes_raw = _load_outcomes(_cal_limit)
+
+    # Filter by quality tier
+    if _cal_tier != "All":
+        _outcomes_raw = [r for r in _outcomes_raw if r.get("quality_tier") == _cal_tier]
+
+    with _cf3:
+        _all_tracks = sorted({r["track_code"] for r in _outcomes_raw if r.get("track_code")})
+        _cal_track = st.selectbox(
+            "Track",
+            ["All"] + _all_tracks,
+            key="cal_track",
+        )
+    with _cf4:
+        if st.button("↺ Refresh", key="cal_refresh", use_container_width=True):
+            st.cache_data.clear()
+            st.rerun()
+
+    if _cal_track != "All":
+        _outcomes_raw = [r for r in _outcomes_raw if r.get("track_code") == _cal_track]
+
+    if not _outcomes_raw:
+        st.info(
+            "No calibration data yet. Ingest race results for at least one scored race "
+            "to see model vs market outcomes here."
+        )
+    else:
+        # ── Summary metrics ───────────────────────────────────────────────────
+        _n_races = len(_outcomes_raw)
+        _tp_won_n = sum(1 for r in _outcomes_raw if r.get("top_pick_won"))
+        _tp_wr = round(100.0 * _tp_won_n / _n_races, 1) if _n_races else 0.0
+        _ptf_eligible = [r for r in _outcomes_raw if r.get("post_time_favorite_name")]
+        _ptf_won_n = sum(1 for r in _ptf_eligible if r.get("post_time_favorite_won"))
+        _ptf_wr = round(100.0 * _ptf_won_n / len(_ptf_eligible), 1) if _ptf_eligible else 0.0
+
+        _sm1, _sm2, _sm3 = st.columns(3)
+        _sm1.metric("Races", _n_races)
+        _sm2.metric(
+            "Top Pick Win Rate",
+            f"{_tp_wr}%",
+            delta=f"{_tp_won_n} of {_n_races}",
+            delta_color="off",
+        )
+        _sm3.metric(
+            "Post-Time Fav Win Rate",
+            f"{_ptf_wr}%" if _ptf_eligible else "—",
+            delta=f"{_ptf_won_n} of {len(_ptf_eligible)}" if _ptf_eligible else "no odds",
+            delta_color="off",
+        )
+
+        st.divider()
+
+        # ── Build display dataframe ───────────────────────────────────────────
+        _display_rows = []
+        for _r in _outcomes_raw:
+            _tp_won_sym = "✓" if _r.get("top_pick_won") else "✗"
+            _ptf_won_sym = (
+                "✓" if _r.get("post_time_favorite_won")
+                else ("✗" if _r.get("post_time_favorite_name") else "—")
+            )
+            _dist = _r.get("distance_f")
+            _dist_str = f"{_dist:.1f}f" if _dist else "?"
+            _tp_prob = _r.get("top_pick_win_prob")
+            _tp_prob_str = f"{_tp_prob:.0%}" if _tp_prob else "—"
+            _ptf_odds = _r.get("post_time_favorite_odds")
+            _ptf_odds_str = f"{_ptf_odds:.2f}" if _ptf_odds else "—"
+            _w_odds = _r.get("winner_official_odds")
+            _w_odds_str = f"{_w_odds:.2f}" if _w_odds else "—"
+            _display_rows.append({
+                "Date":       _r.get("race_date") or "",
+                "Track":      _r.get("track_code") or "",
+                "Race":       _r.get("race_number") or "",
+                "Dist":       _dist_str,
+                "Srf":        _r.get("surface_code") or "?",
+                "Type":       (_r.get("race_type") or "")[:14],
+                "Field":      _r.get("field_size") or "",
+                "Tier":       _r.get("quality_tier") or "",
+                "Top Pick":   _r.get("top_pick_name") or "—",
+                "TP Prob":    _tp_prob_str,
+                "TP Fin":     _r.get("top_pick_finish_pos") or "?",
+                "TP Won":     _tp_won_sym,
+                "PTF":        _r.get("post_time_favorite_name") or "—",
+                "PTF Odds":   _ptf_odds_str,
+                "PTF Won":    _ptf_won_sym,
+                "Winner":     _r.get("winner_name") or "—",
+                "W Odds":     _w_odds_str,
+            })
+
+        _cal_df = _pd.DataFrame(_display_rows)
+
+        # ── Pandas Styler: color TP Won and PTF Won columns ───────────────────
+        def _style_outcomes(df: "_pd.DataFrame") -> "_pd.DataFrame":
+            styles = _pd.DataFrame("", index=df.index, columns=df.columns)
+            for _i, _row in df.iterrows():
+                if _row.get("TP Won") == "✓":
+                    styles.at[_i, "TP Won"] = "color: #2ecc71; font-weight: bold"
+                elif _row.get("TP Won") == "✗":
+                    styles.at[_i, "TP Won"] = "color: #e74c3c"
+                if _row.get("PTF Won") == "✓":
+                    styles.at[_i, "PTF Won"] = "color: #2ecc71; font-weight: bold"
+                elif _row.get("PTF Won") == "✗":
+                    styles.at[_i, "PTF Won"] = "color: #e74c3c"
+            return styles
+
+        _cal_styled = _cal_df.style.apply(_style_outcomes, axis=None)
+
+        st.dataframe(
+            _cal_styled,
+            use_container_width=True,
+            hide_index=True,
+            height=min(40 + 35 * len(_display_rows), 600),
+        )
+
+        st.caption(
+            f"Showing {len(_display_rows)} race(s) · "
+            "TP = model top pick · PTF = post-time market favorite · "
+            "Odds are decimal (e.g. 3.80 = 2.80/1)"
+        )
