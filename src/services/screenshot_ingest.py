@@ -99,11 +99,22 @@ def ingest_sportsbook_screenshot(
         })
 
     return {
-        "ok": True,
-        "error": None,
-        "track_name": parsed.track_name,
-        "race_date": parsed.race_date,
-        "race_number": parsed.race_number,
-        "book_id": parsed.book_id,
-        "runners": runners_out,
+        "ok":            True,
+        "error":         None,
+        # race identity
+        "track_id":      parsed.track_id,       # Equibase code e.g. "CD" (may be None)
+        "track_name":    parsed.track_name,
+        "race_date":     parsed.race_date,
+        "race_number":   parsed.race_number,
+        "post_time":     parsed.post_time,
+        # race details needed for card creation
+        "distance_text": parsed.distance_text,  # verbatim e.g. "1 Mile"
+        "surface":       parsed.surface,         # "D"/"T"/etc.
+        "race_type":     parsed.race_type,       # e.g. "Maiden Claiming"
+        "purse_usd":     parsed.purse_usd,
+        "book_id":       parsed.book_id,
+        # processed runners (PP-matched)
+        "runners":       runners_out,
+        # raw runner dicts from ParsedScreenshot — used by race_card_builder
+        "runners_raw":   parsed.runners,
     }

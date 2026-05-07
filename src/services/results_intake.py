@@ -1,0 +1,723 @@
+"""Post-race results intake service for Operator Console.
+
+Parses an official result CSV/TSV, resolves entries via DB lookup,
+writes to race_results, and evaluates a prior score_run.
+
+Required CSV columns:
+    race_date, track_code, race_number, horse_name, finish_position
+
+Optional CSV columns:
+    official_odds, post_position, beaten_lengths, scratched, disqualified,
+    speed_figure, beyer_figure, final_time, earned_purse, comment
+
+Column aliases (any of these names are accepted):
+    race_date       : race_date | date | race_dt
+    track_code      : track_code | track | trk | track_abbrev
+    race_number     : race_number | race_num | race | rn
+    horse_name      : horse_name | horse | name | entry
+    finish_position : finish_position | finish | fin | pos | position | place
+    official_odds   : official_odds | odds | mutuels | final_odds | win_odds
+    post_position   : post_position | post | pp | pgm
+    beaten_lengths  : beaten_lengths | lengths_behind | beaten | lb | blen
+    scratched       : scratched | scratch | scr | is_scratched
+    disqualified    : disqualified | dq | dqed | is_dq | is_disqualified
+    speed_figure    : speed_figure | speed_fig | fig | spd_fig
+    beyer_figure    : beyer_figure | beyer | bf | beyer_fig
+    final_time      : final_time | time | finish_time | winning_time
+    earned_purse    : earned_purse | earned | purse | earnings
+    comment         : comment | notes | note | trip
+
+Training label notes
+--------------------
+race_results.official_finish is the ground-truth label for win prediction.
+To produce a labeled training example for a completed race:
+
+    SELECT
+        es.entry_id,
+        es.win_probability          AS pred_win_prob,
+        es.value_score              AS pred_edge,
+        es.bet_tag,
+        rr.official_finish          AS actual_finish,
+        CASE WHEN rr.official_finish = 1 THEN 1 ELSE 0 END AS won,
+        rr.official_odds_decimal    AS actual_odds,
+        rr.is_scratched,
+        rr.is_disqualified
+    FROM entry_scores es
+    JOIN race_results rr ON es.entry_id = rr.entry_id
+    WHERE es.run_id = ?
+    ORDER BY es.rank;
+
+Scratched and DQ horses should be excluded from win-probability calibration
+(is_scratched=1 or official_finish IS NULL).
+"""
+from __future__ import annotations
+
+import csv
+import difflib
+import io
+import re
+import sqlite3
+from datetime import datetime, timezone
+from typing import Any
+
+# ── Column alias sets ─────────────────────────────────────────────────────────
+RACE_DATE_ALIASES  = {"race_date", "date", "race_dt"}
+TRACK_CODE_ALIASES = {"track_code", "track", "trk", "track_abbrev"}
+RACE_NUM_ALIASES   = {"race_number", "race_num", "race", "rn"}
+HORSE_ALIASES      = {"horse_name", "horse", "name", "entry"}
+FINISH_ALIASES     = {"finish_position", "finish", "fin", "pos", "position", "place"}
+ODDS_ALIASES       = {"official_odds", "odds", "mutuels", "final_odds", "win_odds"}
+POST_ALIASES       = {"post_position", "post", "pp", "pgm"}
+BEATEN_ALIASES     = {"beaten_lengths", "lengths_behind", "beaten", "lb", "blen"}
+SCRATCH_ALIASES    = {"scratched", "scratch", "scr", "is_scratched"}
+DQ_ALIASES         = {"disqualified", "dq", "dqed", "is_dq", "is_disqualified"}
+SPEED_ALIASES      = {"speed_figure", "speed_fig", "fig", "spd_fig"}
+BEYER_ALIASES      = {"beyer_figure", "beyer", "bf", "beyer_fig"}
+TIME_ALIASES       = {"final_time", "time", "finish_time", "winning_time"}
+EARNED_ALIASES     = {"earned_purse", "earned", "purse", "earnings"}
+COMMENT_ALIASES    = {"comment", "notes", "note", "trip"}
+
+ParseResult = dict[str, Any]
+ParseError  = dict[str, Any]
+
+# ── Table DDL (auto-created on first ingest if missing) ───────────────────────
+_RESULTS_DDL = """
+CREATE TABLE IF NOT EXISTS race_results (
+    result_id               INTEGER PRIMARY KEY AUTOINCREMENT,
+    card_id                 INTEGER NOT NULL REFERENCES race_cards(card_id),
+    entry_id                INTEGER          REFERENCES entries(entry_id),
+    horse_id                INTEGER NOT NULL REFERENCES horses(horse_id),
+    post_position           INTEGER,
+    finish_position         INTEGER,
+    official_finish         INTEGER,
+    is_scratched            INTEGER NOT NULL DEFAULT 0 CHECK(is_scratched IN (0,1)),
+    is_disqualified         INTEGER NOT NULL DEFAULT 0 CHECK(is_disqualified IN (0,1)),
+    official_odds_decimal   REAL,
+    official_odds_american  INTEGER,
+    beaten_lengths          REAL,
+    speed_figure            INTEGER,
+    beyer_figure            INTEGER,
+    final_time              TEXT,
+    earned_purse            INTEGER,
+    comment                 TEXT,
+    ingested_at             TEXT NOT NULL,
+    UNIQUE(card_id, entry_id)
+);
+CREATE INDEX IF NOT EXISTS idx_rr_card  ON race_results(card_id);
+CREATE INDEX IF NOT EXISTS idx_rr_horse ON race_results(horse_id);
+CREATE INDEX IF NOT EXISTS idx_rr_entry ON race_results(entry_id);
+"""
+
+
+def _ensure_table(conn: sqlite3.Connection) -> None:
+    conn.executescript(_RESULTS_DDL)
+    conn.commit()
+
+
+# ── Internal parsers ──────────────────────────────────────────────────────────
+def _find_col(fieldnames: list[str], aliases: set[str]) -> str | None:
+    for col in fieldnames:
+        if col.strip().lower() in aliases:
+            return col
+    return None
+
+
+def _parse_date(s: str) -> str | None:
+    if not s:
+        return None
+    for fmt in ("%m/%d/%Y", "%m/%d/%y", "%Y-%m-%d", "%d-%b-%Y",
+                "%d-%b-%y", "%B %d, %Y", "%b %d, %Y"):
+        try:
+            return datetime.strptime(s.strip(), fmt).strftime("%Y-%m-%d")
+        except ValueError:
+            pass
+    return None
+
+
+def _parse_bool(s: str) -> bool:
+    return str(s).strip().lower() in {"1", "true", "yes", "y", "x", "scratched", "scr", "dq"}
+
+
+def _parse_int(s: str) -> int | None:
+    if not s:
+        return None
+    try:
+        return int(str(s).strip().split(".")[0])
+    except ValueError:
+        return None
+
+
+def _parse_float(s: str) -> float | None:
+    if not s:
+        return None
+    cleaned = re.sub(r"[$,]", "", str(s).strip())
+    try:
+        return float(cleaned)
+    except ValueError:
+        return None
+
+
+def _parse_odds(raw: str) -> float | None:
+    """Accept decimal (e.g. '3.40'), fractional ('9/2'), or American ('+450')."""
+    raw = raw.strip()
+    if not raw:
+        return None
+    # fractional "9/2"
+    m = re.match(r"^(\d+)/(\d+)$", raw)
+    if m:
+        return round(int(m.group(1)) / int(m.group(2)) + 1.0, 3)
+    # american "+450" or "-110"
+    m = re.match(r"^([+-])(\d+)$", raw)
+    if m:
+        val = int(m.group(2)) * (1 if m.group(1) == "+" else -1)
+        if val > 0:
+            return round(val / 100 + 1.0, 3)
+        elif val < 0:
+            return round(-100 / val + 1.0, 3)
+    v = _parse_float(raw)
+    if v is not None and v >= 1.0:
+        return v
+    return None
+
+
+def _norm_name(s: str) -> str:
+    return " ".join(s.strip().split()).title() if s else ""
+
+
+def _now_utc() -> str:
+    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+# ── Public parsers ────────────────────────────────────────────────────────────
+def parse_results_csv(raw: bytes | str) -> tuple[list[ParseResult], list[ParseError]]:
+    """Parse official result CSV/TSV into normalized rows + per-row errors.
+
+    Auto-detects TSV vs CSV from header row.
+    Returns (parsed_rows, error_rows).
+    """
+    if isinstance(raw, bytes):
+        text = raw.decode("utf-8", errors="replace")
+    else:
+        text = raw
+
+    first = text.split("\n")[0] if text else ""
+    sep = "\t" if "," not in first and "\t" in first else ","
+
+    reader = csv.DictReader(io.StringIO(text), delimiter=sep)
+    fnames = reader.fieldnames or []
+    if not fnames:
+        return [], [{"row": 0, "raw": {}, "reason": "No headers found in file"}]
+
+    c_date    = _find_col(fnames, RACE_DATE_ALIASES)
+    c_track   = _find_col(fnames, TRACK_CODE_ALIASES)
+    c_racenum = _find_col(fnames, RACE_NUM_ALIASES)
+    c_horse   = _find_col(fnames, HORSE_ALIASES)
+    c_finish  = _find_col(fnames, FINISH_ALIASES)
+    c_odds    = _find_col(fnames, ODDS_ALIASES)
+    c_post    = _find_col(fnames, POST_ALIASES)
+    c_beaten  = _find_col(fnames, BEATEN_ALIASES)
+    c_scratch = _find_col(fnames, SCRATCH_ALIASES)
+    c_dq      = _find_col(fnames, DQ_ALIASES)
+    c_speed   = _find_col(fnames, SPEED_ALIASES)
+    c_beyer   = _find_col(fnames, BEYER_ALIASES)
+    c_time    = _find_col(fnames, TIME_ALIASES)
+    c_earned  = _find_col(fnames, EARNED_ALIASES)
+    c_comment = _find_col(fnames, COMMENT_ALIASES)
+
+    missing = []
+    if not c_date:    missing.append("race_date")
+    if not c_track:   missing.append("track_code")
+    if not c_racenum: missing.append("race_number")
+    if not c_horse:   missing.append("horse_name")
+    if missing:
+        return [], [{
+            "row": 0, "raw": {},
+            "reason": (f"Required columns not found: {', '.join(missing)}. "
+                       f"Headers detected: {', '.join(fnames)}"),
+        }]
+
+    parsed: list[ParseResult] = []
+    errors: list[ParseError]  = []
+
+    for row_n, row in enumerate(reader, start=2):
+        raw_dict = dict(row)
+
+        horse = _norm_name(row.get(c_horse, ""))
+        if not horse:
+            errors.append({"row": row_n, "raw": raw_dict, "reason": "Blank horse_name"})
+            continue
+
+        race_date = _parse_date(row.get(c_date, ""))
+        if not race_date:
+            errors.append({"row": row_n, "raw": raw_dict,
+                           "reason": f"Unparseable date: {row.get(c_date, '')!r}"})
+            continue
+
+        track_code = (row.get(c_track) or "").strip().upper()
+        if not track_code:
+            errors.append({"row": row_n, "raw": raw_dict, "reason": "Blank track_code"})
+            continue
+
+        race_num = _parse_int(row.get(c_racenum, ""))
+        if race_num is None:
+            errors.append({"row": row_n, "raw": raw_dict,
+                           "reason": f"Unparseable race_number: {row.get(c_racenum, '')!r}"})
+            continue
+
+        is_scratched = _parse_bool(row.get(c_scratch, "")) if c_scratch else False
+        is_dq        = _parse_bool(row.get(c_dq, "")) if c_dq else False
+
+        # finish_position is blank/null for scratches
+        finish = None
+        if not is_scratched and c_finish:
+            finish = _parse_int(row.get(c_finish, ""))
+
+        parsed.append({
+            "race_date":            race_date,
+            "track_code":           track_code,
+            "race_number":          race_num,
+            "horse_name":           horse,
+            "finish_position":      finish,
+            "is_scratched":         is_scratched,
+            "is_disqualified":      is_dq,
+            "official_odds_decimal":_parse_odds(row.get(c_odds, "") or "") if c_odds else None,
+            "post_position":        _parse_int(row.get(c_post, "")) if c_post else None,
+            "beaten_lengths":       _parse_float(row.get(c_beaten, "")) if c_beaten else None,
+            "speed_figure":         _parse_int(row.get(c_speed, "")) if c_speed else None,
+            "beyer_figure":         _parse_int(row.get(c_beyer, "")) if c_beyer else None,
+            "final_time":           (row.get(c_time) or "").strip() or None if c_time else None,
+            "earned_purse":         _parse_int(row.get(c_earned, "")) if c_earned else None,
+            "comment":              (row.get(c_comment) or "").strip() or None if c_comment else None,
+        })
+
+    return parsed, errors
+
+
+# ── DB lookup helpers ─────────────────────────────────────────────────────────
+def _find_card_id(
+    conn: sqlite3.Connection,
+    track_code: str,
+    race_date: str,
+    race_number: int,
+) -> int | None:
+    row = conn.execute(
+        """SELECT rc.card_id FROM race_cards rc
+           JOIN tracks t ON rc.track_id = t.track_id
+           WHERE t.abbrev = ? AND rc.card_date = ? AND rc.race_number = ?""",
+        (track_code, race_date, race_number),
+    ).fetchone()
+    return row[0] if row else None
+
+
+def _find_entry(
+    conn: sqlite3.Connection,
+    card_id: int,
+    horse_name: str,
+    threshold: float = 0.72,
+) -> tuple[int | None, str | None, float]:
+    """Return (entry_id, matched_name, score). Exact first, then fuzzy."""
+    rows = conn.execute(
+        """SELECT e.entry_id, h.name FROM entries e
+           JOIN horses h ON e.horse_id = h.horse_id
+           WHERE e.card_id = ?""",
+        (card_id,),
+    ).fetchall()
+    if not rows:
+        return None, None, 0.0
+
+    name_map = {r[1].lower(): (r[0], r[1]) for r in rows}
+    h_lower = horse_name.lower()
+    if h_lower in name_map:
+        eid, mname = name_map[h_lower]
+        return eid, mname, 1.0
+
+    candidates = difflib.get_close_matches(
+        h_lower, list(name_map.keys()), n=1, cutoff=threshold
+    )
+    if candidates:
+        eid, mname = name_map[candidates[0]]
+        score = difflib.SequenceMatcher(None, h_lower, candidates[0]).ratio()
+        return eid, mname, score
+    return None, None, 0.0
+
+
+# ── Preview ───────────────────────────────────────────────────────────────────
+def preview_results_match(
+    conn: sqlite3.Connection,
+    parsed_rows: list[ParseResult],
+    threshold: float = 0.72,
+) -> dict:
+    """Dry-run: resolved races, matched/unmatched/duplicate horses — no inserts."""
+    _ensure_table(conn)
+
+    card_cache: dict[tuple, int | None] = {}
+    races_found:   list[dict] = []
+    races_missing: list[dict] = []
+    seen_race_keys: set[tuple] = set()
+
+    horses_matched:   list[dict] = []
+    horses_unmatched: list[dict] = []
+    horses_duplicate: list[dict] = []
+
+    for row in parsed_rows:
+        key = (row["track_code"], row["race_date"], row["race_number"])
+
+        if key not in card_cache:
+            cid = _find_card_id(conn, *key)
+            card_cache[key] = cid
+            if key not in seen_race_keys:
+                seen_race_keys.add(key)
+                if cid:
+                    races_found.append({
+                        "track_code":  row["track_code"],
+                        "race_date":   row["race_date"],
+                        "race_number": row["race_number"],
+                        "card_id":     cid,
+                    })
+                else:
+                    races_missing.append({
+                        "track_code":  row["track_code"],
+                        "race_date":   row["race_date"],
+                        "race_number": row["race_number"],
+                    })
+
+        card_id = card_cache[key]
+        if card_id is None:
+            continue
+
+        entry_id, matched_name, score = _find_entry(conn, card_id, row["horse_name"], threshold)
+        if entry_id is None:
+            horses_unmatched.append({
+                "horse_name":  row["horse_name"],
+                "track_code":  row["track_code"],
+                "race_date":   row["race_date"],
+                "race_number": row["race_number"],
+            })
+            continue
+
+        dup = conn.execute(
+            "SELECT COUNT(*) FROM race_results WHERE card_id=? AND entry_id=?",
+            (card_id, entry_id),
+        ).fetchone()[0] > 0
+
+        entry = {
+            "horse_name":   row["horse_name"],
+            "matched_name": matched_name,
+            "match_score":  round(score, 3),
+            "track_code":   row["track_code"],
+            "race_date":    row["race_date"],
+            "race_number":  row["race_number"],
+            "finish":       row["finish_position"],
+            "scratched":    row["is_scratched"],
+            "card_id":      card_id,
+        }
+        (horses_duplicate if dup else horses_matched).append(entry)
+
+    return {
+        "races_found":      races_found,
+        "races_missing":    races_missing,
+        "horses_matched":   horses_matched,
+        "horses_unmatched": horses_unmatched,
+        "horses_duplicate": horses_duplicate,
+    }
+
+
+# ── Ingest ────────────────────────────────────────────────────────────────────
+def ingest_results(
+    conn: sqlite3.Connection,
+    parsed_rows: list[ParseResult],
+    threshold: float = 0.72,
+) -> dict:
+    """Insert parsed result rows into race_results.
+
+    Uses INSERT OR IGNORE on (card_id, entry_id) so re-uploads are idempotent.
+    Confirmed scratches update entries.scratch_flag = 1.
+    Returns summary dict.
+    """
+    _ensure_table(conn)
+    ingested_at = _now_utc()
+
+    n_inserted = n_unmatched_race = n_unmatched_horse = n_duplicate = n_scratch_flag = 0
+    warnings: list[str] = []
+    card_cache: dict[tuple, int | None] = {}
+
+    for row in parsed_rows:
+        key = (row["track_code"], row["race_date"], row["race_number"])
+        if key not in card_cache:
+            card_cache[key] = _find_card_id(conn, *key)
+        card_id = card_cache[key]
+
+        if card_id is None:
+            n_unmatched_race += 1
+            warnings.append(
+                f"Race not in DB: {row['track_code']} R{row['race_number']} {row['race_date']}"
+            )
+            continue
+
+        entry_id, matched_name, score = _find_entry(conn, card_id, row["horse_name"], threshold)
+        if entry_id is None:
+            n_unmatched_horse += 1
+            warnings.append(
+                f"No entry match for '{row['horse_name']}' — "
+                f"{row['track_code']} R{row['race_number']}"
+            )
+            continue
+
+        dup = conn.execute(
+            "SELECT COUNT(*) FROM race_results WHERE card_id=? AND entry_id=?",
+            (card_id, entry_id),
+        ).fetchone()[0]
+        if dup:
+            n_duplicate += 1
+            continue
+
+        horse_id = conn.execute(
+            "SELECT horse_id FROM entries WHERE entry_id=?", (entry_id,)
+        ).fetchone()[0]
+
+        # official_finish = finish_position; cleared for DQ horses
+        official_finish = row["finish_position"] if not row["is_disqualified"] else None
+
+        # Derive american odds from decimal
+        am_odds: int | None = None
+        dec = row["official_odds_decimal"]
+        if dec is not None and dec > 1.0:
+            am_odds = (
+                int(round((dec - 1.0) * 100)) if dec >= 2.0
+                else int(round(-100.0 / (dec - 1.0)))
+            )
+
+        conn.execute(
+            """INSERT OR IGNORE INTO race_results
+               (card_id, entry_id, horse_id, post_position,
+                finish_position, official_finish,
+                is_scratched, is_disqualified,
+                official_odds_decimal, official_odds_american,
+                beaten_lengths, speed_figure, beyer_figure,
+                final_time, earned_purse, comment, ingested_at)
+               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+            (
+                card_id, entry_id, horse_id, row["post_position"],
+                row["finish_position"], official_finish,
+                int(row["is_scratched"]), int(row["is_disqualified"]),
+                row["official_odds_decimal"], am_odds,
+                row["beaten_lengths"], row["speed_figure"], row["beyer_figure"],
+                row["final_time"], row["earned_purse"], row["comment"],
+                ingested_at,
+            ),
+        )
+        n_inserted += 1
+
+        if row["is_scratched"]:
+            conn.execute(
+                "UPDATE entries SET scratch_flag=1 WHERE entry_id=?", (entry_id,)
+            )
+            n_scratch_flag += 1
+
+        if score < 1.0:
+            warnings.append(
+                f"Fuzzy '{row['horse_name']}' → '{matched_name}' (score {score:.2f})"
+            )
+
+    conn.commit()
+    return {
+        "n_inserted":        n_inserted,
+        "n_unmatched_race":  n_unmatched_race,
+        "n_unmatched_horse": n_unmatched_horse,
+        "n_duplicate":       n_duplicate,
+        "n_scratch_flag":    n_scratch_flag,
+        "warnings":          warnings,
+    }
+
+
+# ── Model evaluation ──────────────────────────────────────────────────────────
+def evaluate_score_run(
+    conn: sqlite3.Connection, run_id: str, card_id: int
+) -> dict | None:
+    """Compare a score_run's predictions against ingested race_results.
+
+    Returns None if race_results table is missing or empty for this card.
+    Returns a metrics dict otherwise — the caller decides how to display it.
+
+    Kelly ROI uses a normalized $1,000 bankroll with 5% cap so the result
+    is comparable across different user bankroll settings.
+    """
+    try:
+        n_results = conn.execute(
+            "SELECT COUNT(*) FROM race_results WHERE card_id=?", (card_id,)
+        ).fetchone()[0]
+        if n_results == 0:
+            return None
+    except Exception:
+        return None
+
+    # Fetch prediction + result rows
+    rows = conn.execute(
+        """SELECT
+               es.rank,
+               es.horse_name,
+               es.post_position,
+               es.win_probability,
+               es.bet_tag,
+               es.value_score,
+               es.morning_line_odds,
+               es.market_implied_prob,
+               rr.finish_position,
+               rr.official_finish,
+               rr.is_scratched,
+               rr.is_disqualified,
+               rr.official_odds_decimal,
+               rr.beaten_lengths
+           FROM entry_scores es
+           LEFT JOIN race_results rr ON es.entry_id = rr.entry_id
+                                     AND rr.card_id = ?
+           WHERE es.run_id = ?
+           ORDER BY es.rank""",
+        (card_id, run_id),
+    ).fetchall()
+
+    if not rows:
+        return None
+
+    COLS = [
+        "rank", "horse_name", "post_position", "win_probability", "bet_tag",
+        "value_score", "morning_line_odds", "market_implied_prob",
+        "finish_position", "official_finish", "is_scratched", "is_disqualified",
+        "official_odds_decimal", "beaten_lengths",
+    ]
+    data = [dict(zip(COLS, r)) for r in rows]
+
+    # Fetch latest live_odds snapshot for Kelly calculation
+    live_odds_map: dict[int, float] = {}
+    for _q in [
+        ("SELECT entry_id, decimal_odds FROM live_odds "
+         "WHERE card_id=? AND is_morning_line=0 "
+         "AND captured_at=(SELECT MAX(captured_at) FROM live_odds "
+         "WHERE card_id=? AND is_morning_line=0)"),
+        ("SELECT entry_id, decimal_odds FROM live_odds "
+         "WHERE card_id=? "
+         "AND captured_at=(SELECT MAX(captured_at) FROM live_odds WHERE card_id=?)"),
+    ]:
+        try:
+            lo_rows = conn.execute(_q, (card_id, card_id)).fetchall()
+            live_odds_map = {r[0]: float(r[1]) for r in lo_rows if r[1]}
+            break
+        except Exception:
+            continue
+
+    # Entry-id map for live odds lookup
+    entry_ids = conn.execute(
+        "SELECT entry_id, post_position FROM entries WHERE card_id=?", (card_id,)
+    ).fetchall()
+    pp_to_entry = {r[1]: r[0] for r in entry_ids}
+
+    # ── Metrics ───────────────────────────────────────────────────────────────
+    active = [r for r in data if not r["is_scratched"]]
+
+    winner_row = next(
+        (r for r in active if r["official_finish"] == 1 and not r["is_disqualified"]),
+        next((r for r in active if r["finish_position"] == 1), None),
+    )
+
+    top = data[0]
+    top_pick_won = bool(
+        winner_row and winner_row["horse_name"] == top["horse_name"]
+    )
+    top_pick_finish = top.get("finish_position")
+
+    fav = min(active, key=lambda r: r["morning_line_odds"]) if active else top
+    fav_won = bool(winner_row and winner_row["horse_name"] == fav["horse_name"])
+
+    # Top-3 hit rate
+    top3_model  = {r["horse_name"] for r in data[:3]}
+    actual_top3 = {
+        r["horse_name"] for r in data
+        if r["finish_position"] and r["finish_position"] <= 3 and not r["is_disqualified"]
+    }
+    top3_hit = len(top3_model & actual_top3)
+
+    # BET-tagged performance
+    bet_rows = [r for r in active if r["bet_tag"] == "bet"]
+    bet_won  = [r for r in bet_rows if r["official_finish"] == 1]
+    bet_itm  = [r for r in bet_rows
+                if r["finish_position"] and r["finish_position"] <= 3
+                and not r["is_disqualified"]]
+
+    # Kelly ROI (normalized $1,000 bankroll, 5% cap)
+    BANKROLL = 1_000.0
+    KELLY_CAP = 0.05
+    kelly_stake_total = 0.0
+    kelly_return_total = 0.0
+
+    for r in bet_rows:
+        pp = r["post_position"]
+        eid = pp_to_entry.get(pp)
+        dec = live_odds_map.get(eid) if eid else None
+        if dec is None:
+            mip = r["market_implied_prob"]
+            dec = (1.0 / mip) if mip and mip > 0 else None
+        if dec is None or dec <= 1.0:
+            continue
+        p = float(r["win_probability"] or 0)
+        if p <= 0:
+            continue
+        b = dec - 1.0
+        kf = min(max((b * p - (1 - p)) / b, 0.0), KELLY_CAP)
+        stake = kf * BANKROLL
+        kelly_stake_total += stake
+        if r["official_finish"] == 1:
+            kelly_return_total += stake * b
+        else:
+            kelly_return_total -= stake
+
+    kelly_roi_pct: float | None = None
+    if kelly_stake_total > 0:
+        kelly_roi_pct = round((kelly_return_total / kelly_stake_total) * 100, 1)
+
+    return {
+        "n_results":       n_results,
+        "winner":          winner_row["horse_name"] if winner_row else "Unknown",
+        "top_pick":        top["horse_name"],
+        "top_pick_finish": top_pick_finish,
+        "top_pick_won":    top_pick_won,
+        "fav_name":        fav["horse_name"],
+        "fav_won":         fav_won,
+        "top3_hit":        top3_hit,
+        "n_bets":          len(bet_rows),
+        "n_bets_won":      len(bet_won),
+        "n_bets_itm":      len(bet_itm),
+        "kelly_roi_pct":   kelly_roi_pct,
+        "kelly_staked":    round(kelly_stake_total, 2),
+        "full_results":    data,
+    }
+
+
+def delete_results_for_race(conn: sqlite3.Connection, card_id: int) -> int:
+    """Delete all race_results for a card. Returns deleted row count."""
+    _ensure_table(conn)
+    cur = conn.cursor()
+    cur.execute("DELETE FROM race_results WHERE card_id=?", (card_id,))
+    conn.commit()
+    return cur.rowcount
+
+
+def load_results_summary(conn: sqlite3.Connection, card_id: int) -> dict:
+    """Quick summary: does race_results have data for this card?"""
+    try:
+        _ensure_table(conn)
+        row = conn.execute(
+            """SELECT COUNT(*),
+                      SUM(CASE WHEN is_scratched=0 THEN 1 ELSE 0 END),
+                      MAX(ingested_at)
+               FROM race_results WHERE card_id=?""",
+            (card_id,),
+        ).fetchone()
+        if row and row[2]:
+            return {
+                "n_total":    int(row[0]),
+                "n_runners":  int(row[1]),
+                "ingested_at": row[2],
+            }
+    except Exception:
+        pass
+    return {"n_total": 0, "n_runners": 0, "ingested_at": None}
