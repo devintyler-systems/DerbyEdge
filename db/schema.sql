@@ -264,6 +264,7 @@ CREATE TABLE IF NOT EXISTS score_runs (
     model_type            TEXT    NOT NULL DEFAULT 'fallback'
                           CHECK(model_type IN ('xgboost','fallback','derby_override','seed_only_baseline')),
     derby_override_active INTEGER NOT NULL DEFAULT 0 CHECK(derby_override_active IN (0,1)),
+    quality_tier          TEXT    NOT NULL DEFAULT 'seed_only',
     created_at            TEXT    NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
 );
 

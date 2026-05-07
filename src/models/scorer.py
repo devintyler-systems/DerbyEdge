@@ -639,9 +639,27 @@ def score_race(card_id: Optional[int] = None) -> pd.DataFrame:
         )
     config = artifact.config
 
+    # ── Sanitize win_probs — final gate before all downstream math ─────────
+    _n_entries = len(feat_df)
+    _n_nonfinite = int((~np.isfinite(win_probs)).sum())
+    if _n_nonfinite or win_probs.sum() <= 0:
+        print(
+            f"[scorer] win_probs defaulted to uniform prior for {_n_entries} entries "
+            f"due to non-finite model output ({_n_nonfinite} non-finite value(s))"
+        )
+        win_probs = np.full(_n_entries, 1.0 / _n_entries)
+    else:
+        win_probs = win_probs / win_probs.sum()   # normalize away any fp drift
+
     # ── Market probs (overround-adjusted) ─────────────────────────────────
-    ml_implied   = feat_df["market_implied_prob"].astype(float).values
-    market_probs = ml_implied / ml_implied.sum()
+    ml_implied = pd.to_numeric(
+        feat_df["market_implied_prob"], errors="coerce"
+    ).fillna(0.0).values
+    ml_sum = ml_implied.sum()
+    if ml_sum <= 0:
+        market_probs = np.full(_n_entries, 1.0 / _n_entries)
+    else:
+        market_probs = ml_implied / ml_sum
 
     # ── Derived scoring ────────────────────────────────────────────────────
     fair_odds          = np.round(1.0 / np.maximum(win_probs, 1e-9) - 1.0, 2)
@@ -651,7 +669,13 @@ def score_race(card_id: Optional[int] = None) -> pd.DataFrame:
     bet_thr  = config["bet_edge_threshold"]
     ul_thr   = config["underlay_edge_threshold"]
     bet_tags = [_bet_tag(e, bet_thr, ul_thr) for e in model_edge]
-    rank_arr = pd.Series(win_probs).rank(ascending=False, method="first").astype(int).values
+    rank_arr = (
+        pd.to_numeric(pd.Series(win_probs), errors="coerce")
+        .fillna(0.0)
+        .rank(ascending=False, method="first")
+        .astype(int)
+        .values
+    )
 
     # ── Group scores for board columns ─────────────────────────────────────
     group_scores     = compute_group_scores(feat_df, config)
@@ -699,10 +723,22 @@ def score_race(card_id: Optional[int] = None) -> pd.DataFrame:
 
     # ── DB writes ──────────────────────────────────────────────────────────
     run_id = str(uuid.uuid4())[:8]
+
+    quality_tier = "seed_only"
+    try:
+        n_pp = conn.execute(
+            "SELECT COUNT(*) FROM firstbet_pp_starts WHERE card_id=?", (card_id,)
+        ).fetchone()[0]
+        if n_pp > 0:
+            quality_tier = "enriched_proxy"
+    except Exception:
+        pass
+
     conn.execute(
-        "INSERT INTO score_runs (run_id, card_id, model_id, model_type, derby_override_active) "
-        "VALUES (?,?,?,?,?)",
-        (run_id, card_id, model_id, artifact.model_type, int(derby_active)),
+        "INSERT INTO score_runs "
+        "(run_id, card_id, model_id, model_type, derby_override_active, quality_tier) "
+        "VALUES (?,?,?,?,?,?)",
+        (run_id, card_id, model_id, artifact.model_type, int(derby_active), quality_tier),
     )
 
     # Purge stale runs for this card (keep only latest)

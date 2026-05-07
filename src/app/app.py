@@ -8,7 +8,9 @@ Run: streamlit run src/app/app.py
 import math
 import os
 import pickle
+import subprocess
 import sys
+from datetime import datetime, timezone
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -35,7 +37,11 @@ from src.services.odds_intake import (
 from src.services.race_card_builder import (
     create_race_from_screenshot_result,
     find_race_card,
+    find_or_create_race,
+    parse_distance_yards as _rcb_parse_distance,
+    norm_surface as _rcb_norm_surface,
 )
+from src.services.pdf_ingest import parse_race_pdf, parse_results_pdf
 from src.services.pp_intake import (
     ingest_pp_rows,
     parse_pp_csv,
@@ -50,6 +56,19 @@ from src.services.results_intake import (
     preview_results_match,
 )
 from src.services.screenshot_ingest import ingest_sportsbook_screenshot
+from src.services.race_admin import (
+    ensure_is_hidden_column,
+    get_race_info as _admin_get_race_info,
+    get_race_dependencies,
+    update_race_card as _admin_update_race,
+    soft_delete_race,
+    hard_delete_race,
+)
+from src.services.firstbet_enrich import (
+    ensure_firstbet_pp_table,
+    enrich_runners_1stbet,
+    enrich_entries_from_1stbet,
+)
 
 # ── Page config ────────────────────────────────────────────────────────────────
 st.set_page_config(
@@ -71,6 +90,7 @@ st.markdown("""
 .status-badge   { display:inline-block; padding:2px 10px; border-radius:12px;
                   font-size:.78rem; font-weight:600; letter-spacing:.4px; }
 .badge-seed     { background:#2d333b; color:#f0883e; border:1px solid #f0883e55; }
+.badge-proxy    { background:#1a2535; color:#c9a227; border:1px solid #c9a22755; }
 .badge-xgb      { background:#162a1e; color:#3fb950; border:1px solid #3fb95055; }
 .badge-bet      { background:#162a1e; color:#3fb950; border:1px solid #3fb950; }
 .badge-underlay { background:#2d1c1f; color:#f85149; border:1px solid #f85149; }
@@ -158,7 +178,8 @@ def load_board(run_id: str | None = None) -> tuple[pd.DataFrame | None, dict | N
             SELECT mr.model_id, mr.model_name, mr.model_family, mr.version,
                    mr.training_rows,
                    sr.run_id, sr.run_timestamp, sr.model_type,
-                   sr.derby_override_active
+                   sr.derby_override_active,
+                   COALESCE(sr.quality_tier, 'seed_only') AS quality_tier
             FROM score_runs sr
             JOIN model_registry mr ON sr.model_id = mr.model_id
             WHERE sr.run_id = ?
@@ -188,22 +209,36 @@ def load_features(card_id: int) -> pd.DataFrame:
 
 
 @st.cache_data(ttl=60)
-def load_race_index() -> list[dict]:
-    """All race cards newest-first for the Active Race selector."""
+def load_race_index(include_hidden: bool = False) -> list[dict]:
+    """Race cards for the Active Race selector.
+
+    include_hidden=True returns all races (visible + soft-deleted).
+    Always includes an is_hidden key in each dict (0 when the column is absent).
+    """
+    _cols = (
+        "rc.card_id, rc.card_date, rc.race_number, rc.stakes_name, rc.race_class, "
+        "rc.distance_furlongs, rc.surface, rc.field_size, "
+        "t.abbrev AS track_abbrev, t.name AS track_name, t.city, t.state"
+    )
+    _order = "ORDER BY rc.card_date DESC, rc.race_number ASC"
+    _join  = "FROM race_cards rc JOIN tracks t ON rc.track_id = t.track_id"
     try:
         conn = get_connection()
-        rows = conn.execute(
-            """SELECT rc.card_id, rc.card_date, rc.race_number,
-                      rc.stakes_name, rc.race_class, rc.distance_furlongs,
-                      rc.surface, rc.field_size,
-                      t.abbrev AS track_abbrev, t.name AS track_name,
-                      t.city, t.state
-               FROM race_cards rc
-               JOIN tracks t ON rc.track_id = t.track_id
-               ORDER BY rc.card_date DESC, rc.race_number ASC"""
-        ).fetchall()
+        try:
+            _where = "" if include_hidden else "WHERE rc.is_hidden = 0"
+            rows = conn.execute(
+                f"SELECT {_cols}, rc.is_hidden {_join} {_where} {_order}"
+            ).fetchall()
+        except Exception:
+            # is_hidden column not yet migrated — return all races without it
+            rows = conn.execute(
+                f"SELECT {_cols} {_join} {_order}"
+            ).fetchall()
         conn.close()
-        return [dict(r) for r in rows]
+        result = [dict(r) for r in rows]
+        for row in result:
+            row.setdefault("is_hidden", 0)
+        return result
     except Exception:
         return []
 
@@ -304,6 +339,14 @@ def load_race_readiness(card_id: int) -> dict:
                WHERE e.card_id=?""",
             (card_id,),
         ).fetchone()[0]
+        if n_pp == 0:
+            try:
+                n_pp = conn.execute(
+                    "SELECT COUNT(*) FROM firstbet_pp_starts WHERE card_id=?",
+                    (card_id,),
+                ).fetchone()[0]
+            except Exception:
+                pass
         n_lo = 0
         for _q in [
             "SELECT COUNT(DISTINCT post_position) FROM live_odds WHERE card_id=? AND is_morning_line=0",
@@ -338,6 +381,89 @@ def load_artifact():
         return None
     with open(path, "rb") as fh:
         return pickle.load(fh)
+
+
+@st.cache_data(ttl=30)
+def load_entries(card_id: int) -> pd.DataFrame:
+    try:
+        conn = get_connection()
+        df = pd.read_sql(
+            """SELECT e.post_position AS "Post", h.name AS "Horse",
+                      e.morning_line_odds AS "ML Odds"
+               FROM entries e
+               JOIN horses h ON e.horse_id = h.horse_id
+               WHERE e.card_id = ? AND e.scratch_flag = 0
+               ORDER BY e.post_position""",
+            conn, params=(card_id,),
+        )
+        conn.close()
+        return df
+    except Exception:
+        return pd.DataFrame()
+
+
+@st.cache_data(ttl=30)
+def load_firstbet_pp_starts(card_id: int) -> pd.DataFrame:
+    """Load firstbet_pp_starts rows joined to entries for a given race card."""
+    try:
+        conn = get_connection()
+        try:
+            df = pd.read_sql(
+                """SELECT fps.start_rank, fps.race_date, fps.track_code,
+                          fps.distance_text, fps.surface, fps.race_class,
+                          fps.finish_position, fps.field_size, fps.odds_str,
+                          fps.notes, e.post_position, h.name AS horse_name
+                   FROM firstbet_pp_starts fps
+                   JOIN entries e ON fps.entry_id = e.entry_id
+                   JOIN horses  h ON e.horse_id   = h.horse_id
+                   WHERE fps.card_id = ?
+                   ORDER BY e.post_position, fps.start_rank""",
+                conn, params=(card_id,),
+            )
+        except Exception:
+            df = pd.DataFrame()
+        conn.close()
+        return df
+    except Exception:
+        return pd.DataFrame()
+
+
+@st.cache_data(ttl=30)
+def load_firstbet_career_stats(card_id: int) -> pd.DataFrame:
+    """Load firstbet_career_stats rows for a given race card."""
+    try:
+        conn = get_connection()
+        try:
+            df = pd.read_sql(
+                """SELECT fcs.entry_id, fcs.career_win_pct, fcs.career_place_pct,
+                          fcs.career_itm_pct, fcs.recent_5_itm, fcs.recent_5_wins,
+                          e.post_position, h.name AS horse_name
+                   FROM firstbet_career_stats fcs
+                   JOIN entries e ON fcs.entry_id = e.entry_id
+                   JOIN horses  h ON e.horse_id   = h.horse_id
+                   WHERE fcs.card_id = ?""",
+                conn, params=(card_id,),
+            )
+        except Exception:
+            df = pd.DataFrame()
+        conn.close()
+        return df
+    except Exception:
+        return pd.DataFrame()
+
+
+def _run_pipeline_step(script_name: str, card_id: int) -> tuple[bool, str]:
+    result = subprocess.run(
+        [sys.executable, str(ROOT / 'scripts' / script_name),
+         '--card-id', str(card_id)],
+        capture_output=True, text=True, cwd=str(ROOT),
+        timeout=180,
+    )
+    out = result.stdout
+    if result.stderr.strip():
+        out += "\n" + result.stderr
+    return result.returncode == 0, out
+
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
@@ -503,6 +629,17 @@ def _overlay_live_odds(df: pd.DataFrame, live_by_pp: dict) -> pd.DataFrame:
     return out
 
 
+# ── One-time startup DDL ──────────────────────────────────────────────────────
+if "startup_ddl_done" not in st.session_state:
+    try:
+        _startup_conn = get_connection()
+        ensure_is_hidden_column(_startup_conn)
+        ensure_firstbet_pp_table(_startup_conn)
+        _startup_conn.close()
+    except Exception:
+        pass
+    st.session_state["startup_ddl_done"] = True
+
 # ── Persistent session state ──────────────────────────────────────────────────
 # active_card_id survives tab switches, button clicks, and file uploads.
 # It is set by: (a) sidebar selectbox, (b) "Set as Active Race" button in Tab 5.
@@ -513,6 +650,11 @@ if "active_card_id" not in st.session_state:
 race_info:       dict       = {}
 active_card_id:  int | None = None
 selected_run_id: str | None = None
+_rdns: dict = {
+    "runners_loaded": 0, "odds_loaded": False,
+    "pp_loaded": False, "model_run": False,
+    "n_pp_rows": 0, "n_odds_posts": 0,
+}
 
 # ── Sidebar ────────────────────────────────────────────────────────────────────
 with st.sidebar:
@@ -521,13 +663,27 @@ with st.sidebar:
     st.divider()
 
     # ── Active Race selector ───────────────────────────────────────────────
-    _race_index = load_race_index()
+    if "show_hidden_races" not in st.session_state:
+        st.session_state["show_hidden_races"] = False
+
+    # Load all races; filter in Python so the toggle decision is instantaneous.
+    _race_index_all = load_race_index(include_hidden=True)
+    _has_hidden      = any(r.get("is_hidden") for r in _race_index_all)
+    _show_hidden     = st.session_state.get("show_hidden_races", False)
+    _race_index      = (
+        _race_index_all if _show_hidden
+        else [r for r in _race_index_all if not r.get("is_hidden")]
+    )
+
     if not _race_index:
         st.warning("No race cards found. Run the ingest pipeline first.")
     else:
         def _rlabel(r: dict) -> str:
-            name = r.get("stakes_name") or f"Race {r.get('race_number', 1)}"
-            return f"{r['track_abbrev']} · {r['card_date']} · {name}"
+            name  = r.get("stakes_name") or f"Race {r.get('race_number', 1)}"
+            label = f"{r['track_abbrev']} · {r['card_date']} · {name}"
+            if r.get("is_hidden"):
+                label = f"[HIDDEN] {label}"
+            return label
 
         _cids = [r["card_id"] for r in _race_index]
         # Default selectbox to whatever session state says; fall back to first race.
@@ -544,9 +700,22 @@ with st.sidebar:
                 label_visibility="collapsed",
             )
             st.session_state["active_card_id"] = _race_index[_ri]["card_id"]
-            st.divider()
         else:
             st.session_state["active_card_id"] = _race_index[0]["card_id"]
+
+        # Admin toggle — only visible when at least one race is soft-deleted.
+        if _has_hidden:
+            _new_show = st.checkbox(
+                "Show hidden races",
+                value=_show_hidden,
+                key="show_hidden_checkbox",
+                help="Admin only — reveals soft-deleted races in the selector above.",
+            )
+            if _new_show != _show_hidden:
+                st.session_state["show_hidden_races"] = _new_show
+                st.rerun()
+
+        st.divider()
 
         active_card_id = st.session_state["active_card_id"]
         race_info = load_race_info(active_card_id)
@@ -555,13 +724,13 @@ with st.sidebar:
         if race_info:
             st.markdown("**Race**")
             _race_name = race_info.get("stakes_name") or f"Race {race_info.get('race_number', 1)}"
-            st.markdown(f"**{_race_name}** ({race_info.get('race_class', '')})")
+            st.markdown(f"**{_race_name}** ({race_info.get('race_class') or 'Unknown'})")
             st.caption(
-                f"{race_info.get('track_name', '')} · "
-                f"{race_info.get('city', '')}, {race_info.get('state', '')}  \n"
-                f"{race_info.get('card_date', '')} · "
-                f"{race_info.get('distance_furlongs', '')}f "
-                f"{race_info.get('surface', '')} · "
+                f"{race_info.get('track_name') or 'Unknown'} · "
+                f"{race_info.get('city') or 'Unknown'}, {race_info.get('state') or 'Unknown'}  \n"
+                f"{race_info.get('card_date') or 'Unknown'} · "
+                f"{race_info.get('distance_furlongs') or '?'}f "
+                f"{race_info.get('surface') or 'Unknown'} · "
                 f"Field: {race_info.get('field_size') or '?'}"
             )
 
@@ -605,11 +774,15 @@ with st.sidebar:
         _, _meta_sb = load_board(selected_run_id)
         if _meta_sb:
             st.markdown("**Model Run**")
-            _mt      = _meta_sb.get("model_type", "N/A")
-            _is_seed = "seed_only" in str(_mt)
-            _derby   = bool(_meta_sb.get("derby_override_active", 0))
-            _bcls    = "badge-seed" if _is_seed else "badge-xgb"
-            _blbl    = "SEED-ONLY" if _is_seed else "XGBOOST"
+            _mt  = _meta_sb.get("model_type", "N/A")
+            _qt  = str(_meta_sb.get("quality_tier") or "seed_only")
+            _derby = bool(_meta_sb.get("derby_override_active", 0))
+            if _qt == "enriched_proxy":
+                _bcls, _blbl = "badge-proxy", "ENRICHED-PROXY"
+            elif "seed_only" in str(_mt):
+                _bcls, _blbl = "badge-seed",  "SEED-ONLY"
+            else:
+                _bcls, _blbl = "badge-xgb",   "XGBOOST"
             _derbybadge = (
                 ' <span class="status-badge" style="background:#1a2535;color:#c9a227;'
                 'border:1px solid #c9a22788;">DERBY OVERRIDE</span>' if _derby else ""
@@ -623,6 +796,26 @@ with st.sidebar:
                 f"ID: {_meta_sb.get('model_id', '')}  \n"
                 f"{_meta_sb.get('run_timestamp', '')[:19]}"
             )
+            _sb_card = st.session_state.get("active_card_id")
+            if _sb_card and st.button(
+                "⚡ Rebuild features + rescore",
+                use_container_width=True,
+                key="rebuild_sb",
+                help="Recompute features (including 1/ST BET overlay) then rescore.",
+            ):
+                with st.spinner(f"Rebuilding card_id={_sb_card}…"):
+                    _rbok, _rbout = _run_pipeline_step("build_features.py", _sb_card)
+                    if _rbok:
+                        _rbok2, _rbout2 = _run_pipeline_step("score.py", _sb_card)
+                        _rbout += "\n" + _rbout2
+                        _rbok = _rbok2
+                st.session_state["_last_pipeline_out"] = _rbout
+                if _rbok:
+                    st.success("Rebuild complete.")
+                    st.cache_data.clear()
+                    st.rerun()
+                else:
+                    st.error("Rebuild failed — see pipeline output in Race Board tab.")
             st.divider()
 
     # ── Board Filters ──────────────────────────────────────────────────────
@@ -686,8 +879,8 @@ if race_info:
         race_info.get("stakes_name") or f"Race {race_info.get('race_number', 1)}"
     )
     _hdr_label = (
-        f"{race_info.get('track_abbrev', '')} · "
-        f"{race_info.get('card_date', '')} · "
+        f"{race_info.get('track_abbrev') or 'Unknown'} · "
+        f"{race_info.get('card_date') or 'Unknown'} · "
         f"{_race_name_hdr}"
     )
 else:
@@ -700,7 +893,7 @@ if meta:
         f"{meta.get('run_timestamp', '')[:19]} UTC"
     )
 
-tab1, tab2, tab3, tab4, tab5, tab6, tab7 = st.tabs([
+tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8 = st.tabs([
     "📋 Race Board",
     "🔍 Entry Details",
     "🧪 Model Diagnostics",
@@ -708,513 +901,729 @@ tab1, tab2, tab3, tab4, tab5, tab6, tab7 = st.tabs([
     "📥 Market Intake",
     "📊 PP Import",
     "🏁 Results Import",
+    "⚙ Admin",
 ])
 
 # ── TAB 1: Race Board ──────────────────────────────────────────────────────────
 with tab1:
     if board_df is None:
-        _no_data("No scored entries found. Run score.py first.")
-        st.stop()
+        # ── Unscored race: readiness + build/score actions ────────────────────
+        _ru1, _ru2, _ru3, _ru4 = st.columns(4)
+        _ru1.metric("Runners", _rdns["runners_loaded"] or "—",
+                    delta="Loaded" if _rdns["runners_loaded"] else "Missing")
+        _ru2.metric("Live Odds", "✓" if _rdns["odds_loaded"] else "✗")
+        _ru3.metric("PP History",
+                    f"{_rdns['n_pp_rows']} rows" if _rdns["pp_loaded"] else "—")
+        _ru4.metric("Score Run", "✓" if _rdns["model_run"] else "✗ Not yet")
 
-    # Apply sidebar filters
-    disp = board_df.copy()
-    if filt_hide_ul:
-        disp = disp[disp["bet_tag"] != "underlay"]
-    if filt_conf_med:
-        disp = disp[disp["confidence_flag"] == 1]
-    if filt_bet_only:
-        disp = disp[disp["bet_tag"] == "bet"]
+        st.divider()
 
-    # ── Board summary stats ────────────────────────────────────────────────
-    sum_wp    = board_df["win_probability"].sum()
-    n_bets    = (board_df["bet_tag"] == "bet").sum()
-    n_ul      = (board_df["bet_tag"] == "underlay").sum()
-    n_low     = (board_df["confidence_flag"] == 0).sum()
-    top_horse = board_df.iloc[0]
+        if not active_card_id:
+            st.warning("No active race. Select or create one in the sidebar.")
+        elif not _rdns["runners_loaded"]:
+            st.markdown(
+                '<div class="warn-banner">⚠ No runners loaded. '
+                'Go to <strong>Market Intake</strong> to upload an odds CSV '
+                'or ingest a sportsbook screenshot.</div>',
+                unsafe_allow_html=True,
+            )
+        else:
+            st.subheader("Build & Score Actions")
+            _ba1, _ba2, _ba3 = st.columns(3)
 
-    c1, c2, c3, c4, c5 = st.columns(5)
-    c1.metric("Horses",        len(board_df))
-    c2.metric("Bet-tagged",    int(n_bets),  delta=None)
-    c3.metric("Underlays",     int(n_ul),    delta=None)
-    c4.metric("Low confidence",int(n_low))
-    c5.metric("Sum win prob",  f"{sum_wp:.4f}")
+            with _ba1:
+                if st.button("⚙ Build features", use_container_width=True,
+                             key="bld_tab1"):
+                    with st.spinner(
+                        f"Building features for card_id={active_card_id}…"
+                    ):
+                        _ok1, _out1 = _run_pipeline_step(
+                            "build_features.py", active_card_id
+                        )
+                    st.session_state["_last_pipeline_out"] = _out1
+                    if _ok1:
+                        st.success("Features built.")
+                        st.cache_data.clear()
+                        st.rerun()
+                    else:
+                        st.error("Build failed — see pipeline output below.")
 
-    st.caption(
-        f"Top: **{top_horse['horse_name']}** "
-        f"{top_horse['win_probability']*100:.1f}% · "
-        f"fair {top_horse['fair_odds']:.1f}-1 · "
-        f"edge {_edge_str(top_horse['value_score'])} · "
-        f"{TAG_ICON.get(top_horse['bet_tag'], top_horse['bet_tag'])}"
-    )
-    st.divider()
+            with _ba2:
+                if st.button("🏁 Score this race", use_container_width=True,
+                             key="scr_tab1"):
+                    with st.spinner(f"Scoring card_id={active_card_id}…"):
+                        _ok2, _out2 = _run_pipeline_step(
+                            "score.py", active_card_id
+                        )
+                    st.session_state["_last_pipeline_out"] = _out2
+                    if _ok2:
+                        st.success("Race scored.")
+                        st.cache_data.clear()
+                        st.rerun()
+                    else:
+                        st.error("Score failed — run Build features first.")
 
-    # ── Derby override banner ──────────────────────────────────────────────
-    if meta and meta.get("derby_override_active"):
-        st.markdown(
-            '<div style="background:#1a2535;border-left:3px solid #c9a227;'
-            'padding:8px 12px;border-radius:0 6px 6px 0;font-size:.85rem;'
-            'color:#c9a227;margin-bottom:8px;">'
-            '🏇 <strong>Derby Override Active</strong> — weights shifted: '
-            'distance/surface +5pp · race shape +3pp · market prior −3pp · '
-            'confidence tightened (route starts ≥ 3, or ≥ 2 + pedigree ≥ 0.75)'
-            '</div>',
-            unsafe_allow_html=True,
-        )
+            with _ba3:
+                if st.button("⚡ Build + Score now", use_container_width=True,
+                             type="primary", key="bns_tab1"):
+                    with st.spinner(
+                        f"Build + Score for card_id={active_card_id}…"
+                    ):
+                        _ok3a, _out3a = _run_pipeline_step(
+                            "build_features.py", active_card_id
+                        )
+                        if _ok3a:
+                            _ok3b, _out3b = _run_pipeline_step(
+                                "score.py", active_card_id
+                            )
+                            _ok3, _out3 = _ok3b, _out3a + "\n" + _out3b
+                        else:
+                            _ok3, _out3 = False, _out3a
+                    st.session_state["_last_pipeline_out"] = _out3
+                    if _ok3:
+                        st.success("Build + Score completed.")
+                        st.cache_data.clear()
+                        st.rerun()
+                    else:
+                        st.error("Pipeline failed — see output below.")
 
-    # ── Board thresholds reminder ──────────────────────────────────────────
-    st.markdown(
-        '<div class="info-banner">Bet thresholds: '
-        '<strong>BET</strong> = edge ≥ +0.025 · '
-        '<strong>UL</strong> = edge &lt; −0.015 · '
-        '<strong>NEUTRAL</strong> otherwise</div>',
-        unsafe_allow_html=True,
-    )
-
-    # ── Chaos overlay + Kelly ─────────────────────────────────────────────
-    if chaos_on:
-        disp = _apply_chaos(disp, chaos_idx)
-        st.markdown(
-            '<div style="background:#1a2a1a;border-left:3px solid #4caf50;'
-            'padding:8px 12px;border-radius:0 6px 6px 0;font-size:.85rem;'
-            'color:#81c784;margin-bottom:8px;">'
-            f'🌀 <strong>Chaos overlay active</strong> — index {chaos_idx:.2f} · '
-            'win mass reallocated toward dark-horse beneficiaries'
-            '</div>',
-            unsafe_allow_html=True,
-        )
-
-    disp = _add_kelly(disp, float(bankroll), float(max_kelly_pct), _live_odds_by_pp)
-    has_live_odds = bool(_live_odds_by_pp)
-    has_kelly = bankroll > 0
-
-    if has_live_odds:
-        _snap_ts_board = max(lo["captured_at"] for lo in _live_odds_by_pp.values())
-        st.markdown(
-            f'<div class="info-banner">📊 Live odds snapshot active — '
-            f'<strong>{_snap_ts_board[:19]}</strong> UTC · '
-            f'{len(_live_odds_by_pp)} entries · board, Kelly &amp; market chart use this snapshot only</div>',
-            unsafe_allow_html=True,
-        )
-
-    # ── Build display frame ────────────────────────────────────────────────
-    base_cols = [
-        "rank", "horse_name", "post_position",
-        "morning_line_odds", "win_probability",
-        "fair_odds", "value_score", "bet_tag",
-        "pace_fit_score", "form_score", "surface_dist_fit",
-        "confidence_flag", "trainer", "jockey",
-    ]
-    optional_cols = []
-    if chaos_on:
-        optional_cols += ["chaos_win_prob", "dark_horse_flag", "dark_horse_tier"]
-    if has_kelly:
-        optional_cols += ["kelly_frac", "stake_dollar"]
-
-    tbl = disp[base_cols + [c for c in optional_cols if c in disp.columns]].copy()
-
-    tbl["Tag"]  = tbl["bet_tag"].map(TAG_ICON)
-    tbl["Conf"] = tbl["confidence_flag"].map(CONF_ICON)
-    tbl["Win%"] = (tbl["win_probability"] * 100).round(2)
-    tbl["ML"]   = tbl["morning_line_odds"].apply(lambda x: f"{x:.0f}-1")
-    tbl["Edge"] = tbl["value_score"].apply(_edge_str)
-
-    display_cols: dict = {
-        "rank":            "Rank",
-        "horse_name":      "Horse",
-        "post_position":   "Post",
-        "trainer":         "Trainer",
-        "jockey":          "Jockey",
-        "ML":              "ML",
-        "Win%":            "Win %",
-        "fair_odds":       "Fair Odds",
-        "Edge":            "Edge",
-        "Tag":             "Tag",
-        "Conf":            "Conf",
-        "pace_fit_score":  "Pace Fit",
-        "form_score":      "Form",
-        "surface_dist_fit":"SuDist",
-    }
-    if chaos_on and "chaos_win_prob" in tbl.columns:
-        tbl["Chaos%"] = (tbl["chaos_win_prob"] * 100).round(2)
-        display_cols["Chaos%"] = "Chaos%"
-    if chaos_on and "dark_horse_tier" in tbl.columns:
-        display_cols["dark_horse_tier"] = "DH Tier"
-    if has_kelly and "stake_dollar" in tbl.columns:
-        tbl["Stake$"] = tbl["stake_dollar"].apply(
-            lambda x: f"${x:,.2f}" if x > 0 else "—"
-        )
-        display_cols["Stake$"] = "Stake$"
-        odds_src = "live odds" if has_live_odds else "ML proxy"
-        st.markdown(
-            f'<div class="info-banner">💰 Kelly stakes — bankroll ${bankroll:,} · '
-            f'cap {max_kelly_pct}% · odds source: <strong>{odds_src}</strong></div>',
-            unsafe_allow_html=True,
-        )
-
-    col_order = [c for c in display_cols if c in tbl.columns]
-    show = tbl[col_order].rename(columns=display_cols)
-
-    st.dataframe(
-        show,
-        use_container_width=True,
-        hide_index=True,
-        column_config={
-            "Win %":     st.column_config.NumberColumn("Win %",     format="%.2f"),
-            "Chaos%":    st.column_config.NumberColumn("Chaos%",    format="%.2f"),
-            "Fair Odds": st.column_config.NumberColumn("Fair Odds", format="%.1f"),
-            "Pace Fit":  st.column_config.NumberColumn("Pace Fit",  format="%.3f"),
-            "Form":      st.column_config.NumberColumn("Form",      format="%.3f"),
-            "SuDist":    st.column_config.NumberColumn("SuDist",    format="%.3f"),
-        },
-    )
-
-    # ── Win probability bar chart ──────────────────────────────────────────
-    st.subheader("Win Probability vs Market")
-    chart_df = disp.sort_values("win_probability", ascending=True).copy()
-    chart_df["win_pct"] = chart_df["win_probability"] * 100
-
-    if "live_market_prob" in chart_df.columns and chart_df["live_market_prob"].notna().any():
-        chart_df["market_pct"] = chart_df["live_market_prob"].fillna(
-            chart_df["market_implied_prob"]
-        ) * 100
-        mkt_series_label = "Live Market %"
-    else:
-        chart_df["market_pct"] = chart_df["market_implied_prob"] * 100
-        mkt_series_label = "Market % (ML)"
-
-    fig = go.Figure()
-    bar_colors = [
-        "#3fb950" if t == "bet" else "#f85149" if t == "underlay" else "#4facfe"
-        for t in chart_df["bet_tag"]
-    ]
-    fig.add_trace(go.Bar(
-        y=chart_df["horse_name"], x=chart_df["win_pct"],
-        name="Model Win%", orientation="h",
-        marker_color=bar_colors,
-        text=chart_df["win_pct"].apply(lambda x: f"{x:.1f}%"),
-        textposition="outside",
-    ))
-    if chaos_on and "chaos_win_prob" in chart_df.columns:
-        fig.add_trace(go.Scatter(
-            y=chart_df["horse_name"],
-            x=(chart_df["chaos_win_prob"] * 100),
-            name="Chaos%", mode="markers",
-            marker=dict(symbol="star", size=10, color="#81c784"),
-        ))
-    fig.add_trace(go.Scatter(
-        y=chart_df["horse_name"], x=chart_df["market_pct"],
-        name=mkt_series_label, mode="markers",
-        marker=dict(symbol="diamond", size=8, color="#f0883e"),
-    ))
-    fig.update_layout(
-        height=540, barmode="overlay",
-        legend=dict(orientation="h", y=1.02),
-        **_plotly_dark(),
-    )
-    st.plotly_chart(fig, use_container_width=True)
-
-    # ── Odds drift sparkline (if live odds uploaded) ───────────────────────
-    if has_live_odds:
-        st.subheader("Live Odds vs Morning Line")
-        try:
-            _conn_drift = get_connection()
-            if active_card_id:
-                drift_rows = _conn_drift.execute(
-                    """SELECT lo.post_position, h.name AS horse_name,
-                              lo.decimal_odds, lo.book_id, lo.captured_at
-                       FROM live_odds lo
-                       JOIN entries e ON lo.entry_id = e.entry_id
-                       JOIN horses h ON e.horse_id = h.horse_id
-                       WHERE lo.card_id = ?
-                       ORDER BY lo.captured_at""",
-                    (int(active_card_id),),
-                ).fetchall()
-                _conn_drift.close()
-                if drift_rows:
-                    drift_df = pd.DataFrame(drift_rows, columns=[
-                        "post_position", "horse_name", "decimal_odds", "book_id", "captured_at"
-                    ])
-                    drift_df["captured_at"] = pd.to_datetime(drift_df["captured_at"])
-                    fig_drift = go.Figure()
-                    for horse, grp in drift_df.groupby("horse_name"):
-                        fig_drift.add_trace(go.Scatter(
-                            x=grp["captured_at"], y=grp["decimal_odds"],
-                            name=horse, mode="lines+markers",
-                        ))
-                    fig_drift.update_layout(
-                        height=320,
-                        yaxis=dict(autorange="reversed", title="Decimal odds (lower = shorter)"),
-                        xaxis_title="Time",
-                        legend=dict(orientation="h", y=-0.2),
-                        **_plotly_dark(),
+            if st.session_state.get("_last_pipeline_out"):
+                with st.expander("Pipeline output"):
+                    st.code(
+                        st.session_state["_last_pipeline_out"], language="bash"
                     )
-                    st.plotly_chart(fig_drift, use_container_width=True)
-        except Exception:
-            pass
 
-    # ── Low-confidence notice ──────────────────────────────────────────────
-    low_conf_horses = board_df[board_df["confidence_flag"] == 0]["horse_name"].tolist()
-    if low_conf_horses:
+        if active_card_id and _rdns["runners_loaded"]:
+            st.divider()
+            st.subheader("Terminal commands")
+            st.code(
+                f"python scripts/build_features.py --card-id {active_card_id}\n"
+                f"python scripts/score.py --card-id {active_card_id}",
+                language="bash",
+            )
+    else:
+        # Apply sidebar filters
+        disp = board_df.copy()
+        if filt_hide_ul:
+            disp = disp[disp["bet_tag"] != "underlay"]
+        if filt_conf_med:
+            disp = disp[disp["confidence_flag"] == 1]
+        if filt_bet_only:
+            disp = disp[disp["bet_tag"] == "bet"]
+
+        # ── Board summary stats ────────────────────────────────────────────────
+        sum_wp    = board_df["win_probability"].sum()
+        n_bets    = (board_df["bet_tag"] == "bet").sum()
+        n_ul      = (board_df["bet_tag"] == "underlay").sum()
+        n_low     = (board_df["confidence_flag"] == 0).sum()
+        top_horse = board_df.iloc[0]
+
+        c1, c2, c3, c4, c5 = st.columns(5)
+        c1.metric("Horses",        len(board_df))
+        c2.metric("Bet-tagged",    int(n_bets),  delta=None)
+        c3.metric("Underlays",     int(n_ul),    delta=None)
+        c4.metric("Low confidence",int(n_low))
+        c5.metric("Sum win prob",  f"{sum_wp:.4f}")
+
+        st.caption(
+            f"Top: **{top_horse['horse_name']}** "
+            f"{top_horse['win_probability']*100:.1f}% · "
+            f"fair {top_horse['fair_odds']:.1f}-1 · "
+            f"edge {_edge_str(top_horse['value_score'])} · "
+            f"{TAG_ICON.get(top_horse['bet_tag'], top_horse['bet_tag'])}"
+        )
+        st.divider()
+
+        # ── Derby override banner ──────────────────────────────────────────────
+        if meta and meta.get("derby_override_active"):
+            st.markdown(
+                '<div style="background:#1a2535;border-left:3px solid #c9a227;'
+                'padding:8px 12px;border-radius:0 6px 6px 0;font-size:.85rem;'
+                'color:#c9a227;margin-bottom:8px;">'
+                '🏇 <strong>Derby Override Active</strong> — weights shifted: '
+                'distance/surface +5pp · race shape +3pp · market prior −3pp · '
+                'confidence tightened (route starts ≥ 3, or ≥ 2 + pedigree ≥ 0.75)'
+                '</div>',
+                unsafe_allow_html=True,
+            )
+
+        # ── Board thresholds reminder ──────────────────────────────────────────
         st.markdown(
-            f'<div class="warn-banner">🟡 <strong>Low confidence</strong> '
-            f'({len(low_conf_horses)} entries — dist_starts ≤ 1; distance_fit based on '
-            f'stamina_index only): {", ".join(low_conf_horses)}</div>',
+            '<div class="info-banner">Bet thresholds: '
+            '<strong>BET</strong> = edge ≥ +0.025 · '
+            '<strong>UL</strong> = edge &lt; −0.015 · '
+            '<strong>NEUTRAL</strong> otherwise</div>',
             unsafe_allow_html=True,
         )
+
+        # ── Chaos overlay + Kelly ─────────────────────────────────────────────
+        if chaos_on:
+            disp = _apply_chaos(disp, chaos_idx)
+            st.markdown(
+                '<div style="background:#1a2a1a;border-left:3px solid #4caf50;'
+                'padding:8px 12px;border-radius:0 6px 6px 0;font-size:.85rem;'
+                'color:#81c784;margin-bottom:8px;">'
+                f'🌀 <strong>Chaos overlay active</strong> — index {chaos_idx:.2f} · '
+                'win mass reallocated toward dark-horse beneficiaries'
+                '</div>',
+                unsafe_allow_html=True,
+            )
+
+        disp = _add_kelly(disp, float(bankroll), float(max_kelly_pct), _live_odds_by_pp)
+        has_live_odds = bool(_live_odds_by_pp)
+        has_kelly = bankroll > 0
+
+        if has_live_odds:
+            _snap_ts_board = max(lo["captured_at"] for lo in _live_odds_by_pp.values())
+            st.markdown(
+                f'<div class="info-banner">📊 Live odds snapshot active — '
+                f'<strong>{_snap_ts_board[:19]}</strong> UTC · '
+                f'{len(_live_odds_by_pp)} entries · board, Kelly &amp; market chart use this snapshot only</div>',
+                unsafe_allow_html=True,
+            )
+
+        # ── Build display frame ────────────────────────────────────────────────
+        base_cols = [
+            "rank", "horse_name", "post_position",
+            "morning_line_odds", "win_probability",
+            "fair_odds", "value_score", "bet_tag",
+            "pace_fit_score", "form_score", "surface_dist_fit",
+            "confidence_flag", "trainer", "jockey",
+        ]
+        optional_cols = []
+        if chaos_on:
+            optional_cols += ["chaos_win_prob", "dark_horse_flag", "dark_horse_tier"]
+        if has_kelly:
+            optional_cols += ["kelly_frac", "stake_dollar"]
+
+        tbl = disp[base_cols + [c for c in optional_cols if c in disp.columns]].copy()
+
+        tbl["Tag"]  = tbl["bet_tag"].map(TAG_ICON)
+        tbl["Conf"] = tbl["confidence_flag"].map(CONF_ICON)
+        tbl["Win%"] = (tbl["win_probability"] * 100).round(2)
+        tbl["ML"]   = tbl["morning_line_odds"].apply(lambda x: f"{x:.0f}-1")
+        tbl["Edge"] = tbl["value_score"].apply(_edge_str)
+
+        display_cols: dict = {
+            "rank":            "Rank",
+            "horse_name":      "Horse",
+            "post_position":   "Post",
+            "trainer":         "Trainer",
+            "jockey":          "Jockey",
+            "ML":              "ML",
+            "Win%":            "Win %",
+            "fair_odds":       "Fair Odds",
+            "Edge":            "Edge",
+            "Tag":             "Tag",
+            "Conf":            "Conf",
+            "pace_fit_score":  "Pace Fit",
+            "form_score":      "Form",
+            "surface_dist_fit":"SuDist",
+        }
+        if chaos_on and "chaos_win_prob" in tbl.columns:
+            tbl["Chaos%"] = (tbl["chaos_win_prob"] * 100).round(2)
+            display_cols["Chaos%"] = "Chaos%"
+        if chaos_on and "dark_horse_tier" in tbl.columns:
+            display_cols["dark_horse_tier"] = "DH Tier"
+        if has_kelly and "stake_dollar" in tbl.columns:
+            tbl["Stake$"] = tbl["stake_dollar"].apply(
+                lambda x: f"${x:,.2f}" if x > 0 else "—"
+            )
+            display_cols["Stake$"] = "Stake$"
+            odds_src = "live odds" if has_live_odds else "ML proxy"
+            st.markdown(
+                f'<div class="info-banner">💰 Kelly stakes — bankroll ${bankroll:,} · '
+                f'cap {max_kelly_pct}% · odds source: <strong>{odds_src}</strong></div>',
+                unsafe_allow_html=True,
+            )
+
+        col_order = [c for c in display_cols if c in tbl.columns]
+        show = tbl[col_order].rename(columns=display_cols)
+
+        st.dataframe(
+            show,
+            use_container_width=True,
+            hide_index=True,
+            column_config={
+                "Win %":     st.column_config.NumberColumn("Win %",     format="%.2f"),
+                "Chaos%":    st.column_config.NumberColumn("Chaos%",    format="%.2f"),
+                "Fair Odds": st.column_config.NumberColumn("Fair Odds", format="%.1f"),
+                "Pace Fit":  st.column_config.NumberColumn("Pace Fit",  format="%.3f"),
+                "Form":      st.column_config.NumberColumn("Form",      format="%.3f"),
+                "SuDist":    st.column_config.NumberColumn("SuDist",    format="%.3f"),
+            },
+        )
+
+        # ── Win probability bar chart ──────────────────────────────────────────
+        st.subheader("Win Probability vs Market")
+        chart_df = disp.sort_values("win_probability", ascending=True).copy()
+        chart_df["win_pct"] = chart_df["win_probability"] * 100
+
+        if "live_market_prob" in chart_df.columns and chart_df["live_market_prob"].notna().any():
+            chart_df["market_pct"] = chart_df["live_market_prob"].fillna(
+                chart_df["market_implied_prob"]
+            ) * 100
+            mkt_series_label = "Live Market %"
+        else:
+            chart_df["market_pct"] = chart_df["market_implied_prob"] * 100
+            mkt_series_label = "Market % (ML)"
+
+        fig = go.Figure()
+        bar_colors = [
+            "#3fb950" if t == "bet" else "#f85149" if t == "underlay" else "#4facfe"
+            for t in chart_df["bet_tag"]
+        ]
+        fig.add_trace(go.Bar(
+            y=chart_df["horse_name"], x=chart_df["win_pct"],
+            name="Model Win%", orientation="h",
+            marker_color=bar_colors,
+            text=chart_df["win_pct"].apply(lambda x: f"{x:.1f}%"),
+            textposition="outside",
+        ))
+        if chaos_on and "chaos_win_prob" in chart_df.columns:
+            fig.add_trace(go.Scatter(
+                y=chart_df["horse_name"],
+                x=(chart_df["chaos_win_prob"] * 100),
+                name="Chaos%", mode="markers",
+                marker=dict(symbol="star", size=10, color="#81c784"),
+            ))
+        fig.add_trace(go.Scatter(
+            y=chart_df["horse_name"], x=chart_df["market_pct"],
+            name=mkt_series_label, mode="markers",
+            marker=dict(symbol="diamond", size=8, color="#f0883e"),
+        ))
+        fig.update_layout(
+            height=540, barmode="overlay",
+            legend=dict(orientation="h", y=1.02),
+            **_plotly_dark(),
+        )
+        st.plotly_chart(fig, use_container_width=True)
+
+        # ── Odds drift sparkline (if live odds uploaded) ───────────────────────
+        if has_live_odds:
+            st.subheader("Live Odds vs Morning Line")
+            try:
+                _conn_drift = get_connection()
+                if active_card_id:
+                    drift_rows = _conn_drift.execute(
+                        """SELECT lo.post_position, h.name AS horse_name,
+                                  lo.decimal_odds, lo.book_id, lo.captured_at
+                           FROM live_odds lo
+                           JOIN entries e ON lo.entry_id = e.entry_id
+                           JOIN horses h ON e.horse_id = h.horse_id
+                           WHERE lo.card_id = ?
+                           ORDER BY lo.captured_at""",
+                        (int(active_card_id),),
+                    ).fetchall()
+                    _conn_drift.close()
+                    if drift_rows:
+                        drift_df = pd.DataFrame(drift_rows, columns=[
+                            "post_position", "horse_name", "decimal_odds", "book_id", "captured_at"
+                        ])
+                        drift_df["captured_at"] = pd.to_datetime(drift_df["captured_at"])
+                        fig_drift = go.Figure()
+                        for horse, grp in drift_df.groupby("horse_name"):
+                            fig_drift.add_trace(go.Scatter(
+                                x=grp["captured_at"], y=grp["decimal_odds"],
+                                name=horse, mode="lines+markers",
+                            ))
+                        fig_drift.update_layout(
+                            height=320,
+                            yaxis=dict(autorange="reversed", title="Decimal odds (lower = shorter)"),
+                            xaxis_title="Time",
+                            legend=dict(orientation="h", y=-0.2),
+                            **_plotly_dark(),
+                        )
+                        st.plotly_chart(fig_drift, use_container_width=True)
+            except Exception:
+                pass
+
+        # ── Low-confidence notice ──────────────────────────────────────────────
+        low_conf_horses = board_df[board_df["confidence_flag"] == 0]["horse_name"].tolist()
+        if low_conf_horses:
+            st.markdown(
+                f'<div class="warn-banner">🟡 <strong>Low confidence</strong> '
+                f'({len(low_conf_horses)} entries — dist_starts ≤ 1; distance_fit based on '
+                f'stamina_index only): {", ".join(low_conf_horses)}</div>',
+                unsafe_allow_html=True,
+            )
 
 # ── TAB 2: Entry Details ───────────────────────────────────────────────────────
 with tab2:
     if board_df is None:
-        _no_data()
-        st.stop()
-
-    options = [
-        f"{int(r['rank'])}. {r['horse_name']} (Post {int(r['post_position'])})"
-        for _, r in board_df.iterrows()
-    ]
-    sel_label = st.selectbox("Select entry", options)
-    sel_rank  = int(sel_label.split(".")[0])
-    horse     = board_df[board_df["rank"] == sel_rank].iloc[0]
-
-    # ── Horse card ─────────────────────────────────────────────────────────
-    col_tag  = TAG_BADGE.get(horse["bet_tag"], horse["bet_tag"])
-    col_conf = CONF_BADGE.get(_conf_label(horse["confidence_flag"]), "")
-
-    st.markdown(
-        f"## #{int(horse['post_position'])} {horse['horse_name']}  "
-        f"{col_tag} {col_conf}",
-        unsafe_allow_html=True,
-    )
-
-    m1, m2, m3, m4, m5 = st.columns(5)
-    _live_mkt = horse.get("live_market_prob")
-    _mkt_prob = float(_live_mkt) if _live_mkt else float(horse["market_implied_prob"])
-    _mkt_label = "Live Mkt %" if _live_mkt else "Market %"
-    m1.metric("Win %",      f"{horse['win_probability']*100:.1f}%")
-    m2.metric("Fair Odds",  f"{horse['fair_odds']:.1f}-1")
-    m3.metric("Model Edge", _edge_str(horse["value_score"]))
-    m4.metric("ML Odds",    f"{horse['morning_line_odds']:.0f}-1")
-    m5.metric(_mkt_label,   f"{_mkt_prob*100:.1f}%")
-
-    st.divider()
-    left, right = st.columns([1, 1])
-
-    with left:
-        st.markdown("**Connections & Profile**")
-        win_pct = horse["career_wins"] / max(horse["career_starts"], 1) * 100
-        itm_pct = (
-            (horse["career_wins"] + horse["career_places"] + horse["career_shows"])
-            / max(horse["career_starts"], 1) * 100
-        )
-        for k, v in [
-            ("Trainer",       horse["trainer"]),
-            ("Jockey",        horse["jockey"]),
-            ("Sire / Dam",    f"{horse['sire']} / {horse['dam']}"),
-            ("Owner",         horse["owner"]),
-            ("Career record", f"{int(horse['career_starts'])}-{int(horse['career_wins'])}-"
-                              f"{int(horse['career_places'])}-{int(horse['career_shows'])}"),
-            ("Win% / ITM%",   f"{win_pct:.0f}% / {itm_pct:.0f}%"),
-            ("Earnings",      f"${int(horse['career_earnings']):,}"),
-            ("Dirt",          f"{int(horse['dirt_wins'])}W / {int(horse['dirt_starts'])}S"),
-            ("@ Distance",    f"{int(horse['dist_wins'])}W / {int(horse['dist_starts'])}S"),
-            ("Last race",     f"{int(horse['last_race_days'])}d ago, "
-                              f"finished {int(horse['last_race_finish'])}"),
-            ("Pace style",    str(horse["pace_style"]).title()),
-            ("Stamina index", f"{horse['stamina_index']:.2f}"),
-        ]:
-            st.markdown(
-                f'<div class="kv-row"><span class="kv-key">{k}</span>'
-                f'<span class="kv-val">{v}</span></div>',
-                unsafe_allow_html=True,
-            )
-
-    with right:
-        st.markdown("**Speed Figures**")
-        fig_spd = go.Figure(go.Bar(
-            x=["Best", "Last", "Avg", "Beyer"],
-            y=[horse["best_speed_fig"], horse["last_speed_fig"],
-               horse["avg_speed_fig"],  horse["beyer_fig"]],
-            marker_color=["#ffd700", "#4facfe", "#a8edea", "#f093fb"],
-            text=[horse["best_speed_fig"], horse["last_speed_fig"],
-                  round(float(horse["avg_speed_fig"]), 1), horse["beyer_fig"]],
-            textposition="outside",
-        ))
-        fig_spd.update_layout(
-            yaxis_range=[70, 125],
-            height=260,
-            **_plotly_dark(),
-        )
-        st.plotly_chart(fig_spd, use_container_width=True)
-
-        # Group score radar (from artifact)
-        if artifact is not None and horse["horse_name"] in (feat_df["horse_name"].values if not feat_df.empty else []):
-            gs   = artifact.group_scores
-            h_idx = feat_df[feat_df["horse_name"] == horse["horse_name"]].index
-            if len(h_idx) > 0:
-                i    = h_idx[0]
-                cats = list(gs.keys())
-                vals = [gs[g][i] for g in cats]
-                # close the polygon
-                fig_rad = go.Figure(go.Scatterpolar(
-                    r=vals + [vals[0]],
-                    theta=[g.replace("_", " ").title() for g in cats] + [cats[0].replace("_", " ").title()],
-                    fill="toself",
-                    fillcolor="rgba(79,172,254,.15)",
-                    line=dict(color="#4facfe", width=2),
-                ))
-                fig_rad.update_layout(
-                    polar=dict(
-                        radialaxis=dict(visible=True, range=[0, 1]),
-                        bgcolor="rgba(0,0,0,0)",
-                    ),
-                    showlegend=False,
-                    height=280,
-                    **_plotly_dark(),
+        st.info("No score run for this race yet.")
+        if active_card_id:
+            _ent_df = load_entries(int(active_card_id))
+            if not _ent_df.empty:
+                st.markdown("**Loaded entries** — scoring not yet run")
+                st.dataframe(_ent_df, use_container_width=True, hide_index=True)
+            else:
+                st.warning(
+                    "No entries found. Use Market Intake to add runners."
                 )
-                st.plotly_chart(fig_rad, use_container_width=True)
-
-    st.divider()
-
-    # ── Feature breakdown table ────────────────────────────────────────────
-    st.markdown("**Feature Audit**")
-    st.caption(
-        "IMPL = direct from seed · DEG = proxy/aggregate · PHLD = null (no historical data)"
-    )
-
-    if not feat_df.empty and not catalog.empty:
-        h_feats = feat_df[feat_df["horse_name"] == horse["horse_name"]]
-        if not h_feats.empty:
-            hrow = h_feats.iloc[0]
-            importances = artifact.feature_importances if artifact else {}
-
-            meta_cols = {"entry_id", "horse_id", "card_id", "horse_name",
-                         "post_position", "build_ts"}
-            feat_rows = []
-            for col in feat_df.columns:
-                if col in meta_cols:
-                    continue
-                val  = hrow.get(col)
-                if isinstance(val, float) and np.isnan(val):
-                    val = None
-                cat_row = catalog[catalog["feature_name"] == col]
-                tier = cat_row["tier"].iloc[0]   if not cat_row.empty else "UNKNOWN"
-                imp  = importances.get(col, 0.0)
-                feat_rows.append({
-                    "feature":    col,
-                    "value":      _safe_num(val),
-                    "tier":       tier,
-                    "in_model":   imp > 0,
-                    "importance": imp,
-                })
-
-            feat_tbl = pd.DataFrame(feat_rows)
-            model_feats = feat_tbl[feat_tbl["in_model"]].sort_values(
-                "importance", ascending=False
-            )
-            other_feats = feat_tbl[~feat_tbl["in_model"] & (feat_tbl["tier"] != "PLACEHOLDER")]
-            phld_feats  = feat_tbl[feat_tbl["tier"] == "PLACEHOLDER"]
-
-            def _render_feat_table(df_sub: pd.DataFrame, show_imp: bool) -> None:
-                display = df_sub[["feature", "value", "tier", "importance"]].copy()
-                display.columns = ["Feature", "Value", "Tier", "Weight"]
-                if not show_imp:
-                    display = display.drop(columns=["Weight"])
-                # Tier color rows
-                def _tier_style(row):
-                    t = row.get("Tier", "")
-                    if t == "IMPLEMENTED":
-                        return ["background-color:rgba(46,160,67,.07)"] * len(row)
-                    if t == "DEGRADED":
-                        return ["background-color:rgba(210,153,34,.07)"] * len(row)
-                    return ["color:#6e7681"] * len(row)
-                st.dataframe(
-                    display.style.apply(_tier_style, axis=1),
-                    use_container_width=True, hide_index=True,
-                )
-
-            st.markdown(f"##### Model features ({len(model_feats)})")
-            _render_feat_table(model_feats, show_imp=True)
-
-            with st.expander(
-                f"Other seed features ({len(other_feats)}) — IMPL/DEG, not in model"
-            ):
-                _render_feat_table(other_feats, show_imp=False)
-
-            with st.expander(
-                f"Placeholder features ({len(phld_feats)}) — all null (no historical data)"
-            ):
-                _render_feat_table(phld_feats, show_imp=False)
-
-        else:
-            st.info("Feature data not found for this entry.")
-    else:
-        st.info("Run build_features.py to populate the feature store.")
-
-    # ── Derby sub-components ───────────────────────────────────────────────
-    if meta and meta.get("derby_override_active") and not feat_df.empty:
-        h_feats_derby = feat_df[feat_df["horse_name"] == horse["horse_name"]]
-        if not h_feats_derby.empty:
-            dr = h_feats_derby.iloc[0]
-            derby_cols = [
-                ("classic_distance_projection", "Classic Distance Proj.",
-                 "stamina_index + dist_win_pct; key Derby stamina ask"),
-                ("pedigree_route_proxy",         "Pedigree Route Aptitude",
-                 "sire-line route score; 0.90=Tapit/Curlin, 0.72=default"),
-                ("traffic_resilience_proxy",     "Traffic Resilience",
-                 "pace style + field-size experience; elevated weight in Derby"),
-                ("gate_reliability",             "Gate Reliability",
-                 "gate_class normalized; high = clean break expected"),
-                ("derby_override_score",         "Derby Override Composite",
-                 "weighted avg of the four sub-components above"),
-                ("public_underlay_penalty",      "Public Underlay Penalty",
-                 "z-score of publicness; >0.5 = horse is overhyped vs. ability"),
-                ("jan_apr_improvement_curve",    "Jan–Apr Improvement Curve",
-                 "PLACEHOLDER — needs sequential speed figs from horse_starts"),
-                ("churchill_readiness",          "Churchill Readiness",
-                 "PLACEHOLDER — needs Churchill Downs historical form"),
-            ]
-            derby_rows = []
-            for feat_col, label, note in derby_cols:
-                raw = dr.get(feat_col)
-                val = _safe_num(raw)
-                null_reason = "PLACEHOLDER — no historical data" if val is None else ""
-                derby_rows.append({
-                    "Sub-Component": label,
-                    "Value":         val,
-                    "Note":          note,
-                    "Status":        "❌ NULL" if val is None else "✅",
-                })
-            with st.expander("🏇 Derby Override Sub-Components", expanded=True):
-                st.caption(
-                    "Weight shifts vs base dirt_route: distance/surface +5pp · "
-                    "race shape +3pp · derby_override +2pp · market prior −3pp"
-                )
-                derby_df = pd.DataFrame(derby_rows)
-                st.dataframe(derby_df, use_container_width=True, hide_index=True,
-                             column_config={
-                                 "Value": st.column_config.NumberColumn(format="%.4f"),
-                             })
-
-    # Missing data flags
-    if horse["missing_data_flag"] == 1:
-        conf_lbl = _conf_label(horse["confidence_flag"])
-        is_derby_run = bool(meta.get("derby_override_active", 0)) if meta else False
-        base_flags = "no_race_splits, no_workout_detail, no_connections_stats, no_track_form, no_post_bias"
-        derby_flags = ", no_jan_apr_curve, no_churchill_readiness" if is_derby_run else ""
-        single_start = ", dist_fit_single_start" if conf_lbl == "low" else ""
-        flags_str = base_flags + derby_flags + single_start
         st.markdown(
-            f'<div class="warn-banner">⚠ Missing data flags: {flags_str}</div>',
+            '<div class="info-banner">Use the <strong>Race Board</strong> tab '
+            'to build features and score this race.</div>',
             unsafe_allow_html=True,
         )
+    else:
+        options = [
+            f"{int(r['rank'])}. {r['horse_name']} (Post {int(r['post_position'])})"
+            for _, r in board_df.iterrows()
+        ]
+        sel_label = st.selectbox("Select entry", options)
+        sel_rank  = int(sel_label.split(".")[0])
+        horse     = board_df[board_df["rank"] == sel_rank].iloc[0]
+
+        # Load 1/ST BET enrichment data for this card (empty frames if not available)
+        _fb_pp_df    = load_firstbet_pp_starts(int(active_card_id))    if active_card_id else pd.DataFrame()
+        _fb_stats_df = load_firstbet_career_stats(int(active_card_id)) if active_card_id else pd.DataFrame()
+        _fb_horse_pp = (
+            _fb_pp_df[_fb_pp_df["horse_name"] == horse["horse_name"]]
+            if not _fb_pp_df.empty else pd.DataFrame()
+        )
+        _fb_horse_stats = (
+            _fb_stats_df[_fb_stats_df["horse_name"] == horse["horse_name"]]
+            if not _fb_stats_df.empty else pd.DataFrame()
+        )
+        _fb_stat_row = _fb_horse_stats.iloc[0] if not _fb_horse_stats.empty else None
+
+        # ── Horse card ─────────────────────────────────────────────────────────
+        col_tag  = TAG_BADGE.get(horse["bet_tag"], horse["bet_tag"])
+        col_conf = CONF_BADGE.get(_conf_label(horse["confidence_flag"]), "")
+
+        st.markdown(
+            f"## #{int(horse['post_position'])} {horse['horse_name']}  "
+            f"{col_tag} {col_conf}",
+            unsafe_allow_html=True,
+        )
+
+        m1, m2, m3, m4, m5 = st.columns(5)
+        _live_mkt = horse.get("live_market_prob")
+        _mkt_prob = float(_live_mkt) if _live_mkt else float(horse["market_implied_prob"])
+        _mkt_label = "Live Mkt %" if _live_mkt else "Market %"
+        m1.metric("Win %",      f"{horse['win_probability']*100:.1f}%")
+        m2.metric("Fair Odds",  f"{horse['fair_odds']:.1f}-1")
+        m3.metric("Model Edge", _edge_str(horse["value_score"]))
+        m4.metric("ML Odds",    f"{horse['morning_line_odds']:.0f}-1")
+        m5.metric(_mkt_label,   f"{_mkt_prob*100:.1f}%")
+
+        st.divider()
+        left, right = st.columns([1, 1])
+
+        with left:
+            st.markdown("**Connections & Profile**")
+
+            def _hf(key):
+                """Horse field → float; None for any null/NaN."""
+                v = horse.get(key)
+                if v is None:
+                    return None
+                try:
+                    f = float(v)
+                    return None if (f != f) else f   # catch NaN
+                except (TypeError, ValueError):
+                    return None
+
+            cs  = _hf("career_starts");  cw  = _hf("career_wins")
+            cp  = _hf("career_places");  csh = _hf("career_shows")
+            ce  = _hf("career_earnings")
+            ds  = _hf("dirt_starts");    dw  = _hf("dirt_wins")
+            dts = _hf("dist_starts");    dtw = _hf("dist_wins")
+            lrd = _hf("last_race_days"); lrf = _hf("last_race_finish")
+            si  = _hf("stamina_index")
+
+            if cs and cs > 0 and cw is not None:
+                win_pct_str = f"{cw / cs * 100:.0f}%"
+                itm_pct_str = f"{(cw + (cp or 0) + (csh or 0)) / cs * 100:.0f}%"
+            elif _fb_stat_row is not None:
+                # Fallback: use 1/ST BET career percentages when entries.career_starts is null
+                _fb_wp = _fb_stat_row.get("career_win_pct")
+                _fb_sp = _fb_stat_row.get("career_itm_pct")
+                win_pct_str = f"{_fb_wp*100:.0f}% *" if _fb_wp is not None else "—"
+                itm_pct_str = f"{_fb_sp*100:.0f}% *" if _fb_sp is not None else "—"
+            else:
+                win_pct_str = itm_pct_str = "—"
+
+            career_rec = (
+                f"{int(cs)}-{int(cw)}-{int(cp)}-{int(csh)}"
+                if None not in (cs, cw, cp, csh)
+                else "—"
+            )
+
+            # Last race days / finish: prefer entries, fall back to firstbet_pp_starts row 1
+            if lrd is None and not _fb_horse_pp.empty:
+                _fb_pp1 = _fb_horse_pp[_fb_horse_pp["start_rank"] == 1]
+                if not _fb_pp1.empty:
+                    _fb_row1 = _fb_pp1.iloc[0]
+                    lrf = _fb_row1.get("finish_position")
+                    # days calculation requires race_info date
+                    _fb_pp1_date = _fb_row1.get("race_date")
+                    _rc_date = race_info.get("card_date") if race_info else None
+                    if _fb_pp1_date and _rc_date:
+                        try:
+                            from datetime import date as _date
+                            _diff = (_date.fromisoformat(_rc_date) - _date.fromisoformat(_fb_pp1_date)).days
+                            lrd = _diff if _diff >= 0 else None
+                        except (ValueError, TypeError):
+                            pass
+
+            for k, v in [
+                ("Trainer",       horse.get("trainer") or "—"),
+                ("Jockey",        horse.get("jockey")  or "—"),
+                ("Sire / Dam",    f"{horse.get('sire') or '—'} / {horse.get('dam') or '—'}"),
+                ("Owner",         horse.get("owner") or "—"),
+                ("Career record", career_rec),
+                ("Win% / ITM%",   f"{win_pct_str} / {itm_pct_str}"),
+                ("Earnings",      f"${int(ce):,}" if ce is not None else "—"),
+                ("Dirt (last 5)", f"{int(ds)}S" if ds is not None else "—"),
+                ("@ Distance (last 5)", f"{int(dts)}S" if dts is not None else "—"),
+                ("Last race",     f"{int(lrd)}d ago, finished {int(lrf)}"
+                                  if None not in (lrd, lrf) else "—"),
+                ("Pace style",    str(horse.get("pace_style") or "—").title()),
+                ("Stamina index", f"{si:.2f}" if si is not None else "—"),
+            ]:
+                st.markdown(
+                    f'<div class="kv-row"><span class="kv-key">{k}</span>'
+                    f'<span class="kv-val">{v}</span></div>',
+                    unsafe_allow_html=True,
+                )
+
+        with right:
+            st.markdown("**Speed Figures**")
+            _spd_raw = [
+                horse.get("best_speed_fig"), horse.get("last_speed_fig"),
+                horse.get("avg_speed_fig"),  horse.get("beyer_fig"),
+            ]
+            _spd_text = []
+            for _sv in _spd_raw:
+                try:
+                    _spd_text.append(round(float(_sv), 1))
+                except (TypeError, ValueError):
+                    _spd_text.append("—")
+            fig_spd = go.Figure(go.Bar(
+                x=["Best", "Last", "Avg", "Beyer"],
+                y=_spd_raw,
+                marker_color=["#ffd700", "#4facfe", "#a8edea", "#f093fb"],
+                text=_spd_text,
+                textposition="outside",
+            ))
+            fig_spd.update_layout(
+                yaxis_range=[70, 125],
+                height=260,
+                **_plotly_dark(),
+            )
+            st.plotly_chart(fig_spd, use_container_width=True)
+
+            # Group score radar (from artifact)
+            if artifact is not None and horse["horse_name"] in (feat_df["horse_name"].values if not feat_df.empty else []):
+                gs   = artifact.group_scores
+                h_idx = feat_df[feat_df["horse_name"] == horse["horse_name"]].index
+                if len(h_idx) > 0:
+                    i    = h_idx[0]
+                    cats = list(gs.keys())
+                    vals = [gs[g][i] for g in cats]
+                    # close the polygon
+                    fig_rad = go.Figure(go.Scatterpolar(
+                        r=vals + [vals[0]],
+                        theta=[g.replace("_", " ").title() for g in cats] + [cats[0].replace("_", " ").title()],
+                        fill="toself",
+                        fillcolor="rgba(79,172,254,.15)",
+                        line=dict(color="#4facfe", width=2),
+                    ))
+                    fig_rad.update_layout(
+                        polar=dict(
+                            radialaxis=dict(visible=True, range=[0, 1]),
+                            bgcolor="rgba(0,0,0,0)",
+                        ),
+                        showlegend=False,
+                        height=280,
+                        **_plotly_dark(),
+                    )
+                    st.plotly_chart(fig_rad, use_container_width=True)
+
+        st.divider()
+
+        # ── Feature breakdown table ────────────────────────────────────────────
+        st.markdown("**Feature Audit**")
+        st.caption(
+            "IMPL = direct from seed · DEG = proxy/aggregate · PHLD = null (no historical data)"
+        )
+
+        if not feat_df.empty and not catalog.empty:
+            h_feats = feat_df[feat_df["horse_name"] == horse["horse_name"]]
+            if not h_feats.empty:
+                hrow = h_feats.iloc[0]
+                importances = artifact.feature_importances if artifact else {}
+
+                meta_cols = {"entry_id", "horse_id", "card_id", "horse_name",
+                             "post_position", "build_ts"}
+                feat_rows = []
+                for col in feat_df.columns:
+                    if col in meta_cols:
+                        continue
+                    val  = hrow.get(col)
+                    if isinstance(val, float) and np.isnan(val):
+                        val = None
+                    cat_row = catalog[catalog["feature_name"] == col]
+                    tier = cat_row["tier"].iloc[0]   if not cat_row.empty else "UNKNOWN"
+                    imp  = importances.get(col, 0.0)
+                    feat_rows.append({
+                        "feature":    col,
+                        "value":      _safe_num(val),
+                        "tier":       tier,
+                        "in_model":   imp > 0,
+                        "importance": imp,
+                    })
+
+                feat_tbl = pd.DataFrame(feat_rows)
+                model_feats = feat_tbl[feat_tbl["in_model"]].sort_values(
+                    "importance", ascending=False
+                )
+                other_feats = feat_tbl[~feat_tbl["in_model"] & (feat_tbl["tier"] != "PLACEHOLDER")]
+                phld_feats  = feat_tbl[feat_tbl["tier"] == "PLACEHOLDER"]
+
+                def _render_feat_table(df_sub: pd.DataFrame, show_imp: bool) -> None:
+                    display = df_sub[["feature", "value", "tier", "importance"]].copy()
+                    display.columns = ["Feature", "Value", "Tier", "Weight"]
+                    if not show_imp:
+                        display = display.drop(columns=["Weight"])
+                    # Tier color rows
+                    def _tier_style(row):
+                        t = row.get("Tier", "")
+                        if t == "IMPLEMENTED":
+                            return ["background-color:rgba(46,160,67,.07)"] * len(row)
+                        if t == "DEGRADED":
+                            return ["background-color:rgba(210,153,34,.07)"] * len(row)
+                        return ["color:#6e7681"] * len(row)
+                    st.dataframe(
+                        display.style.apply(_tier_style, axis=1),
+                        use_container_width=True, hide_index=True,
+                    )
+
+                st.markdown(f"##### Model features ({len(model_feats)})")
+                _render_feat_table(model_feats, show_imp=True)
+
+                with st.expander(
+                    f"Other seed features ({len(other_feats)}) — IMPL/DEG, not in model"
+                ):
+                    _render_feat_table(other_feats, show_imp=False)
+
+                with st.expander(
+                    f"Placeholder features ({len(phld_feats)}) — all null (no historical data)"
+                ):
+                    _render_feat_table(phld_feats, show_imp=False)
+
+            else:
+                st.info("Feature data not found for this entry.")
+        else:
+            st.info("Run build_features.py to populate the feature store.")
+
+        # ── Derby sub-components ───────────────────────────────────────────────
+        if meta and meta.get("derby_override_active") and not feat_df.empty:
+            h_feats_derby = feat_df[feat_df["horse_name"] == horse["horse_name"]]
+            if not h_feats_derby.empty:
+                dr = h_feats_derby.iloc[0]
+                derby_cols = [
+                    ("classic_distance_projection", "Classic Distance Proj.",
+                     "stamina_index + dist_win_pct; key Derby stamina ask"),
+                    ("pedigree_route_proxy",         "Pedigree Route Aptitude",
+                     "sire-line route score; 0.90=Tapit/Curlin, 0.72=default"),
+                    ("traffic_resilience_proxy",     "Traffic Resilience",
+                     "pace style + field-size experience; elevated weight in Derby"),
+                    ("gate_reliability",             "Gate Reliability",
+                     "gate_class normalized; high = clean break expected"),
+                    ("derby_override_score",         "Derby Override Composite",
+                     "weighted avg of the four sub-components above"),
+                    ("public_underlay_penalty",      "Public Underlay Penalty",
+                     "z-score of publicness; >0.5 = horse is overhyped vs. ability"),
+                    ("jan_apr_improvement_curve",    "Jan–Apr Improvement Curve",
+                     "PLACEHOLDER — needs sequential speed figs from horse_starts"),
+                    ("churchill_readiness",          "Churchill Readiness",
+                     "PLACEHOLDER — needs Churchill Downs historical form"),
+                ]
+                derby_rows = []
+                for feat_col, label, note in derby_cols:
+                    raw = dr.get(feat_col)
+                    val = _safe_num(raw)
+                    null_reason = "PLACEHOLDER — no historical data" if val is None else ""
+                    derby_rows.append({
+                        "Sub-Component": label,
+                        "Value":         val,
+                        "Note":          note,
+                        "Status":        "❌ NULL" if val is None else "✅",
+                    })
+                with st.expander("🏇 Derby Override Sub-Components", expanded=True):
+                    st.caption(
+                        "Weight shifts vs base dirt_route: distance/surface +5pp · "
+                        "race shape +3pp · derby_override +2pp · market prior −3pp"
+                    )
+                    derby_df = pd.DataFrame(derby_rows)
+                    st.dataframe(derby_df, use_container_width=True, hide_index=True,
+                                 column_config={
+                                     "Value": st.column_config.NumberColumn(format="%.4f"),
+                                 })
+
+        # ── Past Performances (1/ST BET) ──────────────────────────────────────────
+        if not _fb_horse_pp.empty or _fb_stat_row is not None:
+            st.divider()
+            st.markdown("**Past Performances (1/ST BET)**")
+            if _fb_stat_row is not None:
+                _stat_parts: list[str] = []
+                for _lbl, _key in [("W", "career_win_pct"), ("P", "career_place_pct"), ("S", "career_itm_pct")]:
+                    _v = _fb_stat_row.get(_key)
+                    if _v is not None:
+                        _stat_parts.append(f"{_lbl} {float(_v)*100:.0f}%")
+                _r5i = _fb_stat_row.get("recent_5_itm")
+                _r5w = _fb_stat_row.get("recent_5_wins")
+                if _r5i is not None:
+                    _stat_parts.append(f"Recent 5 ITM {int(_r5i)}/5")
+                if _r5w is not None:
+                    _stat_parts.append(f"Wins {int(_r5w)}")
+                if _stat_parts:
+                    st.caption("Career: " + " · ".join(_stat_parts)
+                               + "  _(* = from 1/ST BET PDF, no race-count basis)_")
+            if not _fb_horse_pp.empty:
+                _pp_disp_cols = {
+                    "start_rank":     "#",
+                    "race_date":      "Date",
+                    "track_code":     "Track",
+                    "distance_text":  "Distance",
+                    "surface":        "Surf",
+                    "race_class":     "Class",
+                    "finish_position":"Fin",
+                    "field_size":     "Fld",
+                    "odds_str":       "Odds",
+                }
+                _pp_disp = _fb_horse_pp[
+                    [c for c in _pp_disp_cols if c in _fb_horse_pp.columns]
+                ].rename(columns=_pp_disp_cols)
+                st.dataframe(_pp_disp, use_container_width=True, hide_index=True)
+            else:
+                st.caption("No PP start blocks found in the 1/ST BET PDF.")
+
+        # Missing data flags
+        if horse["missing_data_flag"] == 1:
+            conf_lbl = _conf_label(horse["confidence_flag"])
+            is_derby_run = bool(meta.get("derby_override_active", 0)) if meta else False
+            base_flags = "no_race_splits, no_workout_detail, no_connections_stats, no_track_form, no_post_bias"
+            derby_flags = ", no_jan_apr_curve, no_churchill_readiness" if is_derby_run else ""
+            single_start = ", dist_fit_single_start" if conf_lbl == "low" else ""
+            flags_str = base_flags + derby_flags + single_start
+            st.markdown(
+                f'<div class="warn-banner">⚠ Missing data flags: {flags_str}</div>',
+                unsafe_allow_html=True,
+            )
 
 # ── TAB 3: Model Diagnostics ───────────────────────────────────────────────────
 with tab3:
     if meta is None:
-        _no_data()
-        st.stop()
+        st.info(
+            "No model run yet for this race. "
+            "Score the race from the Race Board tab to see model diagnostics."
+        )
 
-    # ── Data source status ─────────────────────────────────────────────────
+    # ── Data source status (always shown) ──────────────────────────────────
     st.subheader("Data Source Status")
     empty_tables = [t for t, n in db_stats.items() if n == 0 and t != "feature_store"]
     if empty_tables:
@@ -1245,97 +1654,102 @@ with tab3:
     )
     st.dataframe(src_df, use_container_width=True, hide_index=True)
 
-    st.divider()
-
-    # ── Model metadata ─────────────────────────────────────────────────────
-    st.subheader("Model Metadata")
-    diag_left, diag_right = st.columns(2)
-    with diag_left:
-        for k, v in [
-            ("Model name",     meta.get("model_name")),
-            ("Model ID",       meta.get("model_id")),
-            ("Model family",   meta.get("model_family")),
-            ("Version",        meta.get("version")),
-            ("Model type",     meta.get("model_type")),
-            ("Training rows",  f"{meta.get('training_rows', 0)} (need ≥50 for XGBoost)"),
-            ("Run ID",         meta.get("run_id")),
-            ("Scored at",      str(meta.get("run_timestamp", ""))[:19]),
-        ]:
-            st.markdown(
-                f'<div class="kv-row"><span class="kv-key">{k}</span>'
-                f'<span class="kv-val">{v}</span></div>',
-                unsafe_allow_html=True,
-            )
-
-    with diag_right:
-        if artifact is not None:
-            for k, v in [
-                ("Calibration method", "Temperature-scaled softmax"),
-                ("Temperature (T)",    artifact.temperature),
-                ("Calibration target", "Overround-adjusted morning line"),
-            ]:
-                st.markdown(
-                    f'<div class="kv-row"><span class="kv-key">{k}</span>'
-                    f'<span class="kv-val">{v}</span></div>',
-                    unsafe_allow_html=True,
-                )
-
-        if board_df is not None:
-            sum_wp  = board_df["win_probability"].sum()
-            n_bets  = (board_df["bet_tag"] == "bet").sum()
-            n_ul    = (board_df["bet_tag"] == "underlay").sum()
-            n_low   = (board_df["confidence_flag"] == 0).sum()
-            mkt_col = board_df["market_implied_prob"]
-            mkt_adj = mkt_col / mkt_col.sum()
-            wp      = board_df["win_probability"]
-            from scipy.stats import kendalltau
-            tau, _  = kendalltau(wp.values, mkt_adj.values)
-            edges   = wp.values - mkt_adj.values
-            kl      = float(np.sum(wp.values * np.log(
-                np.maximum(wp.values / np.maximum(mkt_adj.values, 1e-9), 1e-9)
-            )))
-            for k, v in [
-                ("Sum win prob",        f"{sum_wp:.6f}"),
-                ("Kendall tau vs ML",   f"{tau:.4f}"),
-                ("KL divergence",       f"{kl:.4f}"),
-                ("Mean abs edge",       f"{np.abs(edges).mean():.4f}"),
-                ("Bet candidates",      int(n_bets)),
-                ("Underlays",           int(n_ul)),
-                ("Low-confidence entries", int(n_low)),
-            ]:
-                st.markdown(
-                    f'<div class="kv-row"><span class="kv-key">{k}</span>'
-                    f'<span class="kv-val">{v}</span></div>',
-                    unsafe_allow_html=True,
-                )
-
-    st.divider()
-
-    # ── Derby override weight comparison ───────────────────────────────────
-    if meta and meta.get("derby_override_active") and artifact is not None:
-        st.subheader("🏇 Derby Override — Weight Shifts vs Base dirt_route")
-        st.caption(
-            "Confidence tightened: medium requires dist_starts ≥ 3, "
-            "or dist_starts = 2 with pedigree_route_proxy ≥ 0.75"
-        )
-        from src.models.trainer import TRAIN_CONFIGS
-        base_groups  = TRAIN_CONFIGS["dirt_route"]["feature_groups"]
-        derby_groups = artifact.config.get("feature_groups", {})
-        wt_rows = []
-        for gname in base_groups:
-            bw = base_groups[gname]["group_weight"]
-            dw = derby_groups.get(gname, {}).get("group_weight", bw)
-            delta = dw - bw
-            wt_rows.append({
-                "Group":      gname,
-                "Base":       f"{bw:.0%}",
-                "Derby":      f"{dw:.0%}",
-                "Δ":          f"{delta:+.0%}" if delta != 0 else "—",
-            })
-        st.dataframe(
-            pd.DataFrame(wt_rows), use_container_width=True, hide_index=True
-        )
+    if meta is not None:
         st.divider()
+
+        # ── Model metadata ─────────────────────────────────────────────────────
+        st.subheader("Model Metadata")
+        diag_left, diag_right = st.columns(2)
+        with diag_left:
+            for k, v in [
+                ("Model name",     meta.get("model_name")),
+                ("Model ID",       meta.get("model_id")),
+                ("Model family",   meta.get("model_family")),
+                ("Version",        meta.get("version")),
+                ("Model type",     meta.get("model_type")),
+                ("Training rows",  f"{meta.get('training_rows', 0)} (need ≥50 for XGBoost)"),
+                ("Run ID",         meta.get("run_id")),
+                ("Scored at",      str(meta.get("run_timestamp", ""))[:19]),
+            ]:
+                st.markdown(
+                    f'<div class="kv-row"><span class="kv-key">{k}</span>'
+                    f'<span class="kv-val">{v}</span></div>',
+                    unsafe_allow_html=True,
+                )
+
+        with diag_right:
+            if artifact is not None:
+                for k, v in [
+                    ("Calibration method", "Temperature-scaled softmax"),
+                    ("Temperature (T)",    artifact.temperature),
+                    ("Calibration target", "Overround-adjusted morning line"),
+                ]:
+                    st.markdown(
+                        f'<div class="kv-row"><span class="kv-key">{k}</span>'
+                        f'<span class="kv-val">{v}</span></div>',
+                        unsafe_allow_html=True,
+                    )
+
+            if board_df is not None:
+                sum_wp  = board_df["win_probability"].sum()
+                n_bets  = (board_df["bet_tag"] == "bet").sum()
+                n_ul    = (board_df["bet_tag"] == "underlay").sum()
+                n_low   = (board_df["confidence_flag"] == 0).sum()
+                mkt_col = board_df["market_implied_prob"]
+                mkt_adj = mkt_col / mkt_col.sum()
+                wp      = board_df["win_probability"]
+                from scipy.stats import kendalltau
+                tau, _  = kendalltau(wp.values, mkt_adj.values)
+                edges   = wp.values - mkt_adj.values
+                kl      = float(np.sum(wp.values * np.log(
+                    np.maximum(wp.values / np.maximum(mkt_adj.values, 1e-9), 1e-9)
+                )))
+                for k, v in [
+                    ("Sum win prob",        f"{sum_wp:.6f}"),
+                    ("Kendall tau vs ML",   f"{tau:.4f}"),
+                    ("KL divergence",       f"{kl:.4f}"),
+                    ("Mean abs edge",       f"{np.abs(edges).mean():.4f}"),
+                    ("Bet candidates",      int(n_bets)),
+                    ("Underlays",           int(n_ul)),
+                    ("Low-confidence entries", int(n_low)),
+                ]:
+                    st.markdown(
+                        f'<div class="kv-row"><span class="kv-key">{k}</span>'
+                        f'<span class="kv-val">{v}</span></div>',
+                        unsafe_allow_html=True,
+                    )
+
+        st.divider()
+
+        # ── Derby override weight comparison ───────────────────────────────────
+        if meta and meta.get("derby_override_active") and artifact is not None:
+            st.subheader("🏇 Derby Override — Weight Shifts vs Base dirt_route")
+            st.caption(
+                "Confidence tightened: medium requires dist_starts ≥ 3, "
+                "or dist_starts = 2 with pedigree_route_proxy ≥ 0.75"
+            )
+            from src.models.trainer import TRAIN_CONFIGS
+            base_groups  = TRAIN_CONFIGS["dirt_route"]["feature_groups"]
+            derby_groups = artifact.config.get("feature_groups", {})
+            wt_rows = []
+            for gname in base_groups:
+                bw = base_groups[gname]["group_weight"]
+                dw = derby_groups.get(gname, {}).get("group_weight", bw)
+                delta = dw - bw
+                wt_rows.append({
+                    "Group":      gname,
+                    "Base":       f"{bw:.0%}",
+                    "Derby":      f"{dw:.0%}",
+                    "Δ":          f"{delta:+.0%}" if delta != 0 else "—",
+                })
+            st.dataframe(
+                pd.DataFrame(wt_rows), use_container_width=True, hide_index=True
+            )
+            st.divider()
+
+    else:
+        st.divider()
+        st.info("Score this race to unlock model metadata and diagnostics.")
 
     # ── Feature tier summary ───────────────────────────────────────────────
     st.subheader("Feature Tier Summary")
@@ -1495,8 +1909,227 @@ with tab5:
     _conn5 = get_connection()
     _card_id5 = active_card_id   # may be None if no races exist yet
 
-    # ── Section 1: Templates ───────────────────────────────────────────────
-    st.subheader("1 · Templates")
+    # ── Section 1: PDF Race Import (Primary) ──────────────────────────────
+    st.subheader("1 · PDF Race Import")
+    st.markdown(
+        '<div class="info-banner">ℹ Upload a text-based PDF race page, sportsbook '
+        'printout, or Equibase race card. Scanned / image-only PDFs require the '
+        'Screenshot Ingest tool in the advanced section below '
+        '(requires <code>ANTHROPIC_API_KEY</code>). '
+        'Requires: <code>pip install pdfplumber</code>.</div>',
+        unsafe_allow_html=True,
+    )
+
+    _pdf5_file = st.file_uploader(
+        "Upload race PDF", type=["pdf"],
+        key="pdf_race_uploader", label_visibility="collapsed",
+    )
+
+    if _pdf5_file is not None:
+        with st.spinner("Extracting race data from PDF…"):
+            _pr5 = parse_race_pdf(_pdf5_file.getvalue())
+
+        if not _pr5["ok"]:
+            st.markdown(
+                f'<div class="warn-banner">⚠ PDF parse failed: {_pr5["error"]}</div>',
+                unsafe_allow_html=True,
+            )
+        else:
+            if _pr5["warnings"]:
+                with st.expander(
+                    f"⚠ Parse warnings ({len(_pr5['warnings'])})", expanded=True
+                ):
+                    for _pw5 in _pr5["warnings"]:
+                        st.caption(f"• {_pw5}")
+
+            # Race preview
+            st.markdown("**Race Preview**")
+            _p51, _p52, _p53, _p54, _p55 = st.columns(5)
+            _p51.metric("Track",    _pr5.get("track_code") or _pr5.get("track_name") or "?")
+            _p52.metric("Date",     _pr5.get("race_date") or "?")
+            _p53.metric("Race",     f"R{_pr5['race_number']}" if _pr5.get("race_number") else "?")
+            _p54.metric("Runners",  _pr5.get("field_size", len(_pr5.get("runners", []))))
+            _p55.metric("Distance", _pr5.get("distance_text") or "?")
+            _p5_detail = [p for p in [
+                _pr5.get("surface"), _pr5.get("race_type"),
+                f"${_pr5['purse_usd']:,}" if _pr5.get("purse_usd") else None,
+            ] if p]
+            if _p5_detail:
+                st.caption(" · ".join(_p5_detail))
+
+            # Runners preview
+            if _pr5.get("runners"):
+                st.markdown("**Runners**")
+                _p5_rows = [{
+                    "#":       r.get("program_number") or "?",
+                    "Horse":   r.get("horse_name") or "?",
+                    "Jockey":  r.get("jockey") or "—",
+                    "Trainer": r.get("trainer") or "—",
+                    "ML":      r.get("morning_line") or "—",
+                    "SCR":     "✓" if r.get("is_scratched") else "",
+                } for r in _pr5["runners"]]
+                st.dataframe(
+                    pd.DataFrame(_p5_rows),
+                    use_container_width=True, hide_index=True,
+                )
+
+            # Race DB check
+            _p5_exist_cid = None
+            if _pr5.get("track_code") and _pr5.get("race_date") and _pr5.get("race_number"):
+                _p5_exist_cid = find_race_card(
+                    _conn5, _pr5["track_code"], _pr5["race_date"], int(_pr5["race_number"])
+                )
+            if _p5_exist_cid:
+                st.markdown(
+                    f'<div class="info-banner">✓ Race already in DB — '
+                    f'card_id=<strong>{_p5_exist_cid}</strong>.</div>',
+                    unsafe_allow_html=True,
+                )
+            else:
+                st.markdown(
+                    '<div class="info-banner">ℹ Race not found in DB — '
+                    '"Create race card" will add it.</div>',
+                    unsafe_allow_html=True,
+                )
+
+            st.divider()
+
+            # ── Create-button guardrail ────────────────────────────────────
+            _p5_missing: list[str] = []
+            if not _pr5.get("track_code"):
+                _p5_missing.append("track code")
+            if not _pr5.get("race_date"):
+                _p5_missing.append("race date")
+            if not _pr5.get("race_number"):
+                _p5_missing.append("race number")
+            if not _pr5.get("runners"):
+                _p5_missing.append("runners (0 found)")
+            _p5_can_create = len(_p5_missing) == 0
+
+            if _p5_missing:
+                st.markdown(
+                    '<div class="warn-banner">⚠ Cannot create race card — '
+                    "missing: <strong>" + ", ".join(_p5_missing) + "</strong>. "
+                    "Check the warnings above. If the date or runners are missing, "
+                    "the PDF may be unsupported — use the Screenshot Ingest tool below "
+                    "or fix the PDF export format.</div>",
+                    unsafe_allow_html=True,
+                )
+
+            _p5a1, _p5a2, _p5a3 = st.columns(3)
+
+            with _p5a1:
+                if st.button(
+                    "✓ Re-sync entries" if _p5_exist_cid else "Create race card",
+                    disabled=not _p5_can_create,
+                    use_container_width=True, key="pdf5_create_btn",
+                ):
+                    _p5_dist_yd = _rcb_parse_distance(_pr5.get("distance_text"))
+                    _p5_cid, _, _p5_n, _p5_warns = find_or_create_race(
+                        _conn5,
+                        _pr5["track_code"], _pr5["race_date"], int(_pr5["race_number"]),
+                        _pr5.get("runners") or [],
+                        distance_yards=_p5_dist_yd,
+                        surface=_rcb_norm_surface(_pr5.get("surface") or ""),
+                        stakes_name=_pr5.get("race_type") or None,
+                        purse=_pr5.get("purse_usd") or None,
+                    )
+                    st.success(
+                        f"{'Updated' if _p5_exist_cid else 'Created'} race card "
+                        f"{_p5_cid} — {_p5_n} entries inserted."
+                    )
+                    for _p5w in (_p5_warns or []):
+                        st.caption(_p5w)
+                    # ── 1/ST BET enrichment ────────────────────────────────
+                    if _pr5.get("is_1stbet") and _pr5.get("raw_text"):
+                        with st.spinner("Enriching entries with PP data…"):
+                            _p5_enriched = enrich_runners_1stbet(
+                                _pr5["raw_text"],
+                                _pr5.get("runners") or [],
+                                race_date=_pr5["race_date"],
+                                race_distance_yards=_p5_dist_yd or 1760,
+                            )
+                            _p5_er = enrich_entries_from_1stbet(
+                                _conn5, _p5_cid, _p5_enriched,
+                                race_date=_pr5["race_date"],
+                                race_distance_yards=_p5_dist_yd or 1760,
+                            )
+                        if _p5_er["ok"]:
+                            st.success(
+                                f"1/ST BET enrichment: {_p5_er['n_enriched']} entries "
+                                f"updated · {_p5_er['n_pp_rows']} PP rows · "
+                                f"{_p5_er['n_stat_rows']} career-stat rows."
+                            )
+                        else:
+                            st.warning("1/ST BET enrichment encountered errors.")
+                        for _p5ew in (_p5_er.get("warnings") or []):
+                            st.caption(_p5ew)
+                    st.session_state["active_card_id"] = _p5_cid
+                    st.cache_data.clear()
+                    st.rerun()
+
+            with _p5a2:
+                _p5_odds_cid = _p5_exist_cid or st.session_state.get("active_card_id")
+                if st.button(
+                    "Save Morning Line Odds",
+                    disabled=not _p5_odds_cid,
+                    use_container_width=True, key="pdf5_odds_btn",
+                ):
+                    _p5_ts = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+                    _n_p5_odds = 0
+                    for _p5r in (_pr5.get("runners") or []):
+                        if _p5r.get("is_scratched"):
+                            continue
+                        _p5_dec = _p5r.get("morning_line_decimal")
+                        _p5_pp  = _p5r.get("post_position") or _p5r.get("program_number")
+                        if not _p5_dec or not _p5_pp:
+                            continue
+                        _p5_erow = _conn5.execute(
+                            "SELECT entry_id FROM entries WHERE card_id=? AND post_position=?",
+                            (int(_p5_odds_cid), int(_p5_pp)),
+                        ).fetchone()
+                        if not _p5_erow:
+                            continue
+                        try:
+                            _conn5.execute(
+                                """INSERT INTO live_odds
+                                   (captured_at, book_id, card_id, entry_id,
+                                    post_position, decimal_odds, is_morning_line)
+                                   VALUES (?, 'pdf_ml', ?, ?, ?, ?, 1)""",
+                                (_p5_ts, int(_p5_odds_cid),
+                                 _p5_erow[0], int(_p5_pp), float(_p5_dec)),
+                            )
+                            _n_p5_odds += 1
+                        except Exception:
+                            pass
+                    if _n_p5_odds:
+                        _conn5.commit()
+                        st.success(f"Saved {_n_p5_odds} morning line odds rows.")
+                        st.cache_data.clear()
+                    else:
+                        st.warning("No morning line odds found in PDF runners.")
+
+            with _p5a3:
+                _p5_set_cid = _p5_exist_cid or st.session_state.get("active_card_id")
+                if st.button(
+                    "Set as Active Race",
+                    disabled=not _p5_set_cid,
+                    use_container_width=True, key="pdf5_set_active_btn",
+                ):
+                    st.session_state["active_card_id"] = _p5_set_cid
+                    st.cache_data.clear()
+                    st.rerun()
+
+    st.divider()
+    st.markdown(
+        '<div class="info-banner">📎 <strong>Advanced / Fallback</strong> — '
+        'CSV templates, live odds CSV upload, and sportsbook screenshot ingest below.</div>',
+        unsafe_allow_html=True,
+    )
+    st.divider()
+
+    # ── Section 2: Templates ───────────────────────────────────────────────
+    st.subheader("2 · CSV Templates")
     _tc1, _tc2 = st.columns(2)
 
     with _tc1:
@@ -1540,8 +2173,8 @@ with tab5:
     )
     st.divider()
 
-    # ── Section 2: Upload Live Odds CSV ───────────────────────────────────
-    st.subheader("2 · Upload Live Odds CSV")
+    # ── Section 3: Upload Live Odds CSV ───────────────────────────────────
+    st.subheader("3 · Upload Live Odds CSV")
 
     replace_odds = st.checkbox(
         "Replace existing odds on upload (update-odds mode only)",
@@ -1742,8 +2375,8 @@ with tab5:
 
     st.divider()
 
-    # ── Section 3: Screenshot ingest + promotion ───────────────────────────
-    st.subheader("3 · Sportsbook Screenshot Ingest")
+    # ── Section 4: Screenshot ingest + promotion ───────────────────────────
+    st.subheader("4 · Sportsbook Screenshot Ingest")
     st.markdown(
         '<div class="info-banner">ℹ Claude Vision extracts race identity and runner odds. '
         'After parse, you can create a new race card or attach to an existing one. '
@@ -1870,6 +2503,40 @@ with tab5:
                         if _build_result["warnings"]:
                             for _bw in _build_result["warnings"]:
                                 st.caption(_bw)
+                        # Persist screenshot odds to live_odds so "Odds" badge lights up
+                        _scr_cid = _build_result["card_id"]
+                        _scr_ts = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+                        _n_odds_saved = 0
+                        for _scr_r in (sr.get("runners_raw") or []):
+                            if _scr_r.get("is_scratched"):
+                                continue
+                            _scr_dec = _scr_r.get("current_odds_decimal")
+                            _scr_pp = _scr_r.get("post_position") or _scr_r.get("program_number")
+                            if not _scr_dec or not _scr_pp:
+                                continue
+                            _scr_erow = _conn5.execute(
+                                "SELECT entry_id FROM entries WHERE card_id=? AND post_position=?",
+                                (_scr_cid, int(_scr_pp)),
+                            ).fetchone()
+                            if not _scr_erow:
+                                continue
+                            try:
+                                _conn5.execute(
+                                    """INSERT INTO live_odds
+                                       (captured_at, book_id, card_id, entry_id,
+                                        post_position, decimal_odds, is_morning_line)
+                                       VALUES (?, 'manual', ?, ?, ?, ?, 0)""",
+                                    (_scr_ts, _scr_cid, _scr_erow[0],
+                                     int(_scr_pp), float(_scr_dec)),
+                                )
+                                _n_odds_saved += 1
+                            except Exception:
+                                pass
+                        if _n_odds_saved:
+                            _conn5.commit()
+                            st.caption(
+                                f"Saved {_n_odds_saved} live odds rows from screenshot."
+                            )
                         st.session_state["active_card_id"] = _build_result["card_id"]
                         st.cache_data.clear()
                         st.rerun()
@@ -1995,134 +2662,133 @@ with tab6:
     if not active_card_id:
         st.markdown(
             '<div class="warn-banner">⚠ No race card loaded. '
-            'Run the pipeline first.</div>',
+            'Select or create a race in the sidebar.</div>',
             unsafe_allow_html=True,
         )
-        st.stop()
+    else:
+        st.markdown(
+            '<div class="info-banner">ℹ Upload a CSV or TSV with past-performance data. '
+            'Required columns: <code>horse_name</code> (or <code>horse</code> / <code>name</code>) '
+            'and <code>race_date</code> (or <code>date</code>). '
+            'Optional: track_code, distance, surface, finish_position, jockey, '
+            'speed_figure, beyer_figure, lengths_behind, earned_purse.</div>',
+            unsafe_allow_html=True,
+        )
 
-    st.markdown(
-        '<div class="info-banner">ℹ Upload a CSV or TSV with past-performance data. '
-        'Required columns: <code>horse_name</code> (or <code>horse</code> / <code>name</code>) '
-        'and <code>race_date</code> (or <code>date</code>). '
-        'Optional: track_code, distance, surface, finish_position, jockey, '
-        'speed_figure, beyer_figure, lengths_behind, earned_purse.</div>',
-        unsafe_allow_html=True,
-    )
+        pp_file = st.file_uploader(
+            "Upload PP file (CSV or TSV)",
+            type=["csv", "tsv", "txt"],
+            key="pp_csv_uploader",
+            label_visibility="collapsed",
+        )
 
-    pp_file = st.file_uploader(
-        "Upload PP file (CSV or TSV)",
-        type=["csv", "tsv", "txt"],
-        key="pp_csv_uploader",
-        label_visibility="collapsed",
-    )
+        if pp_file is not None:
+            _pp_raw = pp_file.getvalue()
+            _parsed_rows, _parse_errors = parse_pp_csv(_pp_raw)
 
-    if pp_file is not None:
-        _pp_raw = pp_file.getvalue()
-        _parsed_rows, _parse_errors = parse_pp_csv(_pp_raw)
-
-        if _parse_errors and not _parsed_rows:
-            for err in _parse_errors[:5]:
-                st.markdown(
-                    f'<div class="warn-banner">⚠ Parse error row {err["row"]}: '
-                    f'{err["reason"]}</div>',
-                    unsafe_allow_html=True,
-                )
-        else:
-            # Show parse summary
-            _pc1, _pc2, _pc3 = st.columns(3)
-            _pc1.metric("Rows parsed", len(_parsed_rows))
-            _pc2.metric("Parse errors", len(_parse_errors))
-
-            if _parse_errors:
-                with st.expander(f"Parse errors ({len(_parse_errors)})"):
-                    _err_df = pd.DataFrame([
-                        {"Row": e["row"], "Reason": e["reason"]}
-                        for e in _parse_errors
-                    ])
-                    st.dataframe(_err_df, use_container_width=True, hide_index=True)
-
-            if _parsed_rows:
-                # Preview match against active card
-                _conn6 = get_connection()
-                _preview = preview_pp_match(_conn6, _parsed_rows, active_card_id)
-                _conn6.close()
-
-                _pm1, _pm2, _pm3 = st.columns(3)
-                _pm1.metric("Matched", len(_preview["matched"]))
-                _pm2.metric("Unmatched", len(_preview["unmatched"]))
-                _pm3.metric("Duplicates (skip)", len(_preview["duplicates"]))
-
-                if _preview["matched"]:
-                    st.markdown("**Matched rows (will insert)**")
-                    _match_df = pd.DataFrame([{
-                        "Horse (CSV)":   r["horse_name"],
-                        "DB Match":      r["matched_name"],
-                        "Score":         f"{r['match_score']:.3f}",
-                        "In Card":       "✓" if r["in_card"] else "—",
-                        "Race Date":     r["race_date"],
-                        "Track":         r.get("track_code") or "—",
-                        "Finish":        r.get("finish") or "—",
-                        "Speed Fig":     r.get("speed_fig") or "—",
-                    } for r in _preview["matched"]])
-
-                    def _match_style(row):
-                        score = float(row.get("Score", 1.0))
-                        if score < 0.85:
-                            return ["background-color:rgba(210,153,34,.10)"] * len(row)
-                        return [""] * len(row)
-
-                    st.dataframe(
-                        _match_df.style.apply(_match_style, axis=1),
-                        use_container_width=True, hide_index=True,
+            if _parse_errors and not _parsed_rows:
+                for err in _parse_errors[:5]:
+                    st.markdown(
+                        f'<div class="warn-banner">⚠ Parse error row {err["row"]}: '
+                        f'{err["reason"]}</div>',
+                        unsafe_allow_html=True,
                     )
+            else:
+                # Show parse summary
+                _pc1, _pc2, _pc3 = st.columns(3)
+                _pc1.metric("Rows parsed", len(_parsed_rows))
+                _pc2.metric("Parse errors", len(_parse_errors))
 
-                if _preview["unmatched"]:
-                    with st.expander(f"Unmatched horses ({len(_preview['unmatched'])}) — will be skipped"):
-                        _um_df = pd.DataFrame(_preview["unmatched"])
-                        st.dataframe(_um_df, use_container_width=True, hide_index=True)
+                if _parse_errors:
+                    with st.expander(f"Parse errors ({len(_parse_errors)})"):
+                        _err_df = pd.DataFrame([
+                            {"Row": e["row"], "Reason": e["reason"]}
+                            for e in _parse_errors
+                        ])
+                        st.dataframe(_err_df, use_container_width=True, hide_index=True)
 
-                if _preview["duplicates"]:
-                    with st.expander(f"Duplicates ({len(_preview['duplicates'])}) — already in horse_starts, will skip"):
-                        _dup_df = pd.DataFrame([{
-                            "Horse": r["horse_name"],
-                            "Race Date": r["race_date"],
-                            "Track": r.get("track_code") or "—",
-                        } for r in _preview["duplicates"]])
-                        st.dataframe(_dup_df, use_container_width=True, hide_index=True)
+                if _parsed_rows:
+                    # Preview match against active card
+                    _conn6 = get_connection()
+                    _preview = preview_pp_match(_conn6, _parsed_rows, active_card_id)
+                    _conn6.close()
 
-                # Confirm insert
-                n_to_insert = len(_preview["matched"])
-                if n_to_insert > 0:
-                    st.divider()
-                    if st.button(
-                        f"✅ Insert {n_to_insert} PP row(s) into horse_starts",
-                        type="primary",
-                        use_container_width=True,
-                    ):
-                        _conn6i = get_connection()
-                        _result = ingest_pp_rows(
-                            _conn6i, _parsed_rows, active_card_id
+                    _pm1, _pm2, _pm3 = st.columns(3)
+                    _pm1.metric("Matched", len(_preview["matched"]))
+                    _pm2.metric("Unmatched", len(_preview["unmatched"]))
+                    _pm3.metric("Duplicates (skip)", len(_preview["duplicates"]))
+
+                    if _preview["matched"]:
+                        st.markdown("**Matched rows (will insert)**")
+                        _match_df = pd.DataFrame([{
+                            "Horse (CSV)":   r["horse_name"],
+                            "DB Match":      r["matched_name"],
+                            "Score":         f"{r['match_score']:.3f}",
+                            "In Card":       "✓" if r["in_card"] else "—",
+                            "Race Date":     r["race_date"],
+                            "Track":         r.get("track_code") or "—",
+                            "Finish":        r.get("finish") or "—",
+                            "Speed Fig":     r.get("speed_fig") or "—",
+                        } for r in _preview["matched"]])
+
+                        def _match_style(row):
+                            score = float(row.get("Score", 1.0))
+                            if score < 0.85:
+                                return ["background-color:rgba(210,153,34,.10)"] * len(row)
+                            return [""] * len(row)
+
+                        st.dataframe(
+                            _match_df.style.apply(_match_style, axis=1),
+                            use_container_width=True, hide_index=True,
                         )
-                        _conn6i.close()
-                        st.success(
-                            f"Inserted {_result['n_inserted']} rows · "
-                            f"skipped {_result['n_skipped']} (not in card) · "
-                            f"dupes {_result['n_duplicate']} · "
-                            f"unmatched {_result['n_unmatched']}"
-                        )
-                        if _result["warnings"]:
-                            with st.expander(f"Warnings ({len(_result['warnings'])})"):
-                                for w in _result["warnings"]:
-                                    st.caption(w)
-                        if _result["n_inserted"] > 0:
-                            st.cache_data.clear()
-                            st.markdown(
-                                '<div class="info-banner">ℹ Cache cleared — '
-                                'readiness badges will update on next render.</div>',
-                                unsafe_allow_html=True,
+
+                    if _preview["unmatched"]:
+                        with st.expander(f"Unmatched horses ({len(_preview['unmatched'])}) — will be skipped"):
+                            _um_df = pd.DataFrame(_preview["unmatched"])
+                            st.dataframe(_um_df, use_container_width=True, hide_index=True)
+
+                    if _preview["duplicates"]:
+                        with st.expander(f"Duplicates ({len(_preview['duplicates'])}) — already in horse_starts, will skip"):
+                            _dup_df = pd.DataFrame([{
+                                "Horse": r["horse_name"],
+                                "Race Date": r["race_date"],
+                                "Track": r.get("track_code") or "—",
+                            } for r in _preview["duplicates"]])
+                            st.dataframe(_dup_df, use_container_width=True, hide_index=True)
+
+                    # Confirm insert
+                    n_to_insert = len(_preview["matched"])
+                    if n_to_insert > 0:
+                        st.divider()
+                        if st.button(
+                            f"✅ Insert {n_to_insert} PP row(s) into horse_starts",
+                            type="primary",
+                            use_container_width=True,
+                        ):
+                            _conn6i = get_connection()
+                            _result = ingest_pp_rows(
+                                _conn6i, _parsed_rows, active_card_id
                             )
-                else:
-                    st.info("No new rows to insert (all matched rows are duplicates or unmatched).")
+                            _conn6i.close()
+                            st.success(
+                                f"Inserted {_result['n_inserted']} rows · "
+                                f"skipped {_result['n_skipped']} (not in card) · "
+                                f"dupes {_result['n_duplicate']} · "
+                                f"unmatched {_result['n_unmatched']}"
+                            )
+                            if _result["warnings"]:
+                                with st.expander(f"Warnings ({len(_result['warnings'])})"):
+                                    for w in _result["warnings"]:
+                                        st.caption(w)
+                            if _result["n_inserted"] > 0:
+                                st.cache_data.clear()
+                                st.markdown(
+                                    '<div class="info-banner">ℹ Cache cleared — '
+                                    'readiness badges will update on next render.</div>',
+                                    unsafe_allow_html=True,
+                                )
+                    else:
+                        st.info("No new rows to insert (all matched rows are duplicates or unmatched).")
 
 # ── TAB 7: Results Import ──────────────────────────────────────────────────────
 with tab7:
@@ -2136,357 +2802,713 @@ with tab7:
     if not active_card_id:
         st.markdown(
             '<div class="warn-banner">⚠ No race card loaded. '
-            'Run the pipeline first.</div>',
+            'Select or create a race in the sidebar.</div>',
             unsafe_allow_html=True,
         )
-        st.stop()
+    else:
+        _conn7 = get_connection()
+        _res_summary = load_results_summary(_conn7, active_card_id)
 
-    _conn7 = get_connection()
-    _res_summary = load_results_summary(_conn7, active_card_id)
-
-    # ── Section 1: Template download ──────────────────────────────────────
-    st.subheader("1 · Download Results Template")
-    _tmpl_path = ROOT / "samples" / "results_import_template.csv"
-    if _tmpl_path.exists():
-        st.download_button(
-            label="⬇ Download results_import_template.csv",
-            data=_tmpl_path.read_bytes(),
-            file_name="results_import_template.csv",
-            mime="text/csv",
-            use_container_width=True,
+        # ── Section 1: PDF Results Import (Primary) ───────────────────────────
+        st.subheader("1 · PDF Results Import")
+        st.markdown(
+            '<div class="info-banner">ℹ Upload an Equibase official chart PDF. '
+            'Requires <code>pip install pdfplumber</code>. '
+            'For scanned / image PDFs use the CSV import below.</div>',
+            unsafe_allow_html=True,
         )
-    st.markdown(
-        '<div class="info-banner">'
-        '<strong>Required columns:</strong> '
-        '<code>race_date</code>, <code>track_code</code>, <code>race_number</code>, '
-        '<code>horse_name</code>, <code>finish_position</code><br>'
-        '<strong>Optional:</strong> '
-        'official_odds, post_position, beaten_lengths, scratched, disqualified, '
-        'speed_figure, beyer_figure, final_time, earned_purse, comment<br>'
-        '<strong>Accepted date formats:</strong> MM/DD/YYYY · YYYY-MM-DD · DD-Mon-YYYY<br>'
-        '<strong>Accepted odds formats:</strong> decimal (3.40) · fractional (9/2) · '
-        'american (+340)<br>'
-        '<strong>Scratched rows:</strong> set <code>scratched=1</code> and leave '
-        '<code>finish_position</code> blank.'
-        '</div>',
-        unsafe_allow_html=True,
-    )
 
-    st.divider()
+        _pdf7_file = st.file_uploader(
+            "Upload results PDF", type=["pdf"],
+            key="pdf_results_uploader", label_visibility="collapsed",
+        )
 
-    # ── Current results status ─────────────────────────────────────────────
-    if _res_summary["n_total"] > 0:
-        _rs1, _rs2, _rs3 = st.columns(3)
-        _rs1.metric("Results ingested", _res_summary["n_runners"])
-        _rs2.metric("Total rows (incl. scratches)", _res_summary["n_total"])
-        _ts7 = _res_summary["ingested_at"]
-        _rs3.metric("Ingested at", (_ts7[:19] + " UTC") if _ts7 else "—")
+        if _pdf7_file is not None:
+            with st.spinner("Extracting results from PDF…"):
+                _pr7 = parse_results_pdf(_pdf7_file.getvalue())
 
-    # ── Section 2: Upload & Preview ────────────────────────────────────────
-    st.subheader("2 · Upload Results CSV")
-    res_file = st.file_uploader(
-        "Upload results file (CSV or TSV)",
-        type=["csv", "tsv", "txt"],
-        key="results_csv_uploader",
-        label_visibility="collapsed",
-    )
+            if not _pr7["ok"]:
+                st.markdown(
+                    f'<div class="warn-banner">⚠ PDF parse failed: {_pr7["error"]}</div>',
+                    unsafe_allow_html=True,
+                )
+            else:
+                if _pr7["warnings"]:
+                    with st.expander(
+                        f"⚠ Parse warnings ({len(_pr7['warnings'])})", expanded=True
+                    ):
+                        for _pw7 in _pr7["warnings"]:
+                            st.caption(f"• {_pw7}")
 
-    if res_file is not None:
-        _res_raw = res_file.getvalue()
-        _res_parsed, _res_errors = parse_results_csv(_res_raw)
+                # Race preview
+                st.markdown("**Race Preview**")
+                _r71, _r72, _r73, _r74 = st.columns(4)
+                _r71.metric("Track",     _pr7.get("track_code") or _pr7.get("track_name") or "?")
+                _r72.metric("Date",      _pr7.get("race_date") or "?")
+                _r73.metric("Race",      f"R{_pr7['race_number']}" if _pr7.get("race_number") else "?")
+                _r74.metric("Finishers", _pr7.get("field_size", len(_pr7.get("runners", []))))
+                _r7_detail = [p for p in [
+                    _pr7.get("surface"), _pr7.get("race_type"),
+                    _pr7.get("track_condition"),
+                    f"Final: {_pr7['final_time']}" if _pr7.get("final_time") else None,
+                    f"${_pr7['purse_usd']:,}" if _pr7.get("purse_usd") else None,
+                ] if p]
+                if _r7_detail:
+                    st.caption(" · ".join(_r7_detail))
 
-        _rp1, _rp2 = st.columns(2)
-        _rp1.metric("Rows parsed", len(_res_parsed))
-        _rp2.metric("Parse errors", len(_res_errors))
+                # Results preview
+                if _pr7.get("runners"):
+                    st.markdown("**Results**")
+                    _r7_rows = [{
+                        "#":       r.get("program_number") or "?",
+                        "Horse":   r.get("horse_name") or "?",
+                        "Finish":  r.get("official_finish") or "?",
+                        "Odds":    r.get("official_odds") or "—",
+                        "Jockey":  r.get("jockey") or "—",
+                    } for r in _pr7["runners"]]
+                    st.dataframe(
+                        pd.DataFrame(_r7_rows),
+                        use_container_width=True, hide_index=True,
+                    )
 
-        if _res_errors:
-            with st.expander(f"Parse errors ({len(_res_errors)})"):
-                _re_df = pd.DataFrame([
-                    {"Row": e["row"], "Reason": e["reason"]}
-                    for e in _res_errors
-                ])
-                st.dataframe(_re_df, use_container_width=True, hide_index=True)
+                if _pr7.get("scratches"):
+                    with st.expander(f"Scratches ({len(_pr7['scratches'])})"):
+                        st.dataframe(
+                            pd.DataFrame([{
+                                "#": r.get("program_number"), "Horse": r.get("horse_name"),
+                            } for r in _pr7["scratches"]]),
+                            use_container_width=True, hide_index=True,
+                        )
 
-        if not _res_parsed:
-            st.markdown(
-                '<div class="warn-banner">⚠ No valid rows to preview. '
-                'Check parse errors above.</div>',
-                unsafe_allow_html=True,
-            )
-        else:
-            _preview7 = preview_results_match(_conn7, _res_parsed)
-
-            # Race resolution
-            if _preview7["races_missing"]:
-                for _rm in _preview7["races_missing"]:
+                # Match to race in DB
+                _r7_exist_cid = None
+                if _pr7.get("track_code") and _pr7.get("race_date") and _pr7.get("race_number"):
+                    _r7_exist_cid = find_race_card(
+                        _conn7, _pr7["track_code"], _pr7["race_date"], int(_pr7["race_number"])
+                    )
+                if _r7_exist_cid:
                     st.markdown(
-                        f'<div class="warn-banner">⚠ Race not found in DB: '
-                        f'<strong>{_rm["track_code"]}</strong> R{_rm["race_number"]} '
-                        f'{_rm["race_date"]} — check track abbrev and date.</div>',
+                        f'<div class="info-banner">✓ Matched to card_id='
+                        f'<strong>{_r7_exist_cid}</strong> in DB.</div>',
+                        unsafe_allow_html=True,
+                    )
+                else:
+                    st.markdown(
+                        '<div class="warn-banner">⚠ Race not found in DB — '
+                        'create it via Market Intake first.</div>',
                         unsafe_allow_html=True,
                     )
 
-            if _preview7["races_found"]:
-                st.markdown(
-                    f'<div class="info-banner">✓ Resolved '
-                    f'<strong>{len(_preview7["races_found"])}</strong> race(s) in DB: '
-                    + ", ".join(
-                        f'{r["track_code"]} R{r["race_number"]} {r["race_date"]}'
-                        for r in _preview7["races_found"]
-                    )
-                    + "</div>",
-                    unsafe_allow_html=True,
-                )
-
-            # Horse match preview
-            _pm1, _pm2, _pm3 = st.columns(3)
-            _pm1.metric("Horses matched", len(_preview7["horses_matched"]))
-            _pm2.metric("Unmatched",       len(_preview7["horses_unmatched"]))
-            _pm3.metric("Duplicates (skip)",len(_preview7["horses_duplicate"]))
-
-            if _preview7["horses_matched"]:
-                st.markdown("**Matched horses (will insert)**")
-
-                def _res_row_style(row):
-                    score = float(row.get("Score", 1.0))
-                    if row.get("Scr") == "✓":
-                        return ["color:#6e7681"] * len(row)
-                    if score < 0.85:
-                        return ["background-color:rgba(210,153,34,.10)"] * len(row)
-                    return [""] * len(row)
-
-                _hm_df = pd.DataFrame([{
-                    "Horse (CSV)":  r["horse_name"],
-                    "DB Match":     r["matched_name"],
-                    "Score":        f"{r['match_score']:.3f}",
-                    "Race":         f"{r['track_code']} R{r['race_number']} {r['race_date']}",
-                    "Finish":       r["finish"] if r["finish"] else "—",
-                    "Scr":          "✓" if r["scratched"] else "",
-                } for r in _preview7["horses_matched"]])
-                st.dataframe(
-                    _hm_df.style.apply(_res_row_style, axis=1),
-                    use_container_width=True, hide_index=True,
-                )
-
-            if _preview7["horses_unmatched"]:
-                with st.expander(
-                    f"Unmatched horses ({len(_preview7['horses_unmatched'])}) — will be skipped"
-                ):
-                    st.dataframe(
-                        pd.DataFrame(_preview7["horses_unmatched"]),
-                        use_container_width=True, hide_index=True,
-                    )
-
-            if _preview7["horses_duplicate"]:
-                with st.expander(
-                    f"Duplicates ({len(_preview7['horses_duplicate'])}) — already in race_results"
-                ):
-                    st.dataframe(
-                        pd.DataFrame([{
-                            "Horse": r["horse_name"],
-                            "Race":  f"{r['track_code']} R{r['race_number']} {r['race_date']}",
-                            "Finish": r["finish"],
-                        } for r in _preview7["horses_duplicate"]]),
-                        use_container_width=True, hide_index=True,
-                    )
-
-            # Confirm insert
-            _n_to_insert7 = len(_preview7["horses_matched"])
-            if _n_to_insert7 > 0:
                 st.divider()
-                if st.button(
-                    f"✅ Insert {_n_to_insert7} result row(s) into race_results",
-                    type="primary",
-                    use_container_width=True,
-                    key="results_insert_btn",
-                ):
-                    _conn7i = get_connection()
-                    _ingest7 = ingest_results(_conn7i, _res_parsed)
-                    _conn7i.close()
-                    st.success(
-                        f"Inserted {_ingest7['n_inserted']} rows · "
-                        f"scratches updated {_ingest7['n_scratch_flag']} · "
-                        f"dupes {_ingest7['n_duplicate']} · "
-                        f"unmatched horses {_ingest7['n_unmatched_horse']} · "
-                        f"unmatched races {_ingest7['n_unmatched_race']}"
-                    )
-                    if _ingest7["warnings"]:
-                        with st.expander(f"Warnings ({len(_ingest7['warnings'])})"):
-                            for _w7 in _ingest7["warnings"]:
-                                st.caption(_w7)
-                    if _ingest7["n_inserted"] > 0:
+                _r7a1, _r7a2 = st.columns(2)
+
+                with _r7a1:
+                    if st.button(
+                        "Import Results from PDF",
+                        disabled=not (_r7_exist_cid and _pr7.get("runners")),
+                        type="primary",
+                        use_container_width=True, key="pdf7_import_btn",
+                    ):
+                        # Build rows in the format ingest_results() expects
+                        _pdf7_rows = []
+                        _r7_tc  = _pr7.get("track_code") or ""
+                        _r7_dt  = _pr7.get("race_date") or ""
+                        _r7_rn  = int(_pr7["race_number"])
+                        for _r7r in _pr7.get("runners") or []:
+                            _pdf7_rows.append({
+                                "horse_name":     _r7r.get("horse_name") or "",
+                                "track_code":     _r7_tc,
+                                "race_date":      _r7_dt,
+                                "race_number":    _r7_rn,
+                                "finish_position":_r7r.get("official_finish"),
+                                "official_finish":_r7r.get("official_finish"),
+                                "official_odds":  _r7r.get("official_odds_decimal"),
+                                "post_position":  _r7r.get("post_position"),
+                                "scratched":      False,
+                                "disqualified":   False,
+                                "beaten_lengths": None,
+                                "speed_figure":   None,
+                                "beyer_figure":   None,
+                                "final_time":     _pr7.get("final_time"),
+                                "earned_purse":   None,
+                                "comment":        None,
+                            })
+                        for _r7s in (_pr7.get("scratches") or []):
+                            _pdf7_rows.append({
+                                "horse_name":     _r7s.get("horse_name") or "",
+                                "track_code":     _r7_tc,
+                                "race_date":      _r7_dt,
+                                "race_number":    _r7_rn,
+                                "finish_position":None,
+                                "official_finish":None,
+                                "official_odds":  None,
+                                "post_position":  _r7s.get("program_number"),
+                                "scratched":      True,
+                                "disqualified":   False,
+                                "beaten_lengths": None,
+                                "speed_figure":   None,
+                                "beyer_figure":   None,
+                                "final_time":     None,
+                                "earned_purse":   None,
+                                "comment":        None,
+                            })
+                        _conn7i = get_connection()
+                        _ing7 = ingest_results(_conn7i, _pdf7_rows)
+                        _conn7i.close()
+                        st.success(
+                            f"Inserted {_ing7['n_inserted']} rows · "
+                            f"scratches updated {_ing7['n_scratch_flag']} · "
+                            f"dupes {_ing7['n_duplicate']} · "
+                            f"unmatched {_ing7['n_unmatched_horse']}"
+                        )
+                        if _ing7["warnings"]:
+                            with st.expander(f"Warnings ({len(_ing7['warnings'])})"):
+                                for _iw7 in _ing7["warnings"]:
+                                    st.caption(_iw7)
+                        if _ing7["n_inserted"] > 0:
+                            st.cache_data.clear()
+                            st.rerun()
+
+                with _r7a2:
+                    if st.button(
+                        "Set as Active Race",
+                        disabled=not _r7_exist_cid,
+                        use_container_width=True, key="pdf7_set_active_btn",
+                    ):
+                        st.session_state["active_card_id"] = _r7_exist_cid
                         st.cache_data.clear()
                         st.rerun()
-            else:
-                if _preview7["races_found"]:
-                    st.info("No new results to insert (all matched rows are already ingested).")
 
-    st.divider()
-
-    # ── Section 3: Post-Race Evaluation ───────────────────────────────────
-    st.subheader("3 · Post-Race Evaluation")
-
-    if _res_summary["n_total"] == 0:
-        st.info("No race results ingested yet. Upload results above to unlock evaluation.")
-    elif not selected_run_id:
-        st.info("Select a score run in the sidebar to evaluate model performance.")
-    else:
-        _eval = evaluate_score_run(_conn7, selected_run_id, active_card_id)
-        if _eval is None:
-            st.info("No matching predictions found for the selected score run and race.")
-        else:
-            # Outcome summary
-            st.markdown("**Race Outcome**")
-            _ev1, _ev2, _ev3, _ev4 = st.columns(4)
-            _ev1.metric("Winner", _eval["winner"])
-            _top_fin = _eval["top_pick_finish"]
-            _ev2.metric(
-                "Top Pick",
-                _eval["top_pick"],
-                delta="WON ✓" if _eval["top_pick_won"] else f"Finished {_top_fin}" if _top_fin else "Scratched",
-                delta_color="normal" if _eval["top_pick_won"] else "inverse",
-            )
-            _ev3.metric(
-                "Favorite",
-                _eval["fav_name"],
-                delta="WON ✓" if _eval["fav_won"] else "Lost",
-                delta_color="normal" if _eval["fav_won"] else "inverse",
-            )
-            _ev4.metric(
-                "Top-3 Hit Rate",
-                f"{_eval['top3_hit']}/3",
-                help="How many of the model's top-3 picks finished in the actual top 3",
-            )
-
-            st.divider()
-
-            # Bet performance
-            st.markdown("**BET-Tagged Performance**")
-            _bv1, _bv2, _bv3, _bv4 = st.columns(4)
-            _bv1.metric("BET candidates", _eval["n_bets"])
-            _bv2.metric("Bets won (W)", _eval["n_bets_won"])
-            _bv3.metric("Bets in-the-money (ITM)", _eval["n_bets_itm"])
-            _roi = _eval["kelly_roi_pct"]
-            _bv4.metric(
-                "Kelly ROI",
-                f"{_roi:+.1f}%" if _roi is not None else "N/A",
-                help=(
-                    "Normalized return on $1,000 bankroll at 5% cap. "
-                    "Uses live odds snapshot if available, else ML-implied odds. "
-                    "N/A when no BET-tagged horse had computable odds."
-                ),
-                delta_color="normal" if (_roi or 0) >= 0 else "inverse",
-            )
-
-            if _eval["kelly_staked"] > 0:
-                _odds_src7 = "live snapshot" if _live_odds_by_pp else "ML proxy"
-                st.caption(
-                    f"Kelly staked ${_eval['kelly_staked']:,.0f} "
-                    f"(normalized $1k bankroll, 5% cap) · odds source: {_odds_src7}"
-                )
-
-            st.divider()
-
-            # Full results table
-            st.markdown("**Full Results vs Predictions**")
-            _fr = _eval["full_results"]
-            if _fr:
-                _fr_df = pd.DataFrame([{
-                    "Rank":     r["rank"],
-                    "Horse":    r["horse_name"],
-                    "Post":     r["post_position"],
-                    "Win%":     f"{r['win_probability']*100:.1f}%" if r["win_probability"] else "—",
-                    "Tag":      TAG_ICON.get(r["bet_tag"], "—"),
-                    "Finish":   r["official_finish"] if r["official_finish"] else (
-                                "SCR" if r["is_scratched"] else
-                                "DQ"  if r["is_disqualified"] else
-                                r["finish_position"] if r["finish_position"] else "—"
-                    ),
-                    "Odds":     (f"{r['official_odds_decimal']:.2f}"
-                                 if r["official_odds_decimal"] else "—"),
-                    "Lengths":  (f"{r['beaten_lengths']:.2f}"
-                                 if r["beaten_lengths"] is not None else "—"),
-                } for r in _fr])
-
-                def _result_row_style(row):
-                    finish = row.get("Finish")
-                    if finish == 1 or finish == "1":
-                        return ["background-color:rgba(46,160,67,.12)"] * len(row)
-                    if finish in ("SCR", "DQ"):
-                        return ["color:#6e7681"] * len(row)
-                    return [""] * len(row)
-
-                st.dataframe(
-                    _fr_df.style.apply(_result_row_style, axis=1),
-                    use_container_width=True, hide_index=True,
-                )
-
-                # Training label export hint
-                with st.expander("📦 Training label SQL (copy for batch retraining)"):
-                    st.code(
-                        f"""-- Labeled training examples for run_id = '{selected_run_id}'
-SELECT
-    es.entry_id,
-    es.horse_name,
-    es.win_probability          AS pred_win_prob,
-    es.value_score              AS pred_edge,
-    es.bet_tag,
-    rr.official_finish          AS actual_finish,
-    CASE WHEN rr.official_finish = 1 THEN 1 ELSE 0 END AS won,
-    rr.official_odds_decimal    AS actual_odds,
-    rr.is_scratched,
-    rr.is_disqualified
-FROM entry_scores es
-JOIN race_results rr ON es.entry_id = rr.entry_id
-WHERE es.run_id = '{selected_run_id}'
-  AND rr.is_scratched = 0
-  AND rr.is_disqualified = 0
-ORDER BY es.rank;""",
-                        language="sql",
-                    )
-                    st.caption(
-                        "Exclude scratched and DQ horses from calibration. "
-                        "Accumulate rows across multiple finished races (different card_ids) "
-                        "then retrain once horse_starts has ≥ 50 rows."
-                    )
-
-    # ── Danger zone: clear results ─────────────────────────────────────────
-    if _res_summary["n_total"] > 0:
         st.divider()
-        with st.expander("⚠ Clear results data (danger zone)"):
+        st.markdown(
+            '<div class="info-banner">📎 <strong>Advanced / Fallback</strong> — '
+            'CSV template download and manual CSV upload below.</div>',
+            unsafe_allow_html=True,
+        )
+        st.divider()
+
+        # ── Section 2: Template download ──────────────────────────────────────
+        st.subheader("2 · Download Results Template")
+        _tmpl_path = ROOT / "samples" / "results_import_template.csv"
+        if _tmpl_path.exists():
+            st.download_button(
+                label="⬇ Download results_import_template.csv",
+                data=_tmpl_path.read_bytes(),
+                file_name="results_import_template.csv",
+                mime="text/csv",
+                use_container_width=True,
+            )
+        st.markdown(
+            '<div class="info-banner">'
+            '<strong>Required columns:</strong> '
+            '<code>race_date</code>, <code>track_code</code>, <code>race_number</code>, '
+            '<code>horse_name</code>, <code>finish_position</code><br>'
+            '<strong>Optional:</strong> '
+            'official_odds, post_position, beaten_lengths, scratched, disqualified, '
+            'speed_figure, beyer_figure, final_time, earned_purse, comment<br>'
+            '<strong>Accepted date formats:</strong> MM/DD/YYYY · YYYY-MM-DD · DD-Mon-YYYY<br>'
+            '<strong>Accepted odds formats:</strong> decimal (3.40) · fractional (9/2) · '
+            'american (+340)<br>'
+            '<strong>Scratched rows:</strong> set <code>scratched=1</code> and leave '
+            '<code>finish_position</code> blank.'
+            '</div>',
+            unsafe_allow_html=True,
+        )
+
+        st.divider()
+
+        # ── Current results status ─────────────────────────────────────────────
+        if _res_summary["n_total"] > 0:
+            _rs1, _rs2, _rs3 = st.columns(3)
+            _rs1.metric("Results ingested", _res_summary["n_runners"])
+            _rs2.metric("Total rows (incl. scratches)", _res_summary["n_total"])
+            _ts7 = _res_summary["ingested_at"]
+            _rs3.metric("Ingested at", (_ts7[:19] + " UTC") if _ts7 else "—")
+
+        # ── Section 3: Upload & Preview ────────────────────────────────────────
+        st.subheader("3 · Upload Results CSV")
+        res_file = st.file_uploader(
+            "Upload results file (CSV or TSV)",
+            type=["csv", "tsv", "txt"],
+            key="results_csv_uploader",
+            label_visibility="collapsed",
+        )
+
+        if res_file is not None:
+            _res_raw = res_file.getvalue()
+            _res_parsed, _res_errors = parse_results_csv(_res_raw)
+
+            _rp1, _rp2 = st.columns(2)
+            _rp1.metric("Rows parsed", len(_res_parsed))
+            _rp2.metric("Parse errors", len(_res_errors))
+
+            if _res_errors:
+                with st.expander(f"Parse errors ({len(_res_errors)})"):
+                    _re_df = pd.DataFrame([
+                        {"Row": e["row"], "Reason": e["reason"]}
+                        for e in _res_errors
+                    ])
+                    st.dataframe(_re_df, use_container_width=True, hide_index=True)
+
+            if not _res_parsed:
+                st.markdown(
+                    '<div class="warn-banner">⚠ No valid rows to preview. '
+                    'Check parse errors above.</div>',
+                    unsafe_allow_html=True,
+                )
+            else:
+                _preview7 = preview_results_match(_conn7, _res_parsed)
+
+                # Race resolution
+                if _preview7["races_missing"]:
+                    for _rm in _preview7["races_missing"]:
+                        st.markdown(
+                            f'<div class="warn-banner">⚠ Race not found in DB: '
+                            f'<strong>{_rm["track_code"]}</strong> R{_rm["race_number"]} '
+                            f'{_rm["race_date"]} — check track abbrev and date.</div>',
+                            unsafe_allow_html=True,
+                        )
+
+                if _preview7["races_found"]:
+                    st.markdown(
+                        f'<div class="info-banner">✓ Resolved '
+                        f'<strong>{len(_preview7["races_found"])}</strong> race(s) in DB: '
+                        + ", ".join(
+                            f'{r["track_code"]} R{r["race_number"]} {r["race_date"]}'
+                            for r in _preview7["races_found"]
+                        )
+                        + "</div>",
+                        unsafe_allow_html=True,
+                    )
+
+                # Horse match preview
+                _pm1, _pm2, _pm3 = st.columns(3)
+                _pm1.metric("Horses matched", len(_preview7["horses_matched"]))
+                _pm2.metric("Unmatched",       len(_preview7["horses_unmatched"]))
+                _pm3.metric("Duplicates (skip)",len(_preview7["horses_duplicate"]))
+
+                if _preview7["horses_matched"]:
+                    st.markdown("**Matched horses (will insert)**")
+
+                    def _res_row_style(row):
+                        score = float(row.get("Score", 1.0))
+                        if row.get("Scr") == "✓":
+                            return ["color:#6e7681"] * len(row)
+                        if score < 0.85:
+                            return ["background-color:rgba(210,153,34,.10)"] * len(row)
+                        return [""] * len(row)
+
+                    _hm_df = pd.DataFrame([{
+                        "Horse (CSV)":  r["horse_name"],
+                        "DB Match":     r["matched_name"],
+                        "Score":        f"{r['match_score']:.3f}",
+                        "Race":         f"{r['track_code']} R{r['race_number']} {r['race_date']}",
+                        "Finish":       r["finish"] if r["finish"] else "—",
+                        "Scr":          "✓" if r["scratched"] else "",
+                    } for r in _preview7["horses_matched"]])
+                    st.dataframe(
+                        _hm_df.style.apply(_res_row_style, axis=1),
+                        use_container_width=True, hide_index=True,
+                    )
+
+                if _preview7["horses_unmatched"]:
+                    with st.expander(
+                        f"Unmatched horses ({len(_preview7['horses_unmatched'])}) — will be skipped"
+                    ):
+                        st.dataframe(
+                            pd.DataFrame(_preview7["horses_unmatched"]),
+                            use_container_width=True, hide_index=True,
+                        )
+
+                if _preview7["horses_duplicate"]:
+                    with st.expander(
+                        f"Duplicates ({len(_preview7['horses_duplicate'])}) — already in race_results"
+                    ):
+                        st.dataframe(
+                            pd.DataFrame([{
+                                "Horse": r["horse_name"],
+                                "Race":  f"{r['track_code']} R{r['race_number']} {r['race_date']}",
+                                "Finish": r["finish"],
+                            } for r in _preview7["horses_duplicate"]]),
+                            use_container_width=True, hide_index=True,
+                        )
+
+                # Confirm insert
+                _n_to_insert7 = len(_preview7["horses_matched"])
+                if _n_to_insert7 > 0:
+                    st.divider()
+                    if st.button(
+                        f"✅ Insert {_n_to_insert7} result row(s) into race_results",
+                        type="primary",
+                        use_container_width=True,
+                        key="results_insert_btn",
+                    ):
+                        _conn7i = get_connection()
+                        _ingest7 = ingest_results(_conn7i, _res_parsed)
+                        _conn7i.close()
+                        st.success(
+                            f"Inserted {_ingest7['n_inserted']} rows · "
+                            f"scratches updated {_ingest7['n_scratch_flag']} · "
+                            f"dupes {_ingest7['n_duplicate']} · "
+                            f"unmatched horses {_ingest7['n_unmatched_horse']} · "
+                            f"unmatched races {_ingest7['n_unmatched_race']}"
+                        )
+                        if _ingest7["warnings"]:
+                            with st.expander(f"Warnings ({len(_ingest7['warnings'])})"):
+                                for _w7 in _ingest7["warnings"]:
+                                    st.caption(_w7)
+                        if _ingest7["n_inserted"] > 0:
+                            st.cache_data.clear()
+                            st.rerun()
+                else:
+                    if _preview7["races_found"]:
+                        st.info("No new results to insert (all matched rows are already ingested).")
+
+        st.divider()
+
+        # ── Section 4: Post-Race Evaluation ───────────────────────────────────
+        st.subheader("4 · Post-Race Evaluation")
+
+        if _res_summary["n_total"] == 0:
+            st.info("No race results ingested yet. Upload results above to unlock evaluation.")
+        elif not selected_run_id:
+            st.info("Select a score run in the sidebar to evaluate model performance.")
+        else:
+            _eval = evaluate_score_run(_conn7, selected_run_id, active_card_id)
+            if _eval is None:
+                st.info("No matching predictions found for the selected score run and race.")
+            else:
+                # Outcome summary
+                st.markdown("**Race Outcome**")
+                _ev1, _ev2, _ev3, _ev4 = st.columns(4)
+                _ev1.metric("Winner", _eval["winner"])
+                _top_fin = _eval["top_pick_finish"]
+                _ev2.metric(
+                    "Top Pick",
+                    _eval["top_pick"],
+                    delta="WON ✓" if _eval["top_pick_won"] else f"Finished {_top_fin}" if _top_fin else "Scratched",
+                    delta_color="normal" if _eval["top_pick_won"] else "inverse",
+                )
+                _ev3.metric(
+                    "Favorite",
+                    _eval["fav_name"],
+                    delta="WON ✓" if _eval["fav_won"] else "Lost",
+                    delta_color="normal" if _eval["fav_won"] else "inverse",
+                )
+                _ev4.metric(
+                    "Top-3 Hit Rate",
+                    f"{_eval['top3_hit']}/3",
+                    help="How many of the model's top-3 picks finished in the actual top 3",
+                )
+
+                st.divider()
+
+                # Bet performance
+                st.markdown("**BET-Tagged Performance**")
+                _bv1, _bv2, _bv3, _bv4 = st.columns(4)
+                _bv1.metric("BET candidates", _eval["n_bets"])
+                _bv2.metric("Bets won (W)", _eval["n_bets_won"])
+                _bv3.metric("Bets in-the-money (ITM)", _eval["n_bets_itm"])
+                _roi = _eval["kelly_roi_pct"]
+                _bv4.metric(
+                    "Kelly ROI",
+                    f"{_roi:+.1f}%" if _roi is not None else "N/A",
+                    help=(
+                        "Normalized return on $1,000 bankroll at 5% cap. "
+                        "Uses live odds snapshot if available, else ML-implied odds. "
+                        "N/A when no BET-tagged horse had computable odds."
+                    ),
+                    delta_color="normal" if (_roi or 0) >= 0 else "inverse",
+                )
+
+                if _eval["kelly_staked"] > 0:
+                    _odds_src7 = "live snapshot" if _live_odds_by_pp else "ML proxy"
+                    st.caption(
+                        f"Kelly staked ${_eval['kelly_staked']:,.0f} "
+                        f"(normalized $1k bankroll, 5% cap) · odds source: {_odds_src7}"
+                    )
+
+                st.divider()
+
+                # Full results table
+                st.markdown("**Full Results vs Predictions**")
+                _fr = _eval["full_results"]
+                if _fr:
+                    _fr_df = pd.DataFrame([{
+                        "Rank":     r["rank"],
+                        "Horse":    r["horse_name"],
+                        "Post":     r["post_position"],
+                        "Win%":     f"{r['win_probability']*100:.1f}%" if r["win_probability"] else "—",
+                        "Tag":      TAG_ICON.get(r["bet_tag"], "—"),
+                        "Finish":   r["official_finish"] if r["official_finish"] else (
+                                    "SCR" if r["is_scratched"] else
+                                    "DQ"  if r["is_disqualified"] else
+                                    r["finish_position"] if r["finish_position"] else "—"
+                        ),
+                        "Odds":     (f"{r['official_odds_decimal']:.2f}"
+                                     if r["official_odds_decimal"] else "—"),
+                        "Lengths":  (f"{r['beaten_lengths']:.2f}"
+                                     if r["beaten_lengths"] is not None else "—"),
+                    } for r in _fr])
+
+                    def _result_row_style(row):
+                        finish = row.get("Finish")
+                        if finish == 1 or finish == "1":
+                            return ["background-color:rgba(46,160,67,.12)"] * len(row)
+                        if finish in ("SCR", "DQ"):
+                            return ["color:#6e7681"] * len(row)
+                        return [""] * len(row)
+
+                    st.dataframe(
+                        _fr_df.style.apply(_result_row_style, axis=1),
+                        use_container_width=True, hide_index=True,
+                    )
+
+                    # Training label export hint
+                    with st.expander("📦 Training label SQL (copy for batch retraining)"):
+                        st.code(
+                            f"""-- Labeled training examples for run_id = '{selected_run_id}'
+    SELECT
+        es.entry_id,
+        es.horse_name,
+        es.win_probability          AS pred_win_prob,
+        es.value_score              AS pred_edge,
+        es.bet_tag,
+        rr.official_finish          AS actual_finish,
+        CASE WHEN rr.official_finish = 1 THEN 1 ELSE 0 END AS won,
+        rr.official_odds_decimal    AS actual_odds,
+        rr.is_scratched,
+        rr.is_disqualified
+    FROM entry_scores es
+    JOIN race_results rr ON es.entry_id = rr.entry_id
+    WHERE es.run_id = '{selected_run_id}'
+      AND rr.is_scratched = 0
+      AND rr.is_disqualified = 0
+    ORDER BY es.rank;""",
+                            language="sql",
+                        )
+                        st.caption(
+                            "Exclude scratched and DQ horses from calibration. "
+                            "Accumulate rows across multiple finished races (different card_ids) "
+                            "then retrain once horse_starts has ≥ 50 rows."
+                        )
+
+        # ── Danger zone: clear results ─────────────────────────────────────────
+        if _res_summary["n_total"] > 0:
+            st.divider()
+            with st.expander("⚠ Clear results data (danger zone)"):
+                st.markdown(
+                    f'<div class="warn-banner">⚠ Permanently deletes all race_results rows '
+                    f'for card_id <strong>{active_card_id}</strong> '
+                    f'({_res_summary["n_total"]} row(s)). This removes official labels '
+                    f'and cannot be undone.</div>',
+                    unsafe_allow_html=True,
+                )
+                if "confirm_clear_results" not in st.session_state:
+                    st.session_state["confirm_clear_results"] = False
+
+                if not st.session_state["confirm_clear_results"]:
+                    if st.button(
+                        "🗑 Clear all results for active race",
+                        use_container_width=True,
+                        key="results_clear_btn",
+                    ):
+                        st.session_state["confirm_clear_results"] = True
+                        st.rerun()
+                else:
+                    st.error(
+                        f"Are you sure? This will delete {_res_summary['n_total']} row(s). "
+                        "This cannot be undone."
+                    )
+                    _rc1, _rc2 = st.columns(2)
+                    if _rc1.button("Yes, delete all results", type="primary",
+                                   use_container_width=True, key="results_confirm_del"):
+                        _n_del7 = delete_results_for_race(_conn7, active_card_id)
+                        st.session_state["confirm_clear_results"] = False
+                        st.cache_data.clear()
+                        st.success(f"Deleted {_n_del7} row(s).")
+                        st.rerun()
+                    if _rc2.button("Cancel", use_container_width=True, key="results_cancel_del"):
+                        st.session_state["confirm_clear_results"] = False
+                        st.rerun()
+
+        _conn7.close()
+
+# ── TAB 8: Admin ───────────────────────────────────────────────────────────────
+with tab8:
+    if not active_card_id:
+        st.warning("No active race. Select one in the sidebar.")
+    else:
+        _conn8 = get_connection()
+
+        # Ensure is_hidden column exists (idempotent ALTER TABLE)
+        if "is_hidden_col_ok" not in st.session_state:
+            ensure_is_hidden_column(_conn8)
+            st.session_state["is_hidden_col_ok"] = True
+
+        _adm = _admin_get_race_info(_conn8, active_card_id)
+        if not _adm:
+            st.error(f"Race card_id={active_card_id} not found.")
+        else:
+            _adm_label = (
+                f"{_adm['track_abbrev']} · {_adm['card_date']} · "
+                f"Race {_adm['race_number']}"
+            )
+            st.subheader(f"⚙ Race Admin — {_adm_label}")
+
+            # ── Section 1: Edit Metadata ───────────────────────────────────
+            st.markdown("### 1 · Edit Race Metadata")
+
+            _SURFACES = ["dirt", "turf", "synthetic", "all_weather"]
+            _surf_idx = _SURFACES.index(_adm.get("surface") or "dirt")
+            _dist_f_cur = round(float(_adm.get("distance_yards") or 1320) / 220.0, 2)
+
+            with st.form("race_edit_form"):
+                _fe1, _fe2 = st.columns(2)
+                with _fe1:
+                    _ed_abbrev   = st.text_input("Track code",      value=_adm.get("track_abbrev") or "")
+                    _ed_tname    = st.text_input("Track name",       value=_adm.get("track_name")  or "")
+                    _ed_date     = st.text_input("Race date (YYYY-MM-DD)", value=_adm.get("card_date") or "")
+                    _ed_rnum     = st.number_input("Race number",    value=int(_adm.get("race_number") or 1),
+                                                   min_value=1, step=1)
+                with _fe2:
+                    _ed_surface  = st.selectbox("Surface", _SURFACES, index=_surf_idx)
+                    _ed_dist     = st.number_input("Distance (furlongs)", value=_dist_f_cur,
+                                                   min_value=2.0, max_value=20.0, step=0.5, format="%.1f")
+                    _ed_class    = st.text_input("Race class",       value=_adm.get("race_class") or "")
+                    _ed_stakes   = st.text_input("Stakes name",      value=_adm.get("stakes_name") or "")
+                _ff1, _ff2 = st.columns(2)
+                with _ff1:
+                    _ed_purse    = st.number_input("Purse ($)", value=int(_adm.get("purse") or 0),
+                                                   min_value=0, step=1000)
+                with _ff2:
+                    _ed_field    = st.number_input("Field size", value=int(_adm.get("field_size") or 0),
+                                                   min_value=0, step=1)
+                _ed_age      = st.text_input("Age restriction", value=_adm.get("age_restriction") or "")
+
+                _save_clicked = st.form_submit_button(
+                    "💾 Save changes", type="primary", use_container_width=True
+                )
+
+            if _save_clicked:
+                _upd = _admin_update_race(
+                    _conn8, active_card_id,
+                    track_abbrev=_ed_abbrev.strip() or None,
+                    track_name=_ed_tname.strip() or None,
+                    card_date=_ed_date.strip() or None,
+                    race_number=int(_ed_rnum),
+                    stakes_name=_ed_stakes.strip() or None,
+                    purse=int(_ed_purse) if _ed_purse else None,
+                    distance_yards=int(round(_ed_dist * 220)),
+                    surface=_ed_surface,
+                    race_class=_ed_class.strip() or None,
+                    age_restriction=_ed_age.strip() or None,
+                    field_size=int(_ed_field) if _ed_field else None,
+                )
+                if _upd["ok"]:
+                    st.success("Race metadata saved.")
+                    st.cache_data.clear()
+                    st.rerun()
+                else:
+                    st.error(f"Save failed: {_upd['error']}")
+
+            st.divider()
+
+            # ── Section 2: Delete Race ─────────────────────────────────────
+            st.markdown("### 2 · Delete Race")
+
+            _deps = get_race_dependencies(_conn8, active_card_id)
+            _dep_labels = {
+                "entries":       "Entries",
+                "horse_starts":  "Horse starts",
+                "feature_store": "Feature rows",
+                "score_runs":    "Score runs",
+                "entry_scores":  "Entry scores",
+                "live_odds":     "Live odds",
+                "race_results":  "Race results",
+                "odds_snapshots":"Odds snapshots",
+                "trip_flags":    "Trip flags",
+            }
+            _deps_nonzero = {k: v for k, v in _deps.items() if v > 0}
+
+            if _deps_nonzero:
+                _dc = st.columns(min(len(_deps_nonzero), 4))
+                for _di, (_dk, _dv) in enumerate(_deps_nonzero.items()):
+                    _dc[_di % 4].metric(_dep_labels.get(_dk, _dk), _dv)
+                st.caption(
+                    "Hard delete will permanently remove all rows above. "
+                    "Soft delete hides the race without touching dependent data."
+                )
+            else:
+                st.info("No dependent rows — this race can be deleted cleanly.")
+
+            st.divider()
+
             st.markdown(
-                f'<div class="warn-banner">⚠ Permanently deletes all race_results rows '
-                f'for card_id <strong>{active_card_id}</strong> '
-                f'({_res_summary["n_total"]} row(s)). This removes official labels '
-                f'and cannot be undone.</div>',
+                '<div class="warn-banner">⚠ <strong>Soft delete is recommended.</strong> '
+                "Hard delete permanently removes this race and every dependent row "
+                "and <strong>cannot be undone</strong>.</div>",
                 unsafe_allow_html=True,
             )
-            if "confirm_clear_results" not in st.session_state:
-                st.session_state["confirm_clear_results"] = False
 
-            if not st.session_state["confirm_clear_results"]:
-                if st.button(
-                    "🗑 Clear all results for active race",
-                    use_container_width=True,
-                    key="results_clear_btn",
-                ):
-                    st.session_state["confirm_clear_results"] = True
-                    st.rerun()
-            else:
-                st.error(
-                    f"Are you sure? This will delete {_res_summary['n_total']} row(s). "
-                    "This cannot be undone."
+            _del_c1, _del_c2 = st.columns(2)
+
+            with _del_c1:
+                st.markdown("**Soft Delete (Hide)**")
+                st.caption(
+                    "Race is hidden from the selector and scoring but all data is "
+                    "preserved. Can be reversed via a direct DB update."
                 )
-                _rc1, _rc2 = st.columns(2)
-                if _rc1.button("Yes, delete all results", type="primary",
-                               use_container_width=True, key="results_confirm_del"):
-                    _n_del7 = delete_results_for_race(_conn7, active_card_id)
-                    st.session_state["confirm_clear_results"] = False
-                    st.cache_data.clear()
-                    st.success(f"Deleted {_n_del7} row(s).")
-                    st.rerun()
-                if _rc2.button("Cancel", use_container_width=True, key="results_cancel_del"):
-                    st.session_state["confirm_clear_results"] = False
-                    st.rerun()
+                if st.button("👁 Hide this race", use_container_width=True, key="adm_soft_del"):
+                    _soft = soft_delete_race(_conn8, active_card_id)
+                    if _soft["ok"]:
+                        st.session_state["active_card_id"] = None
+                        st.cache_data.clear()
+                        st.rerun()
+                    else:
+                        st.error(f"Soft delete failed: {_soft['error']}")
 
-    _conn7.close()
+            with _del_c2:
+                st.markdown("**Hard Delete (Cascade)**")
+                _confirm_str = (
+                    f"{_adm['track_abbrev']} R{_adm['race_number']} {_adm['card_date']}"
+                )
+                st.caption(f"Type **`{_confirm_str}`** to enable permanent deletion.")
+                _confirm_typed = st.text_input(
+                    "Confirm", key="adm_hard_del_confirm",
+                    placeholder=_confirm_str,
+                    label_visibility="collapsed",
+                )
+                _hard_ready = _confirm_typed.strip() == _confirm_str
+                if st.button(
+                    "🗑 Permanently delete race",
+                    type="secondary",
+                    use_container_width=True,
+                    key="adm_hard_del_btn",
+                    disabled=not _hard_ready,
+                ):
+                    _hard = hard_delete_race(_conn8, active_card_id)
+                    if _hard["ok"]:
+                        _hdel = _hard.get("deleted") or {}
+                        _hdetail = ", ".join(
+                            f"{tbl}: {n}" for tbl, n in _hdel.items() if n > 0
+                        )
+                        st.success(
+                            f"Race permanently deleted — "
+                            f"{_hard.get('total', 0)} rows removed."
+                            + (f" ({_hdetail})" if _hdetail else "")
+                        )
+                        st.session_state["active_card_id"] = None
+                        st.cache_data.clear()
+                        st.rerun()
+                    else:
+                        _hdel_partial = _hard.get("deleted") or {}
+                        _hpartial = ", ".join(
+                            f"{tbl}: {n}" for tbl, n in _hdel_partial.items() if n > 0
+                        )
+                        st.error(
+                            f"Hard delete failed and was rolled back: {_hard['error']}"
+                            + (f" (partial progress before rollback: {_hpartial})" if _hpartial else "")
+                        )
+
+        _conn8.close()

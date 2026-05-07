@@ -304,8 +304,10 @@ class ModelArtifact:
 # Numeric helpers
 # ---------------------------------------------------------------------------
 def _norm_field(values: pd.Series) -> np.ndarray:
-    """Min-max normalize a Series within its field; NaN -> median."""
+    """Min-max normalize a Series within its field; NaN -> median; all-NaN -> 0.5."""
     arr = values.astype(float).copy()
+    if arr.isna().all():
+        return np.full(len(arr), 0.5)   # all-null feature column: neutral prior
     median = arr.median()
     arr.fillna(median, inplace=True)
     lo, hi = arr.min(), arr.max()
@@ -430,9 +432,26 @@ def build_seed_baseline(
     group_scores = compute_group_scores(feat_df, config)
     composite    = compute_composite(group_scores, config)
 
+    # Sanitize composite: NaN/inf can occur when every entry in a feature column
+    # is null (sparse/screenshot race).  Replace with 0.0 so softmax doesn't
+    # collapse to all-NaN win_probs.
+    n_bad = int((~np.isfinite(composite)).sum())
+    if n_bad:
+        print(
+            f"[trainer] composite has {n_bad} non-finite value(s) — "
+            f"replacing with 0.0 (sparse race, all-null feature columns)"
+        )
+        composite = np.where(np.isfinite(composite), composite, 0.0)
+
     # Market calibration target: overround-adjusted morning line probs
-    ml_implied   = feat_df["market_implied_prob"].astype(float).values
-    market_probs = ml_implied / ml_implied.sum()
+    ml_implied = pd.to_numeric(
+        feat_df["market_implied_prob"], errors="coerce"
+    ).fillna(0.0).values
+    ml_sum = ml_implied.sum()
+    if ml_sum <= 0:
+        market_probs = np.full(len(ml_implied), 1.0 / max(len(ml_implied), 1))
+    else:
+        market_probs = ml_implied / ml_sum
 
     win_probs, temperature = calibrate_temperature(composite, market_probs)
 
