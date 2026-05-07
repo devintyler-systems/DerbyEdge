@@ -117,12 +117,29 @@ def debug_pdf_text(pdf_bytes: bytes, chars: int = 2000, lines: int = 50) -> None
 def _is_1stbet(text: str) -> bool:
     """True when text was extracted from a 1/ST BET race-detail page.
 
-    Heuristic: the phrase "1/ST BET" appears in the browser tab title that
-    pdfplumber extracts from the top of a printed/saved 1/ST BET page.
-    It is printed on line 0 and again on each page-break repeat header, so
-    searching just the first 300 characters is sufficient and fast.
+    Two detection layers:
+
+    1. Brand / URL signals in the first 1000 chars — covers standard exports
+       where pdfplumber picks up the page header "1/ST BET - ..." or the
+       footer URL "legacy.1stbet.com".
+
+    2. Structural heuristic — compact pdfplumber exports collapse the brand
+       header into the race-info line, so "1/ST BET" never appears in plain
+       text.  Instead we count compact runner tokens of the form "1PP1", "2PP2"
+       etc. (digit(s) + PP + digit(s)).  Three or more distinct occurrences
+       are unique to 1/ST BET compact exports and absent from Equibase/DRF.
     """
-    return bool(re.search(r'1/ST\s+BET', text[:300], re.I))
+    # Layer 1: explicit brand / URL signals
+    if re.search(
+        r'1/ST\s+BET'        # standard:  "1/ST BET"
+        r'|1ST\s*BET'        # compact:   "1ST BET" or "1STBET"
+        r'|1stbet\.com'      # URL:       "1stbet.com", "www.1stbet.com"
+        r'|legacy\.1stbet',  # subdomain: "legacy.1stbet.com"
+        text[:1000], re.I,
+    ):
+        return True
+    # Layer 2: structural — ≥3 compact "NNPPnn" runner tokens
+    return len(re.findall(r'(?<!\d)\d{1,2}PP\d{1,2}(?!\d)', text)) >= 3
 
 
 # ── Generic field extractors ──────────────────────────────────────────────────
@@ -718,6 +735,172 @@ def _parse_race_runners_1stbet_fallback(text: str, warnings: list[str]) -> list[
     return runners
 
 
+# ── 1/ST BET multiline block parser ──────────────────────────────────────────
+
+def _parse_race_runners_1stbet_multiline(lines: list[str], warnings: list[str]) -> list[dict]:
+    """Parse 1/ST BET line-preserving multi-line runner blocks.
+
+    Verified block structure (pdfplumber output for Horseshoe Indianapolis):
+        N           ← bare integer 1-30 (entry / program number)
+        PP{N}       ← post-position label
+        HORSE NAME  ← all-caps; NO trailing odds token required
+        J: Jockey
+        T: Trainer
+        -           ← lone dash separator (skip)
+        ML {odds}   ← morning-line odds on its own line
+
+    Runner-block start: bare-integer line whose next non-empty sibling is PP{N}.
+    Also handles a bare PP{N} label as the block start (entry number absent).
+    Scans up to 20 lines per block for J:, T:, ML before advancing.
+    """
+    runners:  list[dict] = []
+    seen_pp:  set[int]   = set()
+    n = len(lines)
+
+    _re_digit   = re.compile(r'^\d{1,2}$')
+    _re_pp      = re.compile(r'^PP(\d{1,2})$', re.I)
+    _re_horse   = re.compile(r'^[A-Z][A-Z0-9\'\s\-\.]+$')
+    _re_jockey  = re.compile(r'^J:\s*(.+)', re.I)
+    _re_trainer = re.compile(r'^T:\s*(.+)', re.I)
+    _re_ml      = re.compile(r'\bML\s+(\S+)', re.I)
+    _re_noise   = re.compile(r'1/ST\s+BET\s*[-–]|https?://', re.I)
+    _re_pgcnt   = re.compile(r'^\d+/\d+$')
+
+    def _next_nonempty(start: int) -> tuple[int, str]:
+        j = start
+        while j < n and not lines[j].strip():
+            j += 1
+        return (j, lines[j].strip()) if j < n else (n, "")
+
+    i = 0
+    while i < n:
+        raw = lines[i].strip()
+        i += 1
+
+        if not raw or _re_noise.search(raw) or _re_pgcnt.match(raw):
+            continue
+
+        # ── Detect runner-block start ─────────────────────────────────────
+        pp_num: int | None = None
+
+        m_direct = _re_pp.match(raw)
+        if m_direct:
+            pp_num = int(m_direct.group(1))
+        elif _re_digit.match(raw):
+            j, nxt = _next_nonempty(i)
+            m_pp2 = _re_pp.match(nxt)
+            if m_pp2:
+                pp_num = int(m_pp2.group(1))
+                i = j + 1  # advance past PP label
+
+        if pp_num is None or pp_num in seen_pp:
+            continue
+
+        # ── Horse name (next non-empty line after PP label) ───────────────
+        j, horse_line = _next_nonempty(i)
+        if j >= n:
+            break
+        i = j + 1
+
+        if (not _re_horse.match(horse_line)
+                or horse_line.upper().startswith('ML ')
+                or len(horse_line) < 2):
+            continue  # not a valid horse-name line
+
+        is_scr = bool(re.search(r'\bSCR\b', horse_line))
+        if is_scr:
+            horse_line = re.sub(r'\s*\bSCR\b\s*', ' ', horse_line).strip()
+
+        horse_name = horse_line.title()
+        seen_pp.add(pp_num)
+
+        jockey = trainer = ml_str = ml_dec = None
+
+        # ── Scan block body for J:, T:, ML ───────────────────────────────
+        limit = min(i + 20, n)
+        while i < limit:
+            l = lines[i].strip()
+            i += 1
+
+            if not l or _re_noise.search(l) or _re_pgcnt.match(l):
+                continue
+
+            if l in ('-', '–', '—'):  # lone visual separator
+                continue
+
+            # Next runner block starts with a bare integer followed by PP{N}
+            if _re_digit.match(l):
+                k, nxt2 = _next_nonempty(i)
+                if k < n and _re_pp.match(nxt2):
+                    i -= 1  # push back so outer loop picks up this integer
+                    break
+                continue  # standalone number inside stats — skip
+
+            # Bare PP{N} (entry number missing in this block)
+            if _re_pp.match(l):
+                i -= 1
+                break
+
+            mj = _re_jockey.match(l)
+            if mj:
+                jockey = mj.group(1).strip() or None
+                continue
+
+            mt = _re_trainer.match(l)
+            if mt:
+                trainer = mt.group(1).strip() or None
+                continue
+
+            mml = _re_ml.search(l)
+            if mml:
+                raw_ml = mml.group(1).strip()
+                ml_str, ml_dec = _parse_ml_1stbet(raw_ml)
+                continue
+
+        runners.append(
+            _runner_dict(pp_num, horse_name, jockey, trainer, ml_str, ml_dec, is_scr)
+        )
+
+    if runners:
+        runners.sort(key=lambda r: r['post_position'])
+    _log.debug("1stbet multiline: %d runners", len(runners))
+    return runners
+
+
+def _pick_best_1stbet_parse(
+    multiline: list[dict],
+    compact:   list[dict],
+    field_size_hdr: int | None,
+) -> tuple[list[dict], str]:
+    """Choose between multiline-block and compact-stream parse results.
+
+    Primary: unique post-position count (more is better).
+    If field_size_hdr is known: prefer the parse whose count is closer.
+    Ties: multiline wins (it is the primary format for line-preserving exports).
+    """
+    ml_pps = len({r['post_position'] for r in multiline})
+    cp_pps = len({r['post_position'] for r in compact})
+
+    _log.debug(
+        "1stbet pick_best: multiline=%d  compact=%d  field_size_hdr=%s",
+        ml_pps, cp_pps, field_size_hdr,
+    )
+
+    if field_size_hdr and ml_pps != cp_pps:
+        if abs(cp_pps - field_size_hdr) < abs(ml_pps - field_size_hdr):
+            _log.debug(
+                "1stbet pick_best: compact (closer to field_size %d)", field_size_hdr
+            )
+            return compact, "compact"
+
+    if cp_pps > ml_pps:
+        _log.debug("1stbet pick_best: compact (%d > %d PPs)", cp_pps, ml_pps)
+        return compact, "compact"
+
+    _log.debug("1stbet pick_best: multiline (%d PPs)", ml_pps)
+    return multiline, "multiline"
+
+
 # ── Generic runner line parsers ───────────────────────────────────────────────
 
 def _parse_race_runners(text: str, warnings: list[str]) -> list[dict]:
@@ -1061,6 +1244,10 @@ def parse_race_pdf(pdf_bytes: bytes) -> dict[str, Any]:
         }
 
     detected_1stbet = _is_1stbet(text)
+    _log.debug(
+        "parse_race_pdf: raw_text=%d chars  is_1stbet=%s",
+        len(text), detected_1stbet,
+    )
 
     if detected_1stbet:
         # ── 1/ST BET path ────────────────────────────────────────────────────
@@ -1072,14 +1259,46 @@ def parse_race_pdf(pdf_bytes: bytes) -> dict[str, Any]:
         surface       = hdr.get("surface") or _extract_surface(text)
         race_type     = hdr.get("race_type") or _extract_race_type(text)
         purse_usd     = hdr.get("purse_usd") or _extract_purse(text)
-        runners_primary: list[dict] = _parse_race_runners_1stbet(text.splitlines(), warnings)
-        runners_fallback: list[dict] = []
-        if not runners_primary:
-            runners_fallback = _parse_race_runners_1stbet_fallback(text, warnings)
-        runners = runners_primary if runners_primary else runners_fallback
         # field_size from header is more reliable than counting runners
         # (includes scratches already present in the PDF)
         field_size_hdr = hdr.get("field_size")
+
+        _log.debug(
+            "parse_race_pdf: is_1stbet=True  raw=%d chars  field_size_hdr=%s",
+            len(text), field_size_hdr,
+        )
+
+        # ── Two-mode runner extraction ────────────────────────────────────
+        # Run both parsers independently; pick the one with more unique PPs
+        # (or the one closest to the header field count when available).
+        _ml_warns: list[str] = []
+        _cp_warns: list[str] = []
+        runners_primary  = _parse_race_runners_1stbet_multiline(text.splitlines(), _ml_warns)
+        runners_fallback = _parse_race_runners_1stbet_fallback(text, _cp_warns)
+
+        _log.debug(
+            "1stbet runners: multiline=%d  compact=%d",
+            len(runners_primary), len(runners_fallback),
+        )
+
+        runners, _parse_source = _pick_best_1stbet_parse(
+            runners_primary, runners_fallback, field_size_hdr,
+        )
+        # Merge warnings from the winning parser only
+        warnings.extend(_ml_warns if _parse_source == "multiline" else _cp_warns)
+
+        _log.debug(
+            "1stbet canonical: %d runners  source=%s",
+            len(runners), _parse_source,
+        )
+
+        # Hard error: both parsers should not return 0 if PP anchors are present
+        if "PP1" in text and "PP2" in text and not runners:
+            _log.error(
+                "1stbet: PP1+PP2 in raw_text but 0 canonical runners — "
+                "multiline=%d compact=%d  raw_text[:1500]=%r",
+                len(runners_primary), len(runners_fallback), text[:1500],
+            )
     else:
         # ── Generic path ─────────────────────────────────────────────────────
         race_date     = _extract_date(text)
