@@ -604,18 +604,19 @@ def _parse_race_runners_1stbet_multiline(lines: list[str], warnings: list[str]) 
 
     Production block structure (confirmed from live pdfplumber output):
 
-        HORSE NAME LIVE_ODDS          ← ALL-CAPS name + trailing odds/SCR token
+        HORSE NAME LIVE_ODDS          ← ALL-CAPS name + trailing odds/SCR token (optional)
         N                             ← bare program number 1-30
         J: Jockey Name ML ml_odds     ← jockey; ML appears on same J: line
         PP{N}                         ← optional post-position label; ignored
         T: Trainer Name
         [RECENT / stats / past-perf]  ← skipped until next horse header
 
-    Runner-block start is anchored on the horse-header line (ALL-CAPS + odds),
-    NOT on the bare integer.  The immediately-following non-empty line must be
-    a bare 1-30 integer to confirm the candidate — this eliminates track/race
-    header false positives ("HORSESHOE INDIANAPOLIS R 5" fails because its next
-    non-empty sibling is the race-info line, not a bare integer).
+    The trailing odds token on the horse-header line is OPTIONAL.  Active runners
+    may have just the name ("SCRIPTED LOVE") while scratched runners carry "SCR"
+    ("WHAT YOU WISHED SCR").  Both forms are accepted; confirmation that the
+    immediately-following non-empty line is a bare 1-30 integer is the primary
+    guard against false positives (e.g. "HORSESHOE INDIANAPOLIS R 5" is rejected
+    because its next sibling is the race-info line, not a bare integer).
 
     Candidate parsers run in parallel via _pick_best_1stbet_parse:
       - this function (horse-header anchor) → primary for line-preserving exports
@@ -639,28 +640,52 @@ def _parse_race_runners_1stbet_multiline(lines: list[str], warnings: list[str]) 
         re.I,
     )
 
-    def _candidate_horse(line: str) -> tuple[str, str] | None:
-        """Return (name_part, odds_str) if line is an ALL-CAPS horse header.
+    def _candidate_horse(line: str) -> tuple[str, str | None] | None:
+        """Return (name_part, odds_str_or_None) if line is an ALL-CAPS horse header.
 
-        Trailing token patterns (raw strings):
-            fractional: r'^\\d+[-/]\\d+$'   e.g. "5/2", "7-2"
-            integer:    r'^\\d+(?:\\.\\d+)?$' e.g. "9", "8"
-            scratched:  "SCR"
+        Three accepted forms — trailing token is OPTIONAL:
 
-        Name part pattern: r'^[A-Z][A-Z0-9\\'\\s\\-\\.]+$'
-            Requires first char uppercase letter; all subsequent chars uppercase
-            letters, digits, spaces, apostrophes, hyphens, or dots.
-            Single-word lines without a trailing token (rsplit → 1 part) return None.
+          "SCRIPTED LOVE"        → ("SCRIPTED LOVE", None)  no trailing token
+          "YOTOWIN 9"            → ("YOTOWIN",        "9")   integer live odds
+          "TAP BONNET 5/2"       → ("TAP BONNET",     "5/2") fractional live odds
+          "WHAT YOU WISHED SCR"  → ("WHAT YOU WISHED","SCR") scratched
+
+        Name-part regex:  ^[A-Z][A-Z0-9'\\s\\-\\.]+$
+          First char must be an uppercase letter; subsequent chars may be uppercase
+          letters, digits, spaces, apostrophes, hyphens, or dots.
+
+        Trailing-token regex (applied when line has ≥2 whitespace-separated parts):
+          fractional  r'^\\d+[-/]\\d+$'     e.g. "5/2", "7-2"
+          integer     r'^\\d+(?:\\.\\d+)?$'  e.g. "9", "8"
+          scratched   "SCR"
+          anything else → treat full line as horse name (no trailing token)
+
+        Caller confirms the candidate with a bare-integer peek on the next line.
         """
         parts = line.rsplit(None, 1)
-        if len(parts) != 2:
+
+        # ── Single-word line ──────────────────────────────────────────────
+        if len(parts) == 1:
+            name = parts[0].strip()
+            if re.match(r'^[A-Z][A-Z0-9\'\s\-\.]+$', name):
+                return name, None
             return None
+
+        # ── Two-part line ────────────────────────────────────────────────
         name_part, trailing = parts[0], parts[1].strip()
+
         if trailing.upper() == "SCR":
-            pass
-        elif (not re.match(r'^\d+[-/]\d+$', trailing)
-              and not re.match(r'^\d+(?:\.\d+)?$', trailing)):
+            pass  # SCR accepted; name_part validated below
+        elif (re.match(r'^\d+[-/]\d+$', trailing)
+              or re.match(r'^\d+(?:\.\d+)?$', trailing)):
+            pass  # odds token accepted; name_part validated below
+        else:
+            # Trailing word is not odds/SCR — treat the full line as horse name
+            full_name = line.strip()
+            if re.match(r'^[A-Z][A-Z0-9\'\s\-\.]+$', full_name):
+                return full_name, None
             return None
+
         if not re.match(r'^[A-Z][A-Z0-9\'\s\-\.]+$', name_part):
             return None
         return name_part.strip(), trailing
@@ -705,7 +730,7 @@ def _parse_race_runners_1stbet_multiline(lines: list[str], warnings: list[str]) 
             i = j + 1
             continue
 
-        is_scr    = raw_odds.upper() == "SCR"
+        is_scr    = raw_odds is not None and raw_odds.upper() == "SCR"
         live_odds = raw_odds if not is_scr else None
         horse_name = raw_name.title()
 

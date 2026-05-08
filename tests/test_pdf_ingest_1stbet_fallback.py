@@ -1008,3 +1008,277 @@ class TestLiveLayoutRegression:
         assert "Yotowin" in names
         assert "Innisfree Lass" in names
         assert "I Made It" in names
+
+
+# ===========================================================================
+# Race 8 regression — mix of active runners (no trailing token) and
+# scratched runners (SCR token).  Exposes the bug where _candidate_horse
+# rejected any line without a trailing odds/SCR token, silently discarding
+# all 8 active runners and returning only the 2 scratches.
+#
+# Active runners:  SCRIPTED LOVE, BEAUTIFUL ESTER, PINK PICTURE, MIDNIGHT BLUE,
+#                  SUMMER BREEZE, GOLDEN ARROW, STAR DANCER, WILD FIRE  (8)
+# Scratched:       WHAT YOU WISHED SCR (PP4), ONCE MORE SCR (PP9)       (2)
+# Total:           10
+# ===========================================================================
+
+_IND_R8_LIVE_TEXT = """\
+5/7/26, 5:02 PM 1/ST BET - The Easy & Smart Way to Bet the Races
+HORSESHOE INDIANAPOLIS R 8
+2:15 PM 10 Horses MCL $12,500 1M Dirt / Fast
+FINAL
+REPLAY
+SCRIPTED LOVE
+1
+J: Luis Quinonez ML 5/2
+PP1
+T: Brian Lynch
+RECENT 5 WINS 1 TOP 3 2 More Info
+BEAUTIFUL ESTER
+2
+J: Maria Harrington ML 3/1
+PP2
+T: Adam Kitchingman
+RECENT 5 More Info
+PINK PICTURE
+3
+J: Josue Perez ML 8
+PP3
+T: Patricia Farro
+RECENT 5 More Info
+WHAT YOU WISHED SCR
+4
+J: Chris Landeros ML 6
+PP4
+T: Ron Alfano
+RECENT 5 More Info
+MIDNIGHT BLUE
+5
+J: Silvio Amador ML 4
+PP5
+T: Elaine Labadie
+RECENT 5 More Info
+SUMMER BREEZE
+6
+J: Alex Becerra ML 10
+PP6
+T: Kathy Ritvo
+RECENT 5 More Info
+GOLDEN ARROW
+7
+J: Xavier Perez ML 15
+PP7
+T: Wayne Catalano
+RECENT 5 More Info
+STAR DANCER
+8
+J: Evin A. Roman ML 5
+PP8
+T: Rogelio Labra
+RECENT 5 More Info
+ONCE MORE SCR
+9
+J: Alberto Burgos ML 20
+PP9
+T: John Haran
+RECENT 5 More Info
+WILD FIRE
+10
+J: Jake Saez ML 7
+PP10
+T: Eduardo Caramori
+RECENT 5 More Info
+"""
+
+_R8_ACTIVE_NAMES = {
+    "Scripted Love", "Beautiful Ester", "Pink Picture", "Midnight Blue",
+    "Summer Breeze", "Golden Arrow", "Star Dancer", "Wild Fire",
+}
+_R8_SCRATCHED_NAMES = {"What You Wished", "Once More"}
+_R8_ALL_NAMES = _R8_ACTIVE_NAMES | _R8_SCRATCHED_NAMES
+
+
+class TestLiveLayoutRace8Direct:
+    """Direct test of _parse_race_runners_1stbet_multiline with Race 8 fixture.
+
+    Critical regression: active runners have NO trailing token on the horse-name
+    line.  Previous parser rejected them, returning only the 2 scratched runners.
+    """
+
+    def _run(self):
+        warnings: list[str] = []
+        runners = _parse_race_runners_1stbet_multiline(
+            _IND_R8_LIVE_TEXT.splitlines(), warnings
+        )
+        return runners, warnings
+
+    def test_total_runner_count(self):
+        runners, _ = self._run()
+        assert len(runners) == 10, (
+            f"Expected 10 runners (8 active + 2 scratched), "
+            f"got {len(runners)}: {[r['horse_name'] for r in runners]}"
+        )
+
+    def test_active_runner_count(self):
+        runners, _ = self._run()
+        active = [r for r in runners if not r["is_scratched"]]
+        assert len(active) == 8, (
+            f"Expected 8 active runners, got {len(active)}: "
+            f"{[r['horse_name'] for r in active]}"
+        )
+
+    def test_scratched_runner_count(self):
+        runners, _ = self._run()
+        scratched = [r for r in runners if r["is_scratched"]]
+        assert len(scratched) == 2, (
+            f"Expected 2 scratched, got {len(scratched)}: "
+            f"{[r['horse_name'] for r in scratched]}"
+        )
+
+    def test_all_names_found(self):
+        runners, _ = self._run()
+        names = {r["horse_name"] for r in runners}
+        assert names == _R8_ALL_NAMES, (
+            f"Missing: {_R8_ALL_NAMES - names}  Extra: {names - _R8_ALL_NAMES}"
+        )
+
+    def test_active_names_correct(self):
+        runners, _ = self._run()
+        active_names = {r["horse_name"] for r in runners if not r["is_scratched"]}
+        assert active_names == _R8_ACTIVE_NAMES, (
+            f"Active name mismatch — missing: {_R8_ACTIVE_NAMES - active_names}"
+        )
+
+    def test_scratched_names_correct(self):
+        runners, _ = self._run()
+        scr_names = {r["horse_name"] for r in runners if r["is_scratched"]}
+        assert scr_names == _R8_SCRATCHED_NAMES, (
+            f"Scratched name mismatch: {scr_names}"
+        )
+
+    def test_post_positions_one_through_ten(self):
+        runners, _ = self._run()
+        pps = sorted(r["post_position"] for r in runners)
+        assert pps == list(range(1, 11)), f"Expected [1..10], got {pps}"
+
+    def test_scratched_at_pp4_and_pp9(self):
+        runners, _ = self._run()
+        by_pp = {r["post_position"]: r for r in runners}
+        assert by_pp[4]["is_scratched"] is True,  "PP4 must be scratched"
+        assert by_pp[9]["is_scratched"] is True,  "PP9 must be scratched"
+        assert by_pp[4]["horse_name"] == "What You Wished"
+        assert by_pp[9]["horse_name"] == "Once More"
+
+    def test_active_runners_not_scratched(self):
+        runners, _ = self._run()
+        by_pp = {r["post_position"]: r for r in runners}
+        for pp in [1, 2, 3, 5, 6, 7, 8, 10]:
+            assert by_pp[pp]["is_scratched"] is False, (
+                f"PP{pp} must not be scratched"
+            )
+
+    def test_pp1_fields(self):
+        runners, _ = self._run()
+        by_pp = {r["post_position"]: r for r in runners}
+        r1 = by_pp[1]
+        assert r1["horse_name"] == "Scripted Love"
+        assert r1["jockey"] == "Luis Quinonez"
+        assert r1["trainer"] == "Brian Lynch"
+        assert r1["morning_line"] == "5/2"
+        assert r1["is_scratched"] is False
+
+    def test_pp2_fields(self):
+        runners, _ = self._run()
+        by_pp = {r["post_position"]: r for r in runners}
+        r2 = by_pp[2]
+        assert r2["horse_name"] == "Beautiful Ester"
+        assert r2["jockey"] == "Maria Harrington"
+        assert r2["trainer"] == "Adam Kitchingman"
+        assert r2["morning_line"] == "3/1"
+
+    def test_pp10_fields(self):
+        runners, _ = self._run()
+        by_pp = {r["post_position"]: r for r in runners}
+        r10 = by_pp[10]
+        assert r10["horse_name"] == "Wild Fire"
+        assert r10["jockey"] == "Jake Saez"
+        assert r10["trainer"] == "Eduardo Caramori"
+        assert r10["morning_line"] == "7/1"
+
+    def test_all_active_have_jockey_trainer_ml(self):
+        runners, _ = self._run()
+        for r in runners:
+            if r["is_scratched"]:
+                continue
+            assert r.get("jockey"),       f"Missing jockey:  {r['horse_name']}"
+            assert r.get("trainer"),      f"Missing trainer: {r['horse_name']}"
+            assert r.get("morning_line"), f"Missing ML:      {r['horse_name']}"
+
+    def test_no_duplicate_pp(self):
+        runners, _ = self._run()
+        pps = [r["post_position"] for r in runners]
+        assert len(pps) == len(set(pps)), f"Duplicate PPs: {pps}"
+
+    def test_horse_names_title_cased(self):
+        runners, _ = self._run()
+        for r in runners:
+            assert r["horse_name"] != r["horse_name"].upper(), (
+                f"Horse name not title-cased: {r['horse_name']!r}"
+            )
+
+
+class TestLiveLayoutRace8Pipeline:
+    """End-to-end parse_race_pdf() with Race 8 fixture — the full production path."""
+
+    def _parse(self):
+        with patch("src.services.pdf_ingest._extract_text",
+                   return_value=_IND_R8_LIVE_TEXT):
+            return parse_race_pdf(b"fake-pdf-bytes")
+
+    def test_ok(self):
+        result = self._parse()
+        assert result["ok"] is True, f"ok=False: {result.get('error')}"
+
+    def test_is_1stbet_true(self):
+        result = self._parse()
+        assert result["is_1stbet"] is True
+
+    def test_canonical_runners_ten(self):
+        result = self._parse()
+        assert len(result["runners"]) == 10, (
+            f"Expected 10 canonical runners, got {len(result['runners'])}: "
+            f"{[r.get('horse_name') for r in result['runners']]}"
+        )
+
+    def test_primary_runners_ten(self):
+        result = self._parse()
+        assert len(result["runners_primary"]) == 10, (
+            f"Primary must find 10, got {len(result['runners_primary'])}"
+        )
+
+    def test_all_names_found(self):
+        result = self._parse()
+        names = {r["horse_name"] for r in result["runners"]}
+        assert names == _R8_ALL_NAMES, (
+            f"Missing: {_R8_ALL_NAMES - names}  Extra: {names - _R8_ALL_NAMES}"
+        )
+
+    def test_pp4_scratched(self):
+        result = self._parse()
+        by_pp = {r["post_position"]: r for r in result["runners"]}
+        assert by_pp[4]["is_scratched"] is True
+        assert by_pp[4]["horse_name"] == "What You Wished"
+
+    def test_pp9_scratched(self):
+        result = self._parse()
+        by_pp = {r["post_position"]: r for r in result["runners"]}
+        assert by_pp[9]["is_scratched"] is True
+        assert by_pp[9]["horse_name"] == "Once More"
+
+    def test_race_number(self):
+        result = self._parse()
+        assert result["race_number"] == 8, f"race_number: {result['race_number']!r}"
+
+    def test_field_size(self):
+        result = self._parse()
+        assert result["field_size"] == 10, f"field_size: {result['field_size']!r}"
