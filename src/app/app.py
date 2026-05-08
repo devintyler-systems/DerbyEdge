@@ -743,8 +743,10 @@ with st.sidebar:
     # ── Active Race selector ───────────────────────────────────────────────
     if "show_hidden_races" not in st.session_state:
         st.session_state["show_hidden_races"] = False
+    if "show_pending_only" not in st.session_state:
+        st.session_state["show_pending_only"] = False
 
-    # Load all races; filter in Python so the toggle decision is instantaneous.
+    # Load all races; filter in Python so toggle decisions are instantaneous.
     _race_index_all = load_race_index(include_hidden=True)
     _has_hidden      = any(r.get("is_hidden") for r in _race_index_all)
     _show_hidden     = st.session_state.get("show_hidden_races", False)
@@ -753,7 +755,16 @@ with st.sidebar:
         else [r for r in _race_index_all if not r.get("is_hidden")]
     )
 
-    if not _race_index:
+    # "Show pending only" narrows the selector to scored-but-not-resulted races.
+    _show_pending_only = st.session_state.get("show_pending_only", False)
+    _has_pending       = any(get_race_workflow_status(r) == "scored_no_result" for r in _race_index)
+    _race_index_view   = (
+        [r for r in _race_index if get_race_workflow_status(r) == "scored_no_result"]
+        if _show_pending_only and _has_pending
+        else _race_index
+    )
+
+    if not _race_index_view:
         st.warning("No race cards found. Run the ingest pipeline first.")
     else:
         def _rlabel(r: dict) -> str:
@@ -762,29 +773,41 @@ with st.sidebar:
                 label = f"[HIDDEN] {label}"
             return label
 
-        _cids = [r["card_id"] for r in _race_index]
+        _cids = [r["card_id"] for r in _race_index_view]
         # Default selectbox to whatever session state says; fall back to first race.
         _ss_cid = st.session_state["active_card_id"]
         _default_ri = _cids.index(_ss_cid) if _ss_cid in _cids else 0
 
-        if len(_race_index) > 1:
+        if len(_race_index_view) > 1:
             st.markdown("**Active Race**")
-            _rl = [_rlabel(r) for r in _race_index]
+            _rl = [_rlabel(r) for r in _race_index_view]
             _ri = st.selectbox(
-                "Active race", range(len(_race_index)),
+                "Active race", range(len(_race_index_view)),
                 index=_default_ri,
                 format_func=lambda i: _rl[i],
                 label_visibility="collapsed",
             )
-            st.session_state["active_card_id"] = _race_index[_ri]["card_id"]
-            _sel_race = _race_index[_ri]
+            st.session_state["active_card_id"] = _race_index_view[_ri]["card_id"]
+            _sel_race = _race_index_view[_ri]
             _sel_hint = format_race_hint(_sel_race)
             _sel_badge = format_status_badge(_sel_race)
             st.caption(
                 f"{_sel_badge}  \n{_sel_hint}" if _sel_hint else _sel_badge
             )
         else:
-            st.session_state["active_card_id"] = _race_index[0]["card_id"]
+            st.session_state["active_card_id"] = _race_index_view[0]["card_id"]
+
+        # Selector filters — pending-only first, hidden-races admin toggle second.
+        if _has_pending:
+            _new_pending = st.checkbox(
+                "Show pending only",
+                value=_show_pending_only,
+                key="show_pending_checkbox",
+                help="Narrows the selector to scored races that still need results ingested.",
+            )
+            if _new_pending != _show_pending_only:
+                st.session_state["show_pending_only"] = _new_pending
+                st.rerun()
 
         # Admin toggle — only visible when at least one race is soft-deleted.
         if _has_hidden:
@@ -3779,12 +3802,24 @@ with tab9:
 
     st.subheader("📈 Calibration & Outcomes")
 
-    # ── Pending Results queue ─────────────────────────────────────────────────
+    # ── Status KPIs ───────────────────────────────────────────────────────────
     _all_races_for_status = load_race_index(include_hidden=False)
-    _pending = [
-        r for r in _all_races_for_status
-        if get_race_workflow_status(r) == "scored_no_result"
-    ]
+    _count_pending    = sum(1 for r in _all_races_for_status if get_race_workflow_status(r) == "scored_no_result")
+    _count_calibrated = sum(1 for r in _all_races_for_status if get_race_workflow_status(r) == "calibrated")
+    _count_unscored   = sum(1 for r in _all_races_for_status if get_race_workflow_status(r) == "unscored")
+    _kpi1, _kpi2, _kpi3 = st.columns(3)
+    _kpi1.metric("⏳ Pending Results", _count_pending)
+    _kpi2.metric("✅ Calibrated",       _count_calibrated)
+    _kpi3.metric("⬜ Unscored",         _count_unscored)
+
+    st.divider()
+
+    # ── Pending Results queue ─────────────────────────────────────────────────
+    _pending = sorted(
+        [r for r in _all_races_for_status if get_race_workflow_status(r) == "scored_no_result"],
+        key=lambda r: r.get("latest_run_at") or "",
+        reverse=True,
+    )
 
     if _pending:
         st.markdown("#### ⏳ Pending Results")
