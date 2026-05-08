@@ -628,14 +628,15 @@ def _parse_race_runners_1stbet_multiline(lines: list[str], warnings: list[str]) 
     n = len(lines)
     candidates_found = 0
 
-    _re_digit   = re.compile(r'^\d{1,2}$')
-    _re_pp_lbl  = re.compile(r'^PP(\d{1,2})$', re.I)
-    _re_jockey  = re.compile(r'^J:\s+(.+?)(?:\s+ML\s+(\S+))?\s*$', re.I)
-    _re_trainer = re.compile(r'^T:\s+(.+?)\s*$', re.I)
-    _re_noise   = re.compile(r'1/ST\s+BET\s*[-–]|https?://', re.I)
-    _re_pgcnt   = re.compile(r'^\d+/\d+$')
-    # Lines that mark end-of-block content (no more J:/T: to find)
-    _re_stop    = re.compile(
+    _re_digit    = re.compile(r'^\d{1,2}$')
+    _re_pp_lbl   = re.compile(r'^PP(\d{1,2})$', re.I)
+    _re_jockey   = re.compile(r'^J:\s+(.+?)(?:\s+ML\s+(\S+))?\s*$', re.I)
+    _re_trainer  = re.compile(r'^T:\s+(.+?)\s*$', re.I)
+    _re_ml_line  = re.compile(r'^ML\s+(\S+)', re.I)   # standalone "ML <odds>" line
+    _re_noise    = re.compile(r'1/ST\s+BET\s*[-–]|https?://', re.I)
+    _re_pgcnt    = re.compile(r'^\d+/\d+$')
+    # Lines that mark end-of-block content (no more J:/T:/ML to find)
+    _re_stop     = re.compile(
         r'^(?:RECENT\b|More\s+Info\b|FINAL\b|REPLAY\b)',
         re.I,
     )
@@ -732,7 +733,9 @@ def _parse_race_runners_1stbet_multiline(lines: list[str], warnings: list[str]) 
 
         is_scr    = raw_odds is not None and raw_odds.upper() == "SCR"
         live_odds = raw_odds if not is_scr else None
-        horse_name = raw_name.title()
+        # Strip trailing separator dashes that pdfplumber may merge into the
+        # horse-name line when the "-" separator sits at the same y-position.
+        horse_name = raw_name.rstrip('-').strip().title()
 
         if horse_name in seen_names:
             i = j + 1
@@ -785,7 +788,17 @@ def _parse_race_runners_1stbet_multiline(lines: list[str], warnings: list[str]) 
             mt = _re_trainer.match(l)
             if mt:
                 trainer = mt.group(1).strip() or None
-                break  # trainer is the last field we need
+                # Do NOT break: some exports place "ML <odds>" on its own line
+                # after T:, separated by a lone dash. Continue scanning so the
+                # _re_ml_line check below can capture it.
+                continue
+
+            # Standalone "ML <odds>" line — appears after T: in some 1/ST BET
+            # exports when the ML is not inlined on the J: line.
+            mml = _re_ml_line.match(l)
+            if mml and ml_str is None:
+                ml_str, ml_dec = _parse_ml_1stbet(mml.group(1).strip())
+                continue
 
         # ML fallback: use live-odds token when J: line carried no ML
         if not ml_str and live_odds:

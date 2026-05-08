@@ -1282,3 +1282,115 @@ class TestLiveLayoutRace8Pipeline:
     def test_field_size(self):
         result = self._parse()
         assert result["field_size"] == 10, f"field_size: {result['field_size']!r}"
+
+
+# ===========================================================================
+# Trailing-dash stripping regression
+#
+# pdfplumber can merge a standalone "-" separator line into the preceding
+# horse-name line when the two sit at very close y-coordinates, producing
+# e.g. "SCRIPTED LOVE-" instead of "SCRIPTED LOVE".  The hyphen is legal
+# in the ALL-CAPS name regex ([A-Z0-9'\\s\\-\\.]+), so without stripping
+# the horse name comes out as "Scripted Love-".
+#
+# This fixture simulates that exact pdfplumber output (trailing "-" fused to
+# horse names, and a T:/−/ML layout where the dash also appears standalone).
+# After the fix, all horse_name values must be clean (no trailing hyphens).
+# ===========================================================================
+
+_TRAILING_DASH_TEXT = """\
+5/7/26, 5:02 PM 1/ST BET - The Easy & Smart Way to Bet the Races
+HORSESHOE INDIANAPOLIS R 8
+2:15 PM 3 Horses MCL $12,500 6F Dirt / Fast
+FINAL
+REPLAY
+SCRIPTED LOVE-
+1
+J: Luis Quinonez
+PP1
+T: Paul Mcentee
+-
+ML 10
+BEAUTIFUL ESTER-
+2
+J: Maria Harrington
+PP2
+T: Adam Kitchingman
+-
+ML 5/2
+PINK PICTURE-
+3
+J: Josue Perez
+PP3
+T: Patricia Farro
+-
+ML 3/1
+"""
+
+
+class TestTrailingDashStripping:
+    """Regression: pdfplumber-merged trailing dash must be stripped from horse names."""
+
+    def _run(self):
+        warnings: list[str] = []
+        runners = _parse_race_runners_1stbet_multiline(
+            _TRAILING_DASH_TEXT.splitlines(), warnings
+        )
+        return runners, warnings
+
+    def test_runner_count(self):
+        runners, _ = self._run()
+        assert len(runners) == 3, (
+            f"Expected 3, got {len(runners)}: {[r['horse_name'] for r in runners]}"
+        )
+
+    def test_no_trailing_dash_in_names(self):
+        """Core regression: horse names must not end with a hyphen."""
+        runners, _ = self._run()
+        for r in runners:
+            assert not r["horse_name"].endswith("-"), (
+                f"Trailing dash in horse_name: {r['horse_name']!r} (pp={r['post_position']})"
+            )
+
+    def test_pp1_horse_name(self):
+        runners, _ = self._run()
+        by_pp = {r["post_position"]: r for r in runners}
+        assert by_pp[1]["horse_name"] == "Scripted Love", (
+            f"Expected 'Scripted Love', got {by_pp[1]['horse_name']!r}"
+        )
+
+    def test_pp2_horse_name(self):
+        runners, _ = self._run()
+        by_pp = {r["post_position"]: r for r in runners}
+        assert by_pp[2]["horse_name"] == "Beautiful Ester", (
+            f"Expected 'Beautiful Ester', got {by_pp[2]['horse_name']!r}"
+        )
+
+    def test_pp3_horse_name(self):
+        runners, _ = self._run()
+        by_pp = {r["post_position"]: r for r in runners}
+        assert by_pp[3]["horse_name"] == "Pink Picture", (
+            f"Expected 'Pink Picture', got {by_pp[3]['horse_name']!r}"
+        )
+
+    def test_pp1_trainer(self):
+        """T:/−/ML layout: trainer must be extracted correctly."""
+        runners, _ = self._run()
+        by_pp = {r["post_position"]: r for r in runners}
+        assert by_pp[1]["trainer"] == "Paul Mcentee", (
+            f"Got: {by_pp[1]['trainer']!r}"
+        )
+
+    def test_ml_from_standalone_line(self):
+        """ML on its own line (after T: and −) must still be extracted."""
+        runners, _ = self._run()
+        by_pp = {r["post_position"]: r for r in runners}
+        assert by_pp[1]["morning_line"] == "10/1", (
+            f"PP1 ML: {by_pp[1]['morning_line']!r}"
+        )
+        assert by_pp[2]["morning_line"] == "5/2", (
+            f"PP2 ML: {by_pp[2]['morning_line']!r}"
+        )
+        assert by_pp[3]["morning_line"] == "3/1", (
+            f"PP3 ML: {by_pp[3]['morning_line']!r}"
+        )
