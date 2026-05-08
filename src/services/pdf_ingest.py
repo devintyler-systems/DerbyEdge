@@ -633,7 +633,7 @@ def _parse_race_runners_1stbet_multiline(lines: list[str], warnings: list[str]) 
     seen_names: set[str]   = set()
     candidates_found = 0
 
-    _re_digit    = re.compile(r'^\d{1,2}$')
+    _re_digit    = re.compile(r'^(\d{1,2})(?:\s|$)')  # also accepts "7 ML 20"
     _re_pp_lbl   = re.compile(r'^PP(\d{1,2})$', re.I)
     _re_jockey   = re.compile(r'^J:\s+(.+?)(?:\s+ML\s+(\S+))?\s*$', re.I)
     _re_trainer  = re.compile(r'^T:\s+(.+?)\s*$', re.I)
@@ -759,18 +759,21 @@ def _parse_race_runners_1stbet_multiline(lines: list[str], warnings: list[str]) 
         raw_name, raw_odds = cand
         _log.debug("1stbet multiline: candidate  %r  (odds=%r)", raw_name, raw_odds)
 
-        # ── Confirm: next non-empty line must be bare program number 1-30 ─
+        # ── Confirm: next non-empty line must start with a bare program number ─
         # Use _next_conf (skips stop/separator lines) so stats-carryover lines
         # at the top of a new page do not block cross-page horse blocks.
+        # pdfplumber sometimes merges ML onto the same line ("7 ML 20"), so
+        # _re_digit accepts ^(\d{1,2})(?:\s|$) and we peel off both fields.
         j, nxt = _next_conf(i)
-        if j >= n or not _re_digit.match(nxt):
+        m_prog = _re_digit.match(nxt) if j < n else None
+        if not m_prog:
             _log.debug(
                 "1stbet multiline: REJECTED %r — next=%r is not a bare integer",
                 raw_name, nxt,
             )
             continue
 
-        pp = int(nxt)
+        pp = int(m_prog.group(1))
         if not (1 <= pp <= 30):
             continue
 
@@ -788,13 +791,24 @@ def _parse_race_runners_1stbet_multiline(lines: list[str], warnings: list[str]) 
             i = j + 1
             continue
 
-        _log.debug("1stbet multiline: ACCEPTED  pp=%d  horse=%r", pp, horse_name)
+        # Extract ML if pdfplumber merged it onto the program-number line ("7 ML 20")
+        _ml_from_prog: str | None = None
+        _prog_tail = nxt[m_prog.end():].strip()
+        if _prog_tail:
+            _mm = re.match(r'^ML\s+(\S+)', _prog_tail, re.I)
+            if _mm:
+                _ml_from_prog = _mm.group(1).strip()
+
+        _log.debug("1stbet multiline: ACCEPTED  pp=%d  horse=%r  ml_prog=%r",
+                   pp, horse_name, _ml_from_prog)
 
         seen_pp.add(pp)
         seen_names.add(horse_name)
-        i = j + 1  # advance past the bare integer line
+        i = j + 1  # advance past the program-number line
 
         jockey = trainer = ml_str = ml_dec = None
+        if _ml_from_prog is not None:
+            ml_str, ml_dec = _parse_ml_1stbet(_ml_from_prog)
 
         # ── Scan block body for J: (with ML), PP{N} (skip), T: ───────────
         limit = min(i + 12, n)

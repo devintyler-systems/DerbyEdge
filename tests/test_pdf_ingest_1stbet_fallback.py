@@ -1405,14 +1405,14 @@ class TestTrailingDashStripping:
 # footer line instead of "7" and rejected the candidate; PP7 was then skipped
 # because it had no matching horse-header above it.
 #
-# This fixture simulates the exact cross-page gap:
-#   ZOOM ERIN 23          ← horse-header, bottom of page 3
-#   [page footer lines]   ← brand, URL, page counter
-#   RECENT 5 WINS...      ← stats carryover (top of page 4)
-#   7                     ← bare program number
-#   PP7
-#   J: Elio J. Barrera ML 20
+# This fixture matches the real pdfplumber extraction layout:
+#   ZOOM ERIN 23              ← horse-header, bottom of page 3
+#   https://...1stbet.com 3/5 ← footer: URL + page counter on one line
+#   5/7/26, 5:48 PM           ← footer: bare timestamp (no brand text)
+#   7 ML 20                   ← program number MERGED with ML on same line
+#   J: Elio J. Barrera        ← jockey (no ML suffix; ML was on prog line)
 #   T: Jervon Broussard
+#   PP7                       ← PP label comes after J:/T: in this layout
 # ===========================================================================
 
 _CROSS_PAGE_TEXT = """\
@@ -1458,15 +1458,13 @@ PP6
 T: Brad Cox
 RECENT 5 More Info
 ZOOM ERIN 23
-5/7/26, 6:14 PM 1/ST BET - The Easy & Smart Way to Bet the Races
-https://legacy.1stbet.com
-3/5
-RECENT 5 WINS 0 TOP 3 1 More Info
-7
-PP7
-J: Elio J. Barrera ML 20
+https://legacy.1stbet.com 3/5
+5/7/26, 5:48 PM
+7 ML 20
+J: Elio J. Barrera
 T: Jervon Broussard
-RECENT 5 More Info
+PP7
+RECENT 5 WINS 0 TOP 3 1 More Info
 LIGHTNING ROD 10
 8
 J: Flavien Prat ML 10
