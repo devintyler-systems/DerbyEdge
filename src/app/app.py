@@ -71,6 +71,12 @@ from src.services.firstbet_enrich import (
     enrich_runners_1stbet,
     enrich_entries_from_1stbet,
 )
+from src.services.race_display import (
+    format_race_label,
+    format_race_hint,
+    format_status_badge,
+    get_race_workflow_status,
+)
 
 # ── Page config ────────────────────────────────────────────────────────────────
 st.set_page_config(
@@ -212,34 +218,46 @@ def load_features(card_id: int) -> pd.DataFrame:
 
 @st.cache_data(ttl=60)
 def load_race_index(include_hidden: bool = False) -> list[dict]:
-    """Race cards for the Active Race selector.
+    """Race cards for the Active Race selector and workflow-status queries.
 
     include_hidden=True returns all races (visible + soft-deleted).
-    Always includes an is_hidden key in each dict (0 when the column is absent).
+    Always populates: is_hidden, has_score_run, has_results, latest_run_at.
     """
-    _cols = (
+    _base_cols = (
         "rc.card_id, rc.card_date, rc.race_number, rc.stakes_name, rc.race_class, "
         "rc.distance_furlongs, rc.surface, rc.field_size, "
-        "t.abbrev AS track_abbrev, t.name AS track_name, t.city, t.state"
+        "t.abbrev AS track_abbrev, t.name AS track_name, t.city, t.state, "
+        "CASE WHEN sr.card_id IS NOT NULL THEN 1 ELSE 0 END AS has_score_run, "
+        "sr.latest_run AS latest_run_at, "
+        "CASE WHEN rr.card_id IS NOT NULL THEN 1 ELSE 0 END AS has_results"
+    )
+    _join = (
+        "FROM race_cards rc "
+        "JOIN tracks t ON rc.track_id = t.track_id "
+        "LEFT JOIN (SELECT card_id, MAX(run_timestamp) AS latest_run "
+        "           FROM score_runs GROUP BY card_id) sr ON sr.card_id = rc.card_id "
+        "LEFT JOIN (SELECT DISTINCT card_id FROM race_results) rr ON rr.card_id = rc.card_id"
     )
     _order = "ORDER BY rc.card_date DESC, rc.race_number ASC"
-    _join  = "FROM race_cards rc JOIN tracks t ON rc.track_id = t.track_id"
     try:
         conn = get_connection()
         try:
             _where = "" if include_hidden else "WHERE rc.is_hidden = 0"
             rows = conn.execute(
-                f"SELECT {_cols}, rc.is_hidden {_join} {_where} {_order}"
+                f"SELECT {_base_cols}, rc.is_hidden {_join} {_where} {_order}"
             ).fetchall()
         except Exception:
             # is_hidden column not yet migrated — return all races without it
             rows = conn.execute(
-                f"SELECT {_cols} {_join} {_order}"
+                f"SELECT {_base_cols} {_join} {_order}"
             ).fetchall()
         conn.close()
         result = [dict(r) for r in rows]
         for row in result:
             row.setdefault("is_hidden", 0)
+            row.setdefault("has_score_run", 0)
+            row.setdefault("has_results", 0)
+            row.setdefault("latest_run_at", None)
         return result
     except Exception:
         return []
@@ -739,8 +757,7 @@ with st.sidebar:
         st.warning("No race cards found. Run the ingest pipeline first.")
     else:
         def _rlabel(r: dict) -> str:
-            name  = r.get("stakes_name") or f"Race {r.get('race_number', 1)}"
-            label = f"{r['track_abbrev']} · {r['card_date']} · {name}"
+            label = format_race_label(r)
             if r.get("is_hidden"):
                 label = f"[HIDDEN] {label}"
             return label
@@ -760,6 +777,12 @@ with st.sidebar:
                 label_visibility="collapsed",
             )
             st.session_state["active_card_id"] = _race_index[_ri]["card_id"]
+            _sel_race = _race_index[_ri]
+            _sel_hint = format_race_hint(_sel_race)
+            _sel_badge = format_status_badge(_sel_race)
+            st.caption(
+                f"{_sel_badge}  \n{_sel_hint}" if _sel_hint else _sel_badge
+            )
         else:
             st.session_state["active_card_id"] = _race_index[0]["card_id"]
 
@@ -783,9 +806,11 @@ with st.sidebar:
         # Race info display
         if race_info:
             st.markdown("**Race**")
-            _race_name = race_info.get("stakes_name") or f"Race {race_info.get('race_number', 1)}"
-            _race_cls  = race_info.get("race_class")
-            _cls_sfx   = f" ({_race_cls})" if _race_cls else ""
+            _rnum     = race_info.get("race_number") or "?"
+            _sname    = race_info.get("stakes_name") or ""
+            _race_cls = race_info.get("race_class") or ""
+            _race_name = f"Race {_rnum}" + (f" — {_sname}" if _sname else "")
+            _cls_sfx   = f" ({_race_cls})" if _race_cls and not _sname else ""
             st.markdown(f"**{_race_name}**{_cls_sfx}")
             _tname = race_info.get("track_name") or race_info.get("track_abbrev") or "Unknown"
             _city, _state = race_info.get("city"), race_info.get("state")
@@ -967,14 +992,7 @@ if board_df is not None and _live_odds_by_pp:
 
 # ── Header ─────────────────────────────────────────────────────────────────────
 if race_info:
-    _race_name_hdr = (
-        race_info.get("stakes_name") or f"Race {race_info.get('race_number', 1)}"
-    )
-    _hdr_label = (
-        f"{race_info.get('track_abbrev') or 'Unknown'} · "
-        f"{race_info.get('card_date') or 'Unknown'} · "
-        f"{_race_name_hdr}"
-    )
+    _hdr_label = format_race_label(race_info)
 else:
     _hdr_label = "DerbyEdge Operator Console"
 st.markdown(f'<p class="console-title">⚙ {_hdr_label}</p>', unsafe_allow_html=True)
@@ -3571,11 +3589,7 @@ with tab8:
         if not _adm:
             st.error(f"Race card_id={active_card_id} not found.")
         else:
-            _adm_label = (
-                f"{_adm['track_abbrev']} · {_adm['card_date']} · "
-                f"Race {_adm['race_number']}"
-            )
-            st.subheader(f"⚙ Race Admin — {_adm_label}")
+            st.subheader(f"⚙ Race Admin — {format_race_label(_adm)}")
 
             # ── Section 1: Edit Metadata ───────────────────────────────────
             st.markdown("### 1 · Edit Race Metadata")
@@ -3764,8 +3778,54 @@ with tab9:
         return _rows
 
     st.subheader("📈 Calibration & Outcomes")
+
+    # ── Pending Results queue ─────────────────────────────────────────────────
+    _all_races_for_status = load_race_index(include_hidden=False)
+    _pending = [
+        r for r in _all_races_for_status
+        if get_race_workflow_status(r) == "scored_no_result"
+    ]
+
+    if _pending:
+        st.markdown("#### ⏳ Pending Results")
+        st.caption(
+            f"{len(_pending)} scored race(s) awaiting results ingestion. "
+            "Go to the 🏁 Results Import tab to upload results for any of these."
+        )
+        _pend_rows = []
+        for _pr in _pending:
+            _run_ts = (_pr.get("latest_run_at") or "")
+            _run_display = _run_ts[:16].replace("T", " ") if _run_ts else "—"
+            _pend_rows.append({
+                "Race":   format_race_label(_pr),
+                "Detail": format_race_hint(_pr),
+                "Scored": _run_display,
+            })
+        _pend_df = _pd.DataFrame(_pend_rows)
+        st.dataframe(_pend_df, use_container_width=True, hide_index=True,
+                     height=min(40 + 35 * len(_pend_rows), 300))
+
+        _pjump_labels = [format_race_label(r) for r in _pending]
+        _pj1, _pj2 = st.columns([4, 1])
+        with _pj1:
+            _pjump_sel = st.selectbox(
+                "Jump to pending race",
+                range(len(_pending)),
+                format_func=lambda i: _pjump_labels[i],
+                key="cal_pending_jump",
+                label_visibility="collapsed",
+            )
+        with _pj2:
+            if st.button("↗ Select", key="cal_pending_go", use_container_width=True):
+                st.session_state["active_card_id"] = _pending[_pjump_sel]["card_id"]
+                st.rerun()
+
+        st.divider()
+
+    # ── Calibrated races ──────────────────────────────────────────────────────
+    st.markdown("#### ✅ Calibrated Races")
     st.caption(
-        "One row per scored race with results ingested. "
+        "Scored races with results ingested. "
         "Compares model top pick and market favorites against actual outcome."
     )
 
@@ -3854,12 +3914,14 @@ with tab9:
             _w_odds = _r.get("winner_official_odds")
             _w_odds_str = f"{_w_odds:.2f}" if _w_odds else "—"
             _display_rows.append({
-                "Date":       _r.get("race_date") or "",
-                "Track":      _r.get("track_code") or "",
-                "Race":       _r.get("race_number") or "",
+                "Race":       format_race_label({
+                                  "track_abbrev": _r.get("track_code"),
+                                  "race_number":  _r.get("race_number"),
+                                  "card_date":    _r.get("race_date"),
+                                  "race_class":   _r.get("race_type"),
+                              }),
                 "Dist":       _dist_str,
                 "Srf":        _r.get("surface_code") or "?",
-                "Type":       (_r.get("race_type") or "")[:14],
                 "Field":      _r.get("field_size") or "",
                 "Tier":       _r.get("quality_tier") or "",
                 "Top Pick":   _r.get("top_pick_name") or "—",
