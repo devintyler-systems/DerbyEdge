@@ -7,18 +7,20 @@ parse_results_pdf — post-race: Equibase official chart PDFs
 Supported formats
 -----------------
 * 1/ST BET race-detail page (web-print PDF)
-    Detection: text[:300] contains "1/ST BET"
+    Detection: text[:1000] contains "1/ST BET" or ≥3 compact "NNPPnn" tokens
     Header layout:
         Line 0:  "M/D/YY, H:MM PM 1/ST BET - The Easy & Smart Way to Bet the Races"
         Line 1:  "TRACK NAME R N"
         Line 2:  "H:MM PM N Horses CLS $P,PPP DIS Surface / Condition"
-    Runner blocks (one per horse, in order):
-        "HORSE NAME LIVE_ODDS"  or  "HORSE NAME SCR"   ← ALL CAPS
-        "N"                                              ← program number alone
-        "J: Jockey Name ML ML_ODDS"
-        "PP N"                                           ← optional
+    Runner blocks — line-preserving (primary parser):
+        "HORSE NAME LIVE_ODDS"  or  "HORSE NAME SCR"   ← ALL CAPS + trailing token
+        "N"                                              ← bare program number
+        "J: Jockey Name ML ML_ODDS"                     ← ML may appear on same line
+        "PP N"                                           ← optional label; skip
         "T: Trainer Name"
-        [stats / past-performance lines to ignore]
+        [RECENT / stats / past-performance lines — ignored]
+    Runner tokens — compact stream (fallback parser):
+        "1PP1HORSE J Jockey T Trainer - ML 8"           ← pdfplumber single-line export
 
 * Generic (Equibase, DRF, other text-based PDFs)
 
@@ -418,146 +420,6 @@ def _extract_1stbet_header(text: str) -> dict[str, Any]:
     return result
 
 
-# ── 1/ST BET runner parser ────────────────────────────────────────────────────
-
-def _parse_race_runners_1stbet(lines: list[str], warnings: list[str]) -> list[dict]:
-    """Parse 1/ST BET race-detail runner blocks.
-
-    Each horse occupies a multi-line block:
-        [ALL-CAPS HORSE NAME] [live_odds | SCR]   ← confirmed by next line being a bare integer
-        [N]                                        ← program / post number
-        J: [Jockey Name] ML [ml_odds]
-        PP[N]                                      ← optional label, skipped
-        T: [Trainer Name]
-        [W x% P y% S z% ...]                       ← stats, skipped
-        [RECENT 5 ...]                              ← skipped
-        [past-performance lines ...]               ← skipped until next horse
-
-    Detection heuristic: a line is a *candidate* horse-name line only when
-    (a) it is entirely upper-case letters / spaces / apostrophes / dashes,
-    (b) it ends with a fractional/integer odds token or "SCR", AND
-    (c) the immediately-following non-empty line is a bare 1-2 digit integer.
-
-    Condition (c) eliminates false positives such as "PENN NATIONAL R 6"
-    (where the next line is the race-info string, not a bare integer).
-    """
-    runners: list[dict] = []
-    seen: set[str] = set()
-    n = len(lines)
-
-    re_pp_label = re.compile(r'^PP\d{1,2}$', re.I)
-    re_digit    = re.compile(r'^\d{1,2}$')
-    re_jockey   = re.compile(r'^J:\s+(.+?)(?:\s+ML\s+(\S+))?\s*$', re.I)
-    re_trainer  = re.compile(r'^T:\s+(.+?)\s*$', re.I)
-
-    def _candidate_horse(line: str) -> tuple[str, str] | None:
-        """Split 'HORSE NAME ODDS' into (name_part, odds_str), or None."""
-        # rsplit on last whitespace to isolate the trailing token
-        parts = line.rsplit(None, 1)
-        if len(parts) != 2:
-            return None
-        name_part, trailing = parts
-        trailing = trailing.strip()
-        # Trailing must be fractional odds, integer odds, or "SCR"
-        if trailing.upper() == "SCR":
-            pass
-        elif not re.match(r'^\d+[-/]\d+$', trailing) and not re.match(r'^\d+(?:\.\d+)?$', trailing):
-            return None
-        # Name part must be ALL CAPS (letters, spaces, apostrophes, hyphens, dots)
-        if not re.match(r'^[A-Z][A-Z0-9\'\s\-\.]+$', name_part):
-            return None
-        return name_part.strip(), trailing
-
-    i = 0
-    while i < n:
-        line = lines[i].strip()
-        i += 1
-
-        if not line:
-            continue
-
-        cand = _candidate_horse(line)
-        if not cand:
-            continue
-
-        # Peek at the next non-empty line — must be a bare program number
-        j = i
-        while j < n and not lines[j].strip():
-            j += 1
-        if j >= n or not re_digit.match(lines[j].strip()):
-            continue  # not a horse block (e.g. "PENN NATIONAL R 6")
-
-        # --- confirmed horse block ---
-        raw_name, raw_odds = cand
-        is_scr    = raw_odds.upper() == "SCR"
-        live_odds = raw_odds if not is_scr else None
-
-        name = raw_name.title()
-        if name in seen:
-            i = j + 1
-            continue
-
-        pp = int(lines[j].strip())
-        i  = j + 1
-
-        jockey  = None
-        ml_str  = None
-        trainer = None
-
-        # Scan up to 12 lines ahead for J: and T:
-        limit = min(i + 12, n)
-        while i < limit:
-            l = lines[i].strip()
-            i += 1
-
-            if not l:
-                continue
-
-            if re_pp_label.match(l):
-                continue
-
-            mj = re_jockey.match(l)
-            if mj:
-                jockey = mj.group(1).strip()
-                if mj.group(2):
-                    ml_str = mj.group(2).strip()
-                continue
-
-            mt = re_trainer.match(l)
-            if mt:
-                trainer = mt.group(1).strip()
-                break  # trainer is the last field we care about
-
-            # If we've stumbled onto the next horse block, back up and stop
-            nc = _candidate_horse(l)
-            if nc:
-                k = i
-                while k < n and not lines[k].strip():
-                    k += 1
-                if k < n and re_digit.match(lines[k].strip()):
-                    i -= 1  # push this line back so the outer loop sees it
-                    break
-
-            # Skip stats / RECENT / past-perf lines silently
-
-        # Use ML from the J: line; fall back to the displayed live odds
-        morning_line_raw = ml_str or live_odds
-        if morning_line_raw:
-            morning_line_str, morning_line_dec = _parse_ml_1stbet(morning_line_raw)
-        else:
-            morning_line_str = morning_line_dec = None
-
-        seen.add(name)
-        runners.append(
-            _runner_dict(pp, name, jockey, trainer, morning_line_str, morning_line_dec, is_scr)
-        )
-
-    if not runners:
-        warnings.append(
-            "1/ST BET runner parse found no horse blocks — "
-            "confirm this is a 1/ST BET race-detail page (not a card summary)."
-        )
-    return runners
 
 
 def _parse_race_runners_1stbet_fallback(text: str, warnings: list[str]) -> list[dict]:
@@ -740,31 +602,68 @@ def _parse_race_runners_1stbet_fallback(text: str, warnings: list[str]) -> list[
 def _parse_race_runners_1stbet_multiline(lines: list[str], warnings: list[str]) -> list[dict]:
     """Parse 1/ST BET line-preserving multi-line runner blocks.
 
-    Verified block structure (pdfplumber output for Horseshoe Indianapolis):
-        N           ← bare integer 1-30 (entry / program number)
-        PP{N}       ← post-position label
-        HORSE NAME  ← all-caps; NO trailing odds token required
-        J: Jockey
-        T: Trainer
-        -           ← lone dash separator (skip)
-        ML {odds}   ← morning-line odds on its own line
+    Production block structure (confirmed from live pdfplumber output):
 
-    Runner-block start: bare-integer line whose next non-empty sibling is PP{N}.
-    Also handles a bare PP{N} label as the block start (entry number absent).
-    Scans up to 20 lines per block for J:, T:, ML before advancing.
+        HORSE NAME LIVE_ODDS          ← ALL-CAPS name + trailing odds/SCR token
+        N                             ← bare program number 1-30
+        J: Jockey Name ML ml_odds     ← jockey; ML appears on same J: line
+        PP{N}                         ← optional post-position label; ignored
+        T: Trainer Name
+        [RECENT / stats / past-perf]  ← skipped until next horse header
+
+    Runner-block start is anchored on the horse-header line (ALL-CAPS + odds),
+    NOT on the bare integer.  The immediately-following non-empty line must be
+    a bare 1-30 integer to confirm the candidate — this eliminates track/race
+    header false positives ("HORSESHOE INDIANAPOLIS R 5" fails because its next
+    non-empty sibling is the race-info line, not a bare integer).
+
+    Candidate parsers run in parallel via _pick_best_1stbet_parse:
+      - this function (horse-header anchor) → primary for line-preserving exports
+      - _parse_race_runners_1stbet_fallback (PP anchor) → primary for compact exports
     """
-    runners:  list[dict] = []
-    seen_pp:  set[int]   = set()
+    runners:    list[dict] = []
+    seen_pp:    set[int]   = set()
+    seen_names: set[str]   = set()
     n = len(lines)
+    candidates_found = 0
 
     _re_digit   = re.compile(r'^\d{1,2}$')
-    _re_pp      = re.compile(r'^PP(\d{1,2})$', re.I)
-    _re_horse   = re.compile(r'^[A-Z][A-Z0-9\'\s\-\.]+$')
-    _re_jockey  = re.compile(r'^J:\s*(.+)', re.I)
-    _re_trainer = re.compile(r'^T:\s*(.+)', re.I)
-    _re_ml      = re.compile(r'\bML\s+(\S+)', re.I)
+    _re_pp_lbl  = re.compile(r'^PP(\d{1,2})$', re.I)
+    _re_jockey  = re.compile(r'^J:\s+(.+?)(?:\s+ML\s+(\S+))?\s*$', re.I)
+    _re_trainer = re.compile(r'^T:\s+(.+?)\s*$', re.I)
     _re_noise   = re.compile(r'1/ST\s+BET\s*[-–]|https?://', re.I)
     _re_pgcnt   = re.compile(r'^\d+/\d+$')
+    # Lines that mark end-of-block content (no more J:/T: to find)
+    _re_stop    = re.compile(
+        r'^(?:RECENT\b|More\s+Info\b|FINAL\b|REPLAY\b)',
+        re.I,
+    )
+
+    def _candidate_horse(line: str) -> tuple[str, str] | None:
+        """Return (name_part, odds_str) if line is an ALL-CAPS horse header.
+
+        Trailing token patterns (raw strings):
+            fractional: r'^\\d+[-/]\\d+$'   e.g. "5/2", "7-2"
+            integer:    r'^\\d+(?:\\.\\d+)?$' e.g. "9", "8"
+            scratched:  "SCR"
+
+        Name part pattern: r'^[A-Z][A-Z0-9\\'\\s\\-\\.]+$'
+            Requires first char uppercase letter; all subsequent chars uppercase
+            letters, digits, spaces, apostrophes, hyphens, or dots.
+            Single-word lines without a trailing token (rsplit → 1 part) return None.
+        """
+        parts = line.rsplit(None, 1)
+        if len(parts) != 2:
+            return None
+        name_part, trailing = parts[0], parts[1].strip()
+        if trailing.upper() == "SCR":
+            pass
+        elif (not re.match(r'^\d+[-/]\d+$', trailing)
+              and not re.match(r'^\d+(?:\.\d+)?$', trailing)):
+            return None
+        if not re.match(r'^[A-Z][A-Z0-9\'\s\-\.]+$', name_part):
+            return None
+        return name_part.strip(), trailing
 
     def _next_nonempty(start: int) -> tuple[int, str]:
         j = start
@@ -780,44 +679,50 @@ def _parse_race_runners_1stbet_multiline(lines: list[str], warnings: list[str]) 
         if not raw or _re_noise.search(raw) or _re_pgcnt.match(raw):
             continue
 
-        # ── Detect runner-block start ─────────────────────────────────────
-        pp_num: int | None = None
-
-        m_direct = _re_pp.match(raw)
-        if m_direct:
-            pp_num = int(m_direct.group(1))
-        elif _re_digit.match(raw):
-            j, nxt = _next_nonempty(i)
-            m_pp2 = _re_pp.match(nxt)
-            if m_pp2:
-                pp_num = int(m_pp2.group(1))
-                i = j + 1  # advance past PP label
-
-        if pp_num is None or pp_num in seen_pp:
+        # ── Detect horse-header candidate ─────────────────────────────────
+        cand = _candidate_horse(raw)
+        if not cand:
             continue
 
-        # ── Horse name (next non-empty line after PP label) ───────────────
-        j, horse_line = _next_nonempty(i)
-        if j >= n:
-            break
-        i = j + 1
+        candidates_found += 1
+        raw_name, raw_odds = cand
+        _log.debug("1stbet multiline: candidate  %r  (odds=%r)", raw_name, raw_odds)
 
-        if (not _re_horse.match(horse_line)
-                or horse_line.upper().startswith('ML ')
-                or len(horse_line) < 2):
-            continue  # not a valid horse-name line
+        # ── Confirm: next non-empty line must be bare program number 1-30 ─
+        j, nxt = _next_nonempty(i)
+        if j >= n or not _re_digit.match(nxt):
+            _log.debug(
+                "1stbet multiline: REJECTED %r — next=%r is not a bare integer",
+                raw_name, nxt,
+            )
+            continue
 
-        is_scr = bool(re.search(r'\bSCR\b', horse_line))
-        if is_scr:
-            horse_line = re.sub(r'\s*\bSCR\b\s*', ' ', horse_line).strip()
+        pp = int(nxt)
+        if not (1 <= pp <= 30):
+            continue
 
-        horse_name = horse_line.title()
-        seen_pp.add(pp_num)
+        if pp in seen_pp:
+            i = j + 1
+            continue
+
+        is_scr    = raw_odds.upper() == "SCR"
+        live_odds = raw_odds if not is_scr else None
+        horse_name = raw_name.title()
+
+        if horse_name in seen_names:
+            i = j + 1
+            continue
+
+        _log.debug("1stbet multiline: ACCEPTED  pp=%d  horse=%r", pp, horse_name)
+
+        seen_pp.add(pp)
+        seen_names.add(horse_name)
+        i = j + 1  # advance past the bare integer line
 
         jockey = trainer = ml_str = ml_dec = None
 
-        # ── Scan block body for J:, T:, ML ───────────────────────────────
-        limit = min(i + 20, n)
+        # ── Scan block body for J: (with ML), PP{N} (skip), T: ───────────
+        limit = min(i + 12, n)
         while i < limit:
             l = lines[i].strip()
             i += 1
@@ -825,45 +730,58 @@ def _parse_race_runners_1stbet_multiline(lines: list[str], warnings: list[str]) 
             if not l or _re_noise.search(l) or _re_pgcnt.match(l):
                 continue
 
-            if l in ('-', '–', '—'):  # lone visual separator
+            if l in ('-', '–', '—'):
                 continue
 
-            # Next runner block starts with a bare integer followed by PP{N}
-            if _re_digit.match(l):
-                k, nxt2 = _next_nonempty(i)
-                if k < n and _re_pp.match(nxt2):
-                    i -= 1  # push back so outer loop picks up this integer
-                    break
-                continue  # standalone number inside stats — skip
-
-            # Bare PP{N} (entry number missing in this block)
-            if _re_pp.match(l):
+            # RECENT / More Info / page chrome — end of useful block content
+            if _re_stop.match(l):
                 i -= 1
                 break
+
+            # Detect next horse block — push back and stop
+            nc = _candidate_horse(l)
+            if nc:
+                k, nxt2 = _next_nonempty(i)
+                if k < n and _re_digit.match(nxt2):
+                    i -= 1
+                    break
+
+            # PP{N} label — skip (pp already captured from bare integer)
+            if _re_pp_lbl.match(l):
+                continue
 
             mj = _re_jockey.match(l)
             if mj:
                 jockey = mj.group(1).strip() or None
+                if mj.group(2):
+                    ml_str, ml_dec = _parse_ml_1stbet(mj.group(2).strip())
                 continue
 
             mt = _re_trainer.match(l)
             if mt:
                 trainer = mt.group(1).strip() or None
-                continue
+                break  # trainer is the last field we need
 
-            mml = _re_ml.search(l)
-            if mml:
-                raw_ml = mml.group(1).strip()
-                ml_str, ml_dec = _parse_ml_1stbet(raw_ml)
-                continue
+        # ML fallback: use live-odds token when J: line carried no ML
+        if not ml_str and live_odds:
+            ml_str, ml_dec = _parse_ml_1stbet(live_odds)
+
+        _log.debug(
+            "1stbet multiline: parsed  pp=%d  horse=%r  jockey=%r  trainer=%r  ml=%r",
+            pp, horse_name, jockey, trainer, ml_str,
+        )
 
         runners.append(
-            _runner_dict(pp_num, horse_name, jockey, trainer, ml_str, ml_dec, is_scr)
+            _runner_dict(pp, horse_name, jockey, trainer, ml_str, ml_dec, is_scr)
         )
+
+    _log.debug(
+        "1stbet multiline: %d candidates evaluated → %d runners accepted",
+        candidates_found, len(runners),
+    )
 
     if runners:
         runners.sort(key=lambda r: r['post_position'])
-    _log.debug("1stbet multiline: %d runners", len(runners))
     return runners
 
 

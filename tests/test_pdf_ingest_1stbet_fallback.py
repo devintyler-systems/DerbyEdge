@@ -1,7 +1,7 @@
 """
 Regression tests: 1/ST BET detection and runner parsing.
 
-Three layout fixtures cover real-world 1/ST BET export layouts:
+Four layout fixtures cover real-world 1/ST BET export layouts:
 
   Layout A — spaced (odds inline, no dash):
       "1 PP1 HORSE J: Jockey T: Trainer ML 9/2 {pp_recap}"
@@ -11,6 +11,14 @@ Three layout fixtures cover real-world 1/ST BET export layouts:
 
   Layout C — compact pdfplumber output (no spaces, no colons):
       "1PP1HORSEJ Jockey T Trainer-ML 8"
+
+  Layout LIVE — line-preserving real production pdfplumber output:
+      "HORSE NAME LIVE_ODDS"  (ALL CAPS + trailing odds)
+      "N"                     (bare program number)
+      "J: Jockey Name ML ml_odds"
+      "PP{N}"
+      "T: Trainer Name"
+      "RECENT 5 WINS ..."
 
 Top-level tests exercise parse_race_pdf() end-to-end with _extract_text mocked.
 """
@@ -512,74 +520,77 @@ class TestTopLevelParseRacePdf:
 
 
 # ===========================================================================
-# Multiline block layout — exact Horseshoe Indianapolis R5 pdfplumber shape
-# Each runner is a vertical block: N / PP{N} / HORSE / J: / T: / - / ML odds
+# Layout LIVE — real production pdfplumber output (Horseshoe Indianapolis R5)
+#
+# Block order (confirmed from live PDF):
+#   HORSE NAME LIVE_ODDS  ← ALL CAPS + trailing odds token (live board odds)
+#   N                     ← bare program number
+#   J: Jockey Name ML ml  ← ML on same J: line
+#   PP{N}                 ← optional label; skip
+#   T: Trainer Name
+#   RECENT 5 WINS ...     ← stats noise; ignored
+#
+# Live odds ≠ ML for PP1 and PP2 — verifies parser uses J:-line ML, not header odds.
 # ===========================================================================
 
-_IND_R5_MULTILINE_TEXT = """\
-5/7/26, 1:21 PM 1/ST BET - The Easy & Smart Way to Bet the Races
-https://legacy.1stbet.com 1/4
+_IND_R5_LIVE_TEXT = """\
+5/7/26, 4:38 PM 1/ST BET - The Easy & Smart Way to Bet the Races
 HORSESHOE INDIANAPOLIS R 5
-1:21 PM 7 Horses ALW $38,000 1M Dirt / Fast
+1:14 PM 7 Horses ALW $38,000 1M Dirt / Fast
+FINAL
+REPLAY
+YOTOWIN 9
 1
+J: Evin A. Roman ML 8
 PP1
-YOTOWIN
-J: Evin A. Roman
 T: Rogelio Labra
--
-ML 8
+RECENT 5 WINS 1 TOP 3 3 More Info
+INNISFREE LASS 8
 2
+J: Alberto Burgos ML 9/2
 PP2
-INNISFREE LASS
-J: Alberto Burgos
 T: John Haran
--
-ML 9/2
+RECENT 5 WINS 0 TOP 3 1 More Info
+TAP BONNET 5/2
 3
+J: Jake Saez ML 5/2
 PP3
-TAP BONNET
-J: Marcelino Pedroza, Jr.
-T: Anthony J. Granitz
--
-ML 5
+T: Eduardo Caramori
+RECENT 5 More Info
+AMAZINGNESS 6
 4
+J: Chris Landeros ML 6
 PP4
-AMAZINGNESS
-J: Joseph D. Ramos
-T: Anthony J. Granitz
--
-ML 6
+T: Ron Alfano
+RECENT 5 More Info
+WHAT ABOUT NOW 4
 5
+J: Silvio Amador ML 4
 PP5
-WHAT ABOUT NOW
-J: Mitchell Murrill
-T: Tim Eggleston
--
-ML 4
+T: Elaine Labadie
+RECENT 5 More Info
+KABOOM 10
 6
+J: Alex Becerra ML 10
 PP6
-KABOOM
-J: Irving Moncada
-T: Michael E. Lauer
--
-ML 10
+T: Kathy Ritvo
+RECENT 5 More Info
+I MADE IT 7/2
 7
+J: Xavier Perez ML 7/2
 PP7
-I MADE IT
-J: Jose Ramos Gutierrez
-T: Stephen V. Fosdick
--
-ML 7/2
+T: Wayne Catalano
+RECENT 5 More Info
 """
 
 
 class TestLayoutMultiline:
-    """Tests _parse_race_runners_1stbet_multiline() directly."""
+    """Tests _parse_race_runners_1stbet_multiline() against the real production layout."""
 
     def _run(self):
         warnings: list[str] = []
         runners = _parse_race_runners_1stbet_multiline(
-            _IND_R5_MULTILINE_TEXT.splitlines(), warnings
+            _IND_R5_LIVE_TEXT.splitlines(), warnings
         )
         return runners, warnings
 
@@ -615,7 +626,7 @@ class TestLayoutMultiline:
     def test_pp7_jockey(self):
         runners, _ = self._run()
         by_pp = {r["post_position"]: r for r in runners}
-        assert by_pp[7]["jockey"] == "Jose Ramos Gutierrez"
+        assert by_pp[7]["jockey"] == "Xavier Perez"
 
     def test_pp1_trainer(self):
         runners, _ = self._run()
@@ -625,22 +636,37 @@ class TestLayoutMultiline:
     def test_pp3_trainer(self):
         runners, _ = self._run()
         by_pp = {r["post_position"]: r for r in runners}
-        assert by_pp[3]["trainer"] == "Anthony J. Granitz"
+        assert by_pp[3]["trainer"] == "Eduardo Caramori"
+
+    def test_ml_from_j_line_not_live_odds(self):
+        """ML must come from J: line, not the live-odds token on the horse header."""
+        runners, _ = self._run()
+        by_pp = {r["post_position"]: r for r in runners}
+        # PP1 YOTOWIN: live odds=9 → "9/1", J: ML 8 → "8/1" — must use J: value
+        assert by_pp[1]["morning_line"] == "8/1", (
+            f"Expected '8/1' from J: ML 8, got {by_pp[1]['morning_line']!r} "
+            "(parser may be using live-odds token '9' instead)"
+        )
+        # PP2 INNISFREE LASS: live odds=8 → "8/1", J: ML 9/2 — must use J: value
+        assert by_pp[2]["morning_line"] == "9/2", (
+            f"Expected '9/2' from J: ML 9/2, got {by_pp[2]['morning_line']!r} "
+            "(parser may be using live-odds token '8' instead)"
+        )
 
     def test_integer_ml_normalised(self):
         """Bare integer ML (e.g. '8') normalises to 'N/1' form."""
         runners, _ = self._run()
         by_pp = {r["post_position"]: r for r in runners}
-        assert by_pp[1]["morning_line"] == "8/1", f"PP1 ML: {by_pp[1]['morning_line']!r}"
-        assert by_pp[3]["morning_line"] == "5/1"
-        assert by_pp[4]["morning_line"] == "6/1"
-        assert by_pp[5]["morning_line"] == "4/1"
-        assert by_pp[6]["morning_line"] == "10/1"
+        assert by_pp[1]["morning_line"] == "8/1",  f"PP1 ML: {by_pp[1]['morning_line']!r}"
+        assert by_pp[4]["morning_line"] == "6/1",  f"PP4 ML: {by_pp[4]['morning_line']!r}"
+        assert by_pp[5]["morning_line"] == "4/1",  f"PP5 ML: {by_pp[5]['morning_line']!r}"
+        assert by_pp[6]["morning_line"] == "10/1", f"PP6 ML: {by_pp[6]['morning_line']!r}"
 
     def test_fractional_ml_preserved(self):
         runners, _ = self._run()
         by_pp = {r["post_position"]: r for r in runners}
         assert by_pp[2]["morning_line"] == "9/2", f"PP2 ML: {by_pp[2]['morning_line']!r}"
+        assert by_pp[3]["morning_line"] == "5/2", f"PP3 ML: {by_pp[3]['morning_line']!r}"
         assert by_pp[7]["morning_line"] == "7/2", f"PP7 ML: {by_pp[7]['morning_line']!r}"
 
     def test_all_runners_have_required_fields(self):
@@ -650,12 +676,22 @@ class TestLayoutMultiline:
             missing = required - r.keys()
             assert not missing, f"{r.get('horse_name')} missing: {missing}"
 
+    def test_all_required_fields_populated(self):
+        """Every runner must have non-None, non-empty jockey, trainer, and ML."""
+        runners, _ = self._run()
+        for r in runners:
+            assert r.get("jockey"),       f"Missing jockey:  {r.get('horse_name')}"
+            assert r.get("trainer"),      f"Missing trainer: {r.get('horse_name')}"
+            assert r.get("morning_line"), f"Missing ML:      {r.get('horse_name')}"
+
     def test_noise_not_treated_as_runner(self):
         """Page headers, URLs, and page counters must not become runner names."""
         runners, _ = self._run()
         names = {r["horse_name"] for r in runners}
         assert "1/St Bet" not in names
         assert not any("1stbet" in n.lower() for n in names)
+        assert "Final" not in names
+        assert "Replay" not in names
 
     def test_no_horse_name_with_j_or_t_prefix(self):
         """J: / T: lines must not leak into horse_name."""
@@ -665,17 +701,33 @@ class TestLayoutMultiline:
             assert not name.startswith("J:"), f"Horse name starts with J:: {name!r}"
             assert not name.startswith("T:"), f"Horse name starts with T:: {name!r}"
 
+    def test_recent_not_in_names(self):
+        """RECENT stat lines must not appear in horse names."""
+        runners, _ = self._run()
+        for r in runners:
+            assert "Recent" not in r["horse_name"], (
+                f"RECENT leaked into horse name: {r['horse_name']!r}"
+            )
+
+    def test_horseshoe_header_not_a_runner(self):
+        """'HORSESHOE INDIANAPOLIS R 5' must be rejected (next line is race-info, not bare int)."""
+        runners, _ = self._run()
+        names = {r["horse_name"] for r in runners}
+        assert not any("Horseshoe" in n for n in names), (
+            f"Track header accepted as runner: {names}"
+        )
+
 
 # ===========================================================================
-# Top-level test: multiline PDF through parse_race_pdf() (the UI entry point)
+# Top-level test: live-layout PDF through parse_race_pdf() (the UI entry point)
 # ===========================================================================
 
 class TestTopLevelMultilineRacePdf:
-    """parse_race_pdf() with the verified Horseshoe multiline pdfplumber text."""
+    """parse_race_pdf() with the verified Horseshoe live-layout pdfplumber text."""
 
     def _parse(self):
         with patch("src.services.pdf_ingest._extract_text",
-                   return_value=_IND_R5_MULTILINE_TEXT):
+                   return_value=_IND_R5_LIVE_TEXT):
             return parse_race_pdf(b"fake-pdf-bytes")
 
     def test_ok(self):
@@ -691,6 +743,14 @@ class TestTopLevelMultilineRacePdf:
         assert len(result["runners"]) == 7, (
             f"Expected 7 canonical runners, got {len(result['runners'])}: "
             f"{[r.get('horse_name') for r in result['runners']]}"
+        )
+
+    def test_primary_runners_seven(self):
+        """runners_primary (multiline horse-header parser) must find all 7."""
+        result = self._parse()
+        assert len(result["runners_primary"]) == 7, (
+            f"Multiline primary must find 7, got {len(result['runners_primary'])}: "
+            f"{[r.get('horse_name') for r in result['runners_primary']]}"
         )
 
     def test_post_positions_one_through_seven(self):
@@ -737,12 +797,12 @@ class TestTopLevelMultilineRacePdf:
         by_pp = {r["post_position"]: r for r in result["runners"]}
         r7 = by_pp[7]
         assert r7["horse_name"] == "I Made It"
-        assert r7["jockey"] == "Jose Ramos Gutierrez"
-        assert r7["trainer"] == "Stephen V. Fosdick"
+        assert r7["jockey"] == "Xavier Perez"
+        assert r7["trainer"] == "Wayne Catalano"
         assert r7["morning_line"] == "7/2"
 
     def test_multiline_parse_won_selection(self):
-        """runners_primary (multiline) must be the canonical source for this layout."""
+        """runners_primary (multiline) must be canonical for this line-preserving layout."""
         result = self._parse()
         assert len(result["runners_primary"]) == 7, (
             f"Multiline should find 7, got {len(result['runners_primary'])}"
@@ -752,3 +812,199 @@ class TestTopLevelMultilineRacePdf:
         result = self._parse()
         pps = [r["post_position"] for r in result["runners"]]
         assert len(pps) == len(set(pps)), f"Duplicate PPs: {pps}"
+
+    def test_all_runners_have_jockey(self):
+        result = self._parse()
+        for r in result["runners"]:
+            assert r.get("jockey"), f"Missing jockey for {r.get('horse_name')}"
+
+    def test_all_runners_have_trainer(self):
+        result = self._parse()
+        for r in result["runners"]:
+            assert r.get("trainer"), f"Missing trainer for {r.get('horse_name')}"
+
+    def test_all_runners_have_morning_line(self):
+        result = self._parse()
+        for r in result["runners"]:
+            assert r.get("morning_line"), f"Missing morning_line for {r.get('horse_name')}"
+
+
+# ===========================================================================
+# Live-layout regression — exact real raw_text shape from parse_race_pdf()
+#
+# Verifies the specific assertions requested:
+#   is_1stbet == True
+#   runners_primary == 7   (horse-header multiline parser)
+#   runners_fallback can be 0  (compact parser finds nothing in this layout)
+#   canonical runners == 7
+#   each runner: horse_name, jockey, trainer, morning_line
+# ===========================================================================
+
+_IND_R5_LIVE_RAW_TEXT = """\
+5/7/26, 4:38 PM 1/ST BET - The Easy & Smart Way to Bet the Races
+HORSESHOE INDIANAPOLIS R 5
+1:14 PM 7 Horses ALW $38,000 1M Dirt / Fast
+FINAL
+REPLAY
+YOTOWIN 9
+1
+J: Evin A. Roman ML 8
+PP1
+T: Rogelio Labra
+RECENT 5 WINS 1 TOP 3 3 More Info
+INNISFREE LASS 8
+2
+J: Alberto Burgos ML 9/2
+PP2
+T: John Haran
+RECENT 5 WINS 0 TOP 3 1 More Info
+TAP BONNET 5/2
+3
+J: Jake Saez ML 5/2
+PP3
+T: Eduardo Caramori
+RECENT 5 More Info
+AMAZINGNESS 6
+4
+J: Chris Landeros ML 6
+PP4
+T: Ron Alfano
+RECENT 5 More Info
+WHAT ABOUT NOW 4
+5
+J: Silvio Amador ML 4
+PP5
+T: Elaine Labadie
+RECENT 5 More Info
+KABOOM 10
+6
+J: Alex Becerra ML 10
+PP6
+T: Kathy Ritvo
+RECENT 5 More Info
+I MADE IT 7/2
+7
+J: Xavier Perez ML 7/2
+PP7
+T: Wayne Catalano
+RECENT 5 More Info
+"""
+
+
+class TestLiveLayoutRegression:
+    """Regression for the real production pdfplumber layout (horse-header → bare int → J:/PP/T)."""
+
+    def _parse(self):
+        with patch("src.services.pdf_ingest._extract_text",
+                   return_value=_IND_R5_LIVE_RAW_TEXT):
+            return parse_race_pdf(b"fake-pdf-bytes")
+
+    def test_is_1stbet_true(self):
+        result = self._parse()
+        assert result["is_1stbet"] is True, "Live PDF must be detected as 1/ST BET"
+
+    def test_runners_primary_seven(self):
+        result = self._parse()
+        assert len(result["runners_primary"]) == 7, (
+            f"Horse-header multiline parser must yield 7, "
+            f"got {len(result['runners_primary'])}: "
+            f"{[r.get('horse_name') for r in result['runners_primary']]}"
+        )
+
+    def test_runners_fallback_zero_or_fewer(self):
+        """Compact PP-anchor parser should find 0 runners in this line-preserving layout."""
+        result = self._parse()
+        # Compact parser is expected to return 0; if it finds some, that is not a failure
+        # but the primary parser must dominate (already verified by runners_primary == 7).
+        assert len(result["runners_fallback"]) < len(result["runners_primary"]), (
+            "Compact fallback must not outpace the primary parser for live-layout PDFs"
+        )
+
+    def test_canonical_runners_seven(self):
+        result = self._parse()
+        assert len(result["runners"]) == 7, (
+            f"Expected 7 canonical runners, got {len(result['runners'])}: "
+            f"{[r.get('horse_name') for r in result['runners']]}"
+        )
+
+    def test_post_positions_one_through_seven(self):
+        result = self._parse()
+        pps = sorted(r["post_position"] for r in result["runners"])
+        assert pps == [1, 2, 3, 4, 5, 6, 7], f"Expected [1..7], got {pps}"
+
+    def test_all_runners_have_horse_name(self):
+        result = self._parse()
+        for r in result["runners"]:
+            assert r.get("horse_name"), f"Missing horse_name: {r}"
+
+    def test_all_runners_have_jockey(self):
+        result = self._parse()
+        for r in result["runners"]:
+            assert r.get("jockey"), f"Missing jockey for {r.get('horse_name')}"
+
+    def test_all_runners_have_trainer(self):
+        result = self._parse()
+        for r in result["runners"]:
+            assert r.get("trainer"), f"Missing trainer for {r.get('horse_name')}"
+
+    def test_all_runners_have_morning_line(self):
+        result = self._parse()
+        for r in result["runners"]:
+            assert r.get("morning_line"), f"Missing morning_line for {r.get('horse_name')}"
+
+    def test_pp1_complete(self):
+        result = self._parse()
+        by_pp = {r["post_position"]: r for r in result["runners"]}
+        r1 = by_pp[1]
+        assert r1["horse_name"] == "Yotowin"
+        assert r1["jockey"] == "Evin A. Roman"
+        assert r1["trainer"] == "Rogelio Labra"
+        assert r1["morning_line"] == "8/1", (
+            f"ML should be '8/1' from J:-line ML 8, got {r1['morning_line']!r}"
+        )
+
+    def test_pp2_complete(self):
+        result = self._parse()
+        by_pp = {r["post_position"]: r for r in result["runners"]}
+        r2 = by_pp[2]
+        assert r2["horse_name"] == "Innisfree Lass"
+        assert r2["jockey"] == "Alberto Burgos"
+        assert r2["trainer"] == "John Haran"
+        assert r2["morning_line"] == "9/2", (
+            f"ML should be '9/2' from J:-line ML 9/2, got {r2['morning_line']!r}"
+        )
+
+    def test_pp7_complete(self):
+        result = self._parse()
+        by_pp = {r["post_position"]: r for r in result["runners"]}
+        r7 = by_pp[7]
+        assert r7["horse_name"] == "I Made It"
+        assert r7["jockey"] == "Xavier Perez"
+        assert r7["trainer"] == "Wayne Catalano"
+        assert r7["morning_line"] == "7/2"
+
+    def test_ml_source_j_line_not_live_odds(self):
+        """Critical: ML from J: line must win over live-odds token on horse header."""
+        result = self._parse()
+        by_pp = {r["post_position"]: r for r in result["runners"]}
+        # YOTOWIN: live_odds=9 (→ 9/1 if used), J: ML=8 (→ 8/1)
+        assert by_pp[1]["morning_line"] == "8/1", (
+            f"YOTOWIN ML: expected '8/1' from J: line, got {by_pp[1]['morning_line']!r}"
+        )
+        # INNISFREE LASS: live_odds=8 (→ 8/1 if used), J: ML=9/2
+        assert by_pp[2]["morning_line"] == "9/2", (
+            f"INNISFREE LASS ML: expected '9/2' from J: line, got {by_pp[2]['morning_line']!r}"
+        )
+
+    def test_no_duplicate_post_positions(self):
+        result = self._parse()
+        pps = [r["post_position"] for r in result["runners"]]
+        assert len(pps) == len(set(pps)), f"Duplicate PPs: {pps}"
+
+    def test_horse_names_title_cased(self):
+        result = self._parse()
+        names = {r["horse_name"] for r in result["runners"]}
+        assert "YOTOWIN" not in names, "Horse names must be title-cased, not ALL CAPS"
+        assert "Yotowin" in names
+        assert "Innisfree Lass" in names
+        assert "I Made It" in names
