@@ -73,5 +73,5 @@ samples/
 *.xlsx
 *.pdf
 
-# Stray malformed files from bad path pastes
-C*
+# Stray malformed files from bad path pastes (Windows drive-letter paths)
+C:*
