@@ -24,7 +24,7 @@ def get_race_info(conn: sqlite3.Connection, card_id: int) -> dict[str, Any]:
         """SELECT rc.card_id, rc.card_date, rc.race_number,
                   rc.stakes_name, rc.purse, rc.distance_yards, rc.distance_furlongs,
                   rc.surface, rc.race_class, rc.age_restriction, rc.conditions,
-                  rc.field_size,
+                  rc.field_size, rc.is_hidden,
                   t.track_id, t.name AS track_name, t.abbrev AS track_abbrev,
                   t.city, t.state
            FROM race_cards rc
@@ -179,10 +179,28 @@ def soft_delete_race(conn: sqlite3.Connection, card_id: int) -> dict[str, Any]:
     """Mark race as hidden (is_hidden=1). Preserves all data."""
     try:
         ensure_is_hidden_column(conn)
-        conn.execute(
+        cursor = conn.execute(
             "UPDATE race_cards SET is_hidden = 1 WHERE card_id = ?", (card_id,)
         )
         conn.commit()
+        if cursor.rowcount == 0:
+            return {"ok": False, "error": f"Race card_id={card_id} not found."}
+        return {"ok": True, "error": None}
+    except Exception as e:
+        conn.rollback()
+        return {"ok": False, "error": str(e)}
+
+
+def unhide_race(conn: sqlite3.Connection, card_id: int) -> dict[str, Any]:
+    """Clear the hidden flag (is_hidden=0). Preserves all data."""
+    try:
+        ensure_is_hidden_column(conn)
+        cursor = conn.execute(
+            "UPDATE race_cards SET is_hidden = 0 WHERE card_id = ?", (card_id,)
+        )
+        conn.commit()
+        if cursor.rowcount == 0:
+            return {"ok": False, "error": f"Race card_id={card_id} not found."}
         return {"ok": True, "error": None}
     except Exception as e:
         conn.rollback()

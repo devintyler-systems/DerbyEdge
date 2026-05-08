@@ -63,6 +63,7 @@ from src.services.race_admin import (
     get_race_dependencies,
     update_race_card as _admin_update_race,
     soft_delete_race,
+    unhide_race,
     hard_delete_race,
 )
 from src.services.firstbet_enrich import (
@@ -3674,19 +3675,37 @@ with tab8:
             _del_c1, _del_c2 = st.columns(2)
 
             with _del_c1:
-                st.markdown("**Soft Delete (Hide)**")
-                st.caption(
-                    "Race is hidden from the selector and scoring but all data is "
-                    "preserved. Can be reversed via a direct DB update."
-                )
-                if st.button("👁 Hide this race", use_container_width=True, key="adm_soft_del"):
-                    _soft = soft_delete_race(_conn8, active_card_id)
-                    if _soft["ok"]:
-                        st.session_state["active_card_id"] = None
-                        st.cache_data.clear()
-                        st.rerun()
-                    else:
-                        st.error(f"Soft delete failed: {_soft['error']}")
+                _is_hidden_now = bool(_adm.get("is_hidden"))
+                if _is_hidden_now:
+                    st.markdown("**Unhide Race**")
+                    st.caption(
+                        "This race is currently hidden from the selector and scoring "
+                        "workflows. Restoring it makes it visible again without "
+                        "touching any dependent data."
+                    )
+                    if st.button("↩ Unhide this race", use_container_width=True, key="adm_unhide"):
+                        _unhide = unhide_race(_conn8, active_card_id)
+                        if _unhide["ok"]:
+                            st.success("Race restored — now visible in the selector.")
+                            st.cache_data.clear()
+                            st.rerun()
+                        else:
+                            st.error(f"Unhide failed: {_unhide['error']}")
+                else:
+                    st.markdown("**Soft Delete (Hide)**")
+                    st.caption(
+                        "Hides the race from the selector and scoring workflows but "
+                        "preserves all data. Can be reversed with the Unhide action."
+                    )
+                    if st.button("👁 Hide this race", use_container_width=True, key="adm_soft_del"):
+                        _soft = soft_delete_race(_conn8, active_card_id)
+                        if _soft["ok"]:
+                            st.success("Race hidden — it will no longer appear in the default selector.")
+                            st.session_state["active_card_id"] = None
+                            st.cache_data.clear()
+                            st.rerun()
+                        else:
+                            st.error(f"Soft delete failed: {_soft['error']}")
 
             with _del_c2:
                 st.markdown("**Hard Delete (Cascade)**")
