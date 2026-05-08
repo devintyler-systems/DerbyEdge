@@ -18,6 +18,7 @@ Missing-data flags are per-horse text labels combining:
 """
 
 import datetime
+import sqlite3
 import uuid
 from pathlib import Path
 from typing import Optional
@@ -76,6 +77,108 @@ _FEATURE_TIER = {
     "trainer_intent_proxy": "DEGRADED", "horses_beaten_pct_last": "DEGRADED",
     "career_win_pct": "IMPLEMENTED", "finish_energy_proxy": "DEGRADED",
 }
+
+
+_DERBY_DEFAULT_CHAOS_INDEX = 0.85   # default for scorer; UI slider default matches
+
+
+# ---------------------------------------------------------------------------
+# Schema guard — adds chaos columns if missing (idempotent, called before writes)
+# ---------------------------------------------------------------------------
+def _ensure_chaos_columns(conn: sqlite3.Connection) -> None:
+    for stmt in (
+        "ALTER TABLE score_runs   ADD COLUMN chaos_active        INTEGER NOT NULL DEFAULT 0",
+        "ALTER TABLE score_runs   ADD COLUMN chaos_intensity     REAL",
+        "ALTER TABLE score_runs   ADD COLUMN field_entropy_score REAL",
+        "ALTER TABLE entry_scores ADD COLUMN chaos_score         REAL",
+        "ALTER TABLE entry_scores ADD COLUMN chaos_boost         REAL",
+        "ALTER TABLE entry_scores ADD COLUMN chaos_tier          TEXT",
+        "ALTER TABLE entry_scores ADD COLUMN chaos_eligible      INTEGER NOT NULL DEFAULT 0",
+    ):
+        try:
+            conn.execute(stmt)
+        except Exception:
+            pass
+    conn.commit()
+
+
+# ---------------------------------------------------------------------------
+# Chaos pipeline — maps scorer arrays to chaos patch inputs, returns per-entry
+# outputs.  Returns zero-impact values when derby_active=False or patch fails.
+# ---------------------------------------------------------------------------
+def _chaos_outputs_for_run(
+    entries_df:    pd.DataFrame,
+    feat_df:       pd.DataFrame,
+    win_probs:     np.ndarray,
+    form_arr:      np.ndarray,
+    surf_dist_arr: np.ndarray,
+    derby_active:  bool,
+    chaos_index:   float = _DERBY_DEFAULT_CHAOS_INDEX,
+) -> tuple[np.ndarray, np.ndarray, list, np.ndarray, bool, float]:
+    """Return (chaos_score, chaos_boost, chaos_tier_list, chaos_eligible,
+               chaos_was_applied, chaos_intensity).
+    chaos_score = WinProb_final per entry (equals win_probs when inactive)
+    chaos_boost = WinProb_final − WinProb_base (0.0 when inactive)
+    """
+    n = len(win_probs)
+    _zero = (win_probs.copy(), np.zeros(n), ["none"] * n,
+             np.zeros(n, dtype=int), False, 0.0)
+    if not derby_active or n == 0:
+        return _zero
+
+    def _col(df: pd.DataFrame, name: str, default: float) -> np.ndarray:
+        if name in df.columns:
+            return pd.to_numeric(df[name], errors="coerce").fillna(default).values
+        return np.full(n, default, dtype=float)
+
+    ch = pd.DataFrame(index=range(n))
+    ch["WinProb_base"]       = win_probs
+    ch["PaceFit_score"]      = _col(feat_df, "pace_fit_score",    0.5) * 10.0
+    ch["DevCurve_score"]     = form_arr * 10.0
+    ch["FinishEnergy_score"] = form_arr * 10.0
+    ch["DistanceProj_score"] = surf_dist_arr * 10.0
+
+    eq  = 1.0 / max(n, 1)
+    mkt = _col(feat_df, "market_implied_prob", eq)
+    ch["Publicness_score"] = np.clip(
+        5.0 + 2.5 * np.log2(np.maximum(mkt / eq, 1e-6)), 0.0, 10.0
+    )
+
+    last_spd = _col(feat_df, "last_speed_fig", 0.0)
+    avg_spd  = _col(feat_df, "avg_speed_fig",  0.0)
+    std_spd  = float(np.std(last_spd)) if np.std(last_spd) > 0 else 1.0
+    ch["late_fig_z"] = (last_spd - avg_spd) / std_spd
+
+    ps_arr = (
+        entries_df["pace_style"].fillna("stalker").values
+        if "pace_style" in entries_df.columns
+        else np.full(n, "stalker")
+    )
+    pp_arr = _col(entries_df, "post_position", 10.0)
+    med_pp = float(np.median(pp_arr))
+    ch["FavRailCloserFlag"]    = (ps_arr == "closer").astype(int)
+    ch["FavTacticalInnerFlag"] = np.array(
+        [1 if (ps_arr[i] == "presser" and pp_arr[i] <= med_pp) else 0 for i in range(n)]
+    )
+    ch["FavTacticalOuterFlag"] = np.array(
+        [1 if (ps_arr[i] == "front" or (ps_arr[i] == "presser" and pp_arr[i] > med_pp))
+         else 0 for i in range(n)]
+    )
+
+    try:
+        from src.derbyedge.chaos_patch import apply_derby_chaos_patch, realloc_target
+        patched = apply_derby_chaos_patch(ch, chaos_index=chaos_index)
+        return (
+            patched["WinProb_final"].values,
+            (patched["WinProb_final"] - patched["WinProb_base"]).values,
+            patched["DarkHorseTier"].tolist(),
+            patched["DarkHorseFlag"].astype(int).values,
+            True,
+            float(realloc_target(chaos_index)),
+        )
+    except Exception as exc:
+        print(f"  [scorer]   chaos patch skipped: {exc!r}")
+        return _zero
 
 
 # ---------------------------------------------------------------------------
@@ -599,6 +702,11 @@ def score_race(card_id: Optional[int] = None) -> pd.DataFrame:
         raise RuntimeError("No Kentucky Derby card found — run ingest first.")
 
     # ── Load data ──────────────────────────────────────────────────────────
+    entries_df = pd.read_sql(
+        "SELECT * FROM v_entries_live WHERE card_id=? ORDER BY post_position",
+        conn, params=(card_id,),
+    )
+
     feat_df = pd.read_sql(
         "SELECT * FROM feature_store WHERE card_id=? ORDER BY post_position",
         conn, params=(card_id,),
@@ -607,10 +715,19 @@ def score_race(card_id: Optional[int] = None) -> pd.DataFrame:
         conn.close()
         raise RuntimeError(f"No features for card_id={card_id} — run build_features first.")
 
-    entries_df = pd.read_sql(
-        "SELECT * FROM v_entries_live WHERE card_id=? ORDER BY post_position",
-        conn, params=(card_id,),
+    # Filter feat_df to live (non-scratched) entries only.
+    # v_entries_live already excludes scratches; we must align feat_df so
+    # positional array indexing (win_probs[i], feat_df.iloc[i]) stays in sync.
+    _live_eids = set(entries_df["entry_id"].astype(int))
+    feat_df = (
+        feat_df[feat_df["entry_id"].astype(int).isin(_live_eids)]
+        .reset_index(drop=True)
     )
+    if feat_df.empty:
+        conn.close()
+        raise RuntimeError(
+            f"All entries are scratched or missing features for card_id={card_id}."
+        )
 
     rc = conn.execute(
         "SELECT surface, distance_furlongs FROM race_cards WHERE card_id=?",
@@ -710,6 +827,17 @@ def score_race(card_id: Optional[int] = None) -> pd.DataFrame:
             final_bet_tags.append(raw_tag)
             low_conf_bet_block.append(0)
 
+    # ── Chaos pipeline ────────────────────────────────────────────────────
+    (chaos_scores, chaos_boosts, chaos_tiers, chaos_eligs,
+     chaos_applied, chaos_intensity) = _chaos_outputs_for_run(
+        entries_df, feat_df, win_probs, form_arr, surf_dist_arr,
+        derby_active=derby_active, chaos_index=_DERBY_DEFAULT_CHAOS_INDEX,
+    )
+    field_entropy = float(-np.sum(win_probs * np.log(np.maximum(win_probs, 1e-9))))
+    if chaos_applied:
+        print(f"  [scorer]   chaos applied  intensity={chaos_intensity:.3f}  "
+              f"entropy={field_entropy:.3f}")
+
     # ── Metrics ───────────────────────────────────────────────────────────
     metrics = _compute_metrics(win_probs, market_probs, artifact)
     metrics["score_ts"]          = score_ts
@@ -722,6 +850,7 @@ def score_race(card_id: Optional[int] = None) -> pd.DataFrame:
     print(f"  [scorer]   model_id={model_id}  artifact={artifact_path.name}")
 
     # ── DB writes ──────────────────────────────────────────────────────────
+    _ensure_chaos_columns(conn)
     run_id = str(uuid.uuid4())[:8]
 
     quality_tier = "seed_only"
@@ -736,9 +865,11 @@ def score_race(card_id: Optional[int] = None) -> pd.DataFrame:
 
     conn.execute(
         "INSERT INTO score_runs "
-        "(run_id, card_id, model_id, model_type, derby_override_active, quality_tier) "
-        "VALUES (?,?,?,?,?,?)",
-        (run_id, card_id, model_id, artifact.model_type, int(derby_active), quality_tier),
+        "(run_id, card_id, model_id, model_type, derby_override_active, quality_tier, "
+        " chaos_active, chaos_intensity, field_entropy_score) "
+        "VALUES (?,?,?,?,?,?,?,?,?)",
+        (run_id, card_id, model_id, artifact.model_type, int(derby_active), quality_tier,
+         int(chaos_applied), round(chaos_intensity, 4), round(field_entropy, 4)),
     )
 
     # Purge stale runs for this card (keep only latest)
@@ -760,8 +891,9 @@ def score_race(card_id: Optional[int] = None) -> pd.DataFrame:
                 pace_fit_score, form_score, surface_dist_fit, value_score,
                 market_implied_prob, bet_tag,
                 confidence_flag, missing_data_flag, low_conf_bet_block, rank,
-                trainer_name, jockey_name
-            ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                trainer_name, jockey_name,
+                chaos_score, chaos_boost, chaos_tier, chaos_eligible
+            ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
             """,
             (
                 run_id, eid, erow["horse_name"], int(erow["post_position"]),
@@ -781,6 +913,10 @@ def score_race(card_id: Optional[int] = None) -> pd.DataFrame:
                 int(rank_arr[i]),
                 erow.get("trainer", ""),
                 erow.get("jockey", ""),
+                round(float(chaos_scores[i]), 6) if chaos_applied else None,
+                round(float(chaos_boosts[i]), 6) if chaos_applied else None,
+                chaos_tiers[i]                   if chaos_applied else None,
+                int(chaos_eligs[i]),
             ),
         )
 
@@ -804,6 +940,11 @@ def score_race(card_id: Optional[int] = None) -> pd.DataFrame:
     board["form_score"]         = np.round(form_arr,      4)
     board["surface_dist_fit"]   = np.round(surf_dist_arr, 4)
     board["pace_fit_score"]     = feat_df["pace_fit_score"].values
+    if chaos_applied:
+        board["chaos_score"]    = np.round(chaos_scores, 6)
+        board["chaos_boost"]    = np.round(chaos_boosts, 6)
+        board["chaos_tier"]     = chaos_tiers
+        board["chaos_eligible"] = chaos_eligs
     board["rank"]               = rank_arr
 
     # Merge confidence columns

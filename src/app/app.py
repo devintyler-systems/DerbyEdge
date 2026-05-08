@@ -49,9 +49,12 @@ from src.services.pp_intake import (
 )
 from src.services.results_intake import (
     delete_results_for_race,
+    ensure_race_review_view,
     evaluate_score_run,
     ingest_results,
     load_outcomes_frame,
+    load_race_detail,
+    load_race_review,
     load_results_summary,
     parse_results_csv,
     preview_results_match,
@@ -713,6 +716,7 @@ if "startup_ddl_done" not in st.session_state:
         _startup_conn = get_connection()
         ensure_is_hidden_column(_startup_conn)
         ensure_firstbet_pp_table(_startup_conn)
+        ensure_race_review_view(_startup_conn)
         _startup_conn.close()
     except Exception:
         pass
@@ -1035,7 +1039,7 @@ tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10 = st.tabs([
     "📊 PP Import",
     "🏁 Results Import",
     "⚙ Admin",
-    "📈 Calibration",
+    "📈 Review",
     "❓ About & Help",
 ])
 
@@ -3432,11 +3436,18 @@ with tab7:
                 st.markdown("**Race Outcome**")
                 _ev1, _ev2, _ev3, _ev4 = st.columns(4)
                 _ev1.metric("Winner", _eval["winner"])
-                _top_fin = _eval["top_pick_finish"]
+                _orig_scr   = _eval.get("original_tp_scratched", False)
+                _eff_fin    = _eval.get("effective_tp_finish")
+                _tp_delta   = (
+                    "WON ✓" if _eval["top_pick_won"]
+                    else "SCR" if _orig_scr
+                    else f"Finished {_eff_fin}" if _eff_fin is not None
+                    else "No result"
+                )
                 _ev2.metric(
                     "Top Pick",
                     _eval["top_pick"],
-                    delta="WON ✓" if _eval["top_pick_won"] else f"Finished {_top_fin}" if _top_fin else "Scratched",
+                    delta=_tp_delta,
                     delta_color="normal" if _eval["top_pick_won"] else "inverse",
                     help="Model's highest win-probability selection for this race",
                 )
@@ -3789,217 +3800,648 @@ with tab8:
 
         _conn8.close()
 
-# ── TAB 9: Calibration & Outcomes ─────────────────────────────────────────────
+# ── TAB 9: Race Review & Calibration ──────────────────────────────────────────
 with tab9:
     import pandas as _pd
 
+    # ── Cached loaders ────────────────────────────────────────────────────────
     @st.cache_data(ttl=60)
     def _load_outcomes(limit: int) -> list[dict]:
-        _c9 = get_connection()
-        _rows = load_outcomes_frame(_c9, limit=limit)
-        _c9.close()
+        _c = get_connection()
+        _rows = load_outcomes_frame(_c, limit=limit)
+        _c.close()
         return _rows
 
-    st.subheader("📈 Calibration & Outcomes")
+    @st.cache_data(ttl=60)
+    def _load_review(with_results: bool, limit: int, **kw) -> list[dict]:
+        _c = get_connection()
+        _rows = load_race_review(_c, with_results=with_results, limit=limit, **kw)
+        _c.close()
+        return _rows
 
-    # ── Status KPIs ───────────────────────────────────────────────────────────
+    @st.cache_data(ttl=60)
+    def _load_detail(run_id: str, card_id: int) -> list[dict]:
+        _c = get_connection()
+        _rows = load_race_detail(_c, run_id, card_id)
+        _c.close()
+        return _rows
+
+    # ── Top-level KPI chips ───────────────────────────────────────────────────
     _all_races_for_status = load_race_index(include_hidden=False)
     _count_pending    = sum(1 for r in _all_races_for_status if get_race_workflow_status(r) == "scored_no_result")
     _count_calibrated = sum(1 for r in _all_races_for_status if get_race_workflow_status(r) == "calibrated")
     _count_unscored   = sum(1 for r in _all_races_for_status if get_race_workflow_status(r) == "unscored")
-    _kpi1, _kpi2, _kpi3 = st.columns(3)
+    _kpi1, _kpi2, _kpi3, _kpi4 = st.columns(4)
     _kpi1.metric("⏳ Pending Results", _count_pending)
     _kpi2.metric("✅ Calibrated",       _count_calibrated)
     _kpi3.metric("⬜ Unscored",         _count_unscored)
+    if _kpi4.button("↺ Refresh All", key="r9_refresh_all"):
+        st.cache_data.clear()
+        st.rerun()
 
-    st.divider()
+    _r9sub1, _r9sub2, _r9sub3 = st.tabs(["📋 Race History", "🔎 Race Detail", "📊 Calibration"])
 
-    # ── Pending Results queue ─────────────────────────────────────────────────
-    _pending = sorted(
-        [r for r in _all_races_for_status if get_race_workflow_status(r) == "scored_no_result"],
-        key=lambda r: r.get("latest_run_at") or "",
-        reverse=True,
-    )
+    # ══════════════════════════════════════════════════════════════════════════
+    # SUB-TAB 1: Race History
+    # ══════════════════════════════════════════════════════════════════════════
+    with _r9sub1:
+        st.markdown("#### Race History")
+        st.caption("All scored races · filter to narrow · most recent first")
 
-    if _pending:
-        st.markdown("#### ⏳ Pending Results")
-        st.caption(
-            f"{len(_pending)} scored race(s) awaiting results ingestion. "
-            "Go to the 🏁 Results Import tab to upload results for any of these."
-        )
-        _pend_rows = []
-        for _pr in _pending:
-            _run_ts = (_pr.get("latest_run_at") or "")
-            _run_display = _run_ts[:16].replace("T", " ") if _run_ts else "—"
-            _pend_rows.append({
-                "Race":   format_race_label(_pr),
-                "Detail": format_race_hint(_pr),
-                "Scored": _run_display,
-            })
-        _pend_df = _pd.DataFrame(_pend_rows)
-        st.dataframe(_pend_df, use_container_width=True, hide_index=True,
-                     height=min(40 + 35 * len(_pend_rows), 300))
+        # ── Filter strip ──────────────────────────────────────────────────────
+        _h_fa, _h_fb, _h_fc, _h_fd = st.columns([2, 2, 2, 2])
+        with _h_fa:
+            _h_date_from = st.text_input("Date from (YYYY-MM-DD)", key="h_date_from",
+                                         placeholder="2025-01-01")
+        with _h_fb:
+            _h_date_to   = st.text_input("Date to   (YYYY-MM-DD)", key="h_date_to",
+                                         placeholder="2026-12-31")
+        with _h_fc:
+            _h_with_res  = st.toggle("Results only", value=False, key="h_with_res",
+                                     help="Show only races where results have been ingested")
+        with _h_fd:
+            _h_limit = st.selectbox("Limit", [50, 100, 250, 500], index=1, key="h_limit")
 
-        _pjump_labels = [format_race_label(r) for r in _pending]
-        _pj1, _pj2 = st.columns([4, 1])
-        with _pj1:
-            _pjump_sel = st.selectbox(
-                "Jump to pending race",
-                range(len(_pending)),
-                format_func=lambda i: _pjump_labels[i],
-                key="cal_pending_jump",
-                label_visibility="collapsed",
+        _h_fe, _h_ff, _h_fg, _h_fh = st.columns([2, 2, 2, 2])
+        with _h_fe:
+            _h_srf = st.selectbox("Surface", ["All", "dirt", "turf", "synthetic", "all_weather"],
+                                  key="h_srf")
+        with _h_ff:
+            _h_dist = st.selectbox("Distance", ["All", "sprint", "route"], key="h_dist")
+        with _h_fg:
+            _h_chaos = st.selectbox("Chaos/Derby", ["All", "Active (1)", "Inactive (0)"],
+                                    key="h_chaos")
+        with _h_fh:
+            _h_model = st.selectbox("Model type",
+                                    ["All", "derby_override", "seed_only_baseline",
+                                     "xgboost", "fallback"],
+                                    key="h_model")
+
+        _h_kw: dict = {}
+        if _h_date_from.strip():
+            _h_kw["date_from"]  = _h_date_from.strip()
+        if _h_date_to.strip():
+            _h_kw["date_to"]    = _h_date_to.strip()
+        if _h_srf  != "All":
+            _h_kw["surface"]    = _h_srf
+        if _h_dist != "All":
+            _h_kw["dist_cat"]   = _h_dist
+        if _h_chaos == "Active (1)":
+            _h_kw["chaos_active"] = 1
+        elif _h_chaos == "Inactive (0)":
+            _h_kw["chaos_active"] = 0
+        if _h_model != "All":
+            _h_kw["model_type"] = _h_model
+
+        _history_rows = _load_review(with_results=_h_with_res, limit=_h_limit, **_h_kw)
+
+        if not _history_rows:
+            st.info("No races match the current filters. Score a race and/or relax the filters.")
+        else:
+            # ── Track filter (dynamic, post-load) ─────────────────────────────
+            _h_tracks = sorted({r["track"] for r in _history_rows if r.get("track")})
+            _h_trk_sel = st.selectbox("Track", ["All"] + _h_tracks, key="h_trk_sel")
+            if _h_trk_sel != "All":
+                _history_rows = [r for r in _history_rows if r.get("track") == _h_trk_sel]
+
+            # ── Build display table ────────────────────────────────────────────
+            def _h_fin_disp(r: dict) -> str:
+                scr = bool(r.get("original_tp_scratched"))
+                fin = r.get("effective_tp_finish")
+                if scr:
+                    return "SCR"
+                return str(int(fin)) if fin is not None else "—"
+
+            _hist_display = []
+            for _hr in _history_rows:
+                _h_dist_f = _hr.get("distance_furlongs")
+                _h_eff_tp = _hr.get("effective_tp") or "—"
+                _h_orig_tp = _hr.get("original_tp") or "—"
+                _h_scr_badge = " ⚠" if bool(_hr.get("original_tp_scratched")) and _h_eff_tp != _h_orig_tp else ""
+                _hist_display.append({
+                    "Date":      _hr.get("race_date") or "—",
+                    "Track":     _hr.get("track") or "—",
+                    "R#":        _hr.get("race_number") or "",
+                    "Srf":       (_hr.get("surface") or "")[:1].upper() or "?",
+                    "Dist":      f"{_h_dist_f:.1f}f" if _h_dist_f else "?",
+                    "Field":     _hr.get("field_size") or "",
+                    "Orig TP":   _h_orig_tp,
+                    "SCR":       "✓" if bool(_hr.get("original_tp_scratched")) else "",
+                    "Eff TP":    _h_eff_tp + _h_scr_badge,
+                    "TP Fin":    _h_fin_disp(_hr),
+                    "TP Won":    "✓" if _hr.get("effective_tp_won") else "✗",
+                    "Winner":    _hr.get("actual_winner") or "—",
+                    "Chaos":     (f"✓ {_hr['chaos_intensity']:.0%}"
+                                  if _hr.get("chaos_active") and _hr.get("chaos_intensity")
+                                  else ("✓" if _hr.get("chaos_active") else "")),
+                    "Tier":      _hr.get("quality_tier") or "",
+                    "run_id":    _hr.get("run_id") or "",
+                    "card_id":   _hr.get("card_id") or 0,
+                })
+
+            _hist_df = _pd.DataFrame(_hist_display)
+
+            def _style_history(df: "_pd.DataFrame") -> "_pd.DataFrame":
+                styles = _pd.DataFrame("", index=df.index, columns=df.columns)
+                for _i, _row in df.iterrows():
+                    if _row.get("TP Won") == "✓":
+                        styles.at[_i, "TP Won"] = "color:#3fb950;font-weight:bold"
+                    else:
+                        styles.at[_i, "TP Won"] = "color:#f85149"
+                    if _row.get("SCR") == "✓":
+                        for _c in df.columns:
+                            if styles.at[_i, _c] == "":
+                                styles.at[_i, _c] = "color:#8b949e"
+                return styles
+
+            _hist_styled = _hist_df.drop(columns=["run_id", "card_id"]).style.apply(
+                _style_history, axis=None
             )
-        with _pj2:
-            if st.button("↗ Select", key="cal_pending_go", use_container_width=True):
-                st.session_state["active_card_id"] = _pending[_pjump_sel]["card_id"]
-                st.rerun()
-
-        st.divider()
-
-    # ── Calibrated races ──────────────────────────────────────────────────────
-    st.markdown("#### ✅ Calibrated Races")
-    st.caption(
-        "Scored races with results ingested. "
-        "Compares model top pick and market favorites against actual outcome."
-    )
-
-    # ── Filter strip ──────────────────────────────────────────────────────────
-    _cf1, _cf2, _cf3, _cf4 = st.columns([2, 2, 2, 1])
-    with _cf1:
-        _cal_tier = st.selectbox(
-            "Quality tier",
-            ["All", "enriched_proxy", "seed_only"],
-            key="cal_tier",
-        )
-    with _cf2:
-        _cal_limit = st.selectbox(
-            "Show last N races",
-            [25, 50, 100, 250],
-            index=1,
-            key="cal_limit",
-        )
-
-    _outcomes_raw = _load_outcomes(_cal_limit)
-
-    # Filter by quality tier
-    if _cal_tier != "All":
-        _outcomes_raw = [r for r in _outcomes_raw if r.get("quality_tier") == _cal_tier]
-
-    with _cf3:
-        _all_tracks = sorted({r["track_code"] for r in _outcomes_raw if r.get("track_code")})
-        _cal_track = st.selectbox(
-            "Track",
-            ["All"] + _all_tracks,
-            key="cal_track",
-        )
-    with _cf4:
-        if st.button("↺ Refresh", key="cal_refresh", use_container_width=True):
-            st.cache_data.clear()
-            st.rerun()
-
-    if _cal_track != "All":
-        _outcomes_raw = [r for r in _outcomes_raw if r.get("track_code") == _cal_track]
-
-    if not _outcomes_raw:
-        st.info(
-            "No calibration data yet. Ingest race results for at least one scored race "
-            "to see model vs market outcomes here."
-        )
-    else:
-        # ── Summary metrics ───────────────────────────────────────────────────
-        _n_races = len(_outcomes_raw)
-        _tp_won_n = sum(1 for r in _outcomes_raw if r.get("top_pick_won"))
-        _tp_wr = round(100.0 * _tp_won_n / _n_races, 1) if _n_races else 0.0
-        _ptf_eligible = [r for r in _outcomes_raw if r.get("post_time_favorite_name")]
-        _ptf_won_n = sum(1 for r in _ptf_eligible if r.get("post_time_favorite_won"))
-        _ptf_wr = round(100.0 * _ptf_won_n / len(_ptf_eligible), 1) if _ptf_eligible else 0.0
-
-        _sm1, _sm2, _sm3 = st.columns(3)
-        _sm1.metric("Races", _n_races)
-        _sm2.metric(
-            "Top Pick Win Rate",
-            f"{_tp_wr}%",
-            delta=f"{_tp_won_n} of {_n_races}",
-            delta_color="off",
-        )
-        _sm3.metric(
-            "Post-Time Fav Win Rate",
-            f"{_ptf_wr}%" if _ptf_eligible else "—",
-            delta=f"{_ptf_won_n} of {len(_ptf_eligible)}" if _ptf_eligible else "no odds",
-            delta_color="off",
-        )
-
-        st.divider()
-
-        # ── Build display dataframe ───────────────────────────────────────────
-        _display_rows = []
-        for _r in _outcomes_raw:
-            _tp_won_sym = "✓" if _r.get("top_pick_won") else "✗"
-            _ptf_won_sym = (
-                "✓" if _r.get("post_time_favorite_won")
-                else ("✗" if _r.get("post_time_favorite_name") else "—")
+            st.dataframe(
+                _hist_styled,
+                use_container_width=True,
+                hide_index=True,
+                height=min(40 + 35 * len(_hist_display), 600),
             )
-            _dist = _r.get("distance_f")
-            _dist_str = f"{_dist:.1f}f" if _dist else "?"
-            _tp_prob = _r.get("top_pick_win_prob")
-            _tp_prob_str = f"{_tp_prob:.0%}" if _tp_prob else "—"
-            _ptf_odds = _r.get("post_time_favorite_odds")
-            _ptf_odds_str = f"{_ptf_odds:.2f}" if _ptf_odds else "—"
-            _w_odds = _r.get("winner_official_odds")
-            _w_odds_str = f"{_w_odds:.2f}" if _w_odds else "—"
-            _display_rows.append({
-                "Race":       format_race_label({
-                                  "track_abbrev": _r.get("track_code"),
-                                  "race_number":  _r.get("race_number"),
-                                  "card_date":    _r.get("race_date"),
-                                  "race_class":   _r.get("race_type"),
-                              }),
-                "Dist":       _dist_str,
-                "Srf":        _r.get("surface_code") or "?",
-                "Field":      _r.get("field_size") or "",
-                "Tier":       _r.get("quality_tier") or "",
-                "Top Pick":   _r.get("top_pick_name") or "—",
-                "TP Prob":    _tp_prob_str,
-                "TP Fin":     _r.get("top_pick_finish_pos") or "?",
-                "TP Won":     _tp_won_sym,
-                "PTF":        _r.get("post_time_favorite_name") or "—",
-                "PTF Odds":   _ptf_odds_str,
-                "PTF Won":    _ptf_won_sym,
-                "Winner":     _r.get("winner_name") or "—",
-                "W Odds":     _w_odds_str,
-            })
+            st.caption(
+                f"{len(_hist_display)} run(s) · "
+                "SCR = original top pick scratched · ⚠ = effective TP substituted · "
+                "TP Won uses effective TP"
+            )
 
-        _cal_df = _pd.DataFrame(_display_rows)
+            # Navigate to detail
+            _h_go1, _h_go2, _h_go3 = st.columns([4, 2, 1])
+            with _h_go1:
+                _h_det_opts = [
+                    f"{r['Date']} · {r['Track']} R{r['R#']} · {r['Eff TP']}"
+                    for r in _hist_display
+                    if r.get("run_id")
+                ]
+                _h_det_sel = st.selectbox(
+                    "Jump to Race Detail",
+                    range(len(_h_det_opts)),
+                    format_func=lambda i: _h_det_opts[i],
+                    key="h_det_jump",
+                    label_visibility="collapsed",
+                )
+            with _h_go2:
+                if st.button("→ Open Detail", key="h_open_detail", use_container_width=True):
+                    _sel_row = _hist_display[_h_det_sel]
+                    st.session_state["review_run_id"]  = _sel_row["run_id"]
+                    st.session_state["review_card_id"] = _sel_row["card_id"]
+                    st.rerun()
 
-        # ── Pandas Styler: color TP Won and PTF Won columns ───────────────────
-        def _style_outcomes(df: "_pd.DataFrame") -> "_pd.DataFrame":
-            styles = _pd.DataFrame("", index=df.index, columns=df.columns)
-            for _i, _row in df.iterrows():
-                if _row.get("TP Won") == "✓":
-                    styles.at[_i, "TP Won"] = "color: #2ecc71; font-weight: bold"
-                elif _row.get("TP Won") == "✗":
-                    styles.at[_i, "TP Won"] = "color: #e74c3c"
-                if _row.get("PTF Won") == "✓":
-                    styles.at[_i, "PTF Won"] = "color: #2ecc71; font-weight: bold"
-                elif _row.get("PTF Won") == "✗":
-                    styles.at[_i, "PTF Won"] = "color: #e74c3c"
-            return styles
+    # ══════════════════════════════════════════════════════════════════════════
+    # SUB-TAB 2: Race Detail Archive
+    # ══════════════════════════════════════════════════════════════════════════
+    with _r9sub2:
+        st.markdown("#### Race Detail Archive")
+        st.caption("Per-runner predictions vs official results for any completed run")
 
-        _cal_styled = _cal_df.style.apply(_style_outcomes, axis=None)
+        # Load all completed runs (with results) for the selector
+        _det_all = _load_review(with_results=True, limit=500)
 
-        st.dataframe(
-            _cal_styled,
-            use_container_width=True,
-            hide_index=True,
-            height=min(40 + 35 * len(_display_rows), 600),
+        if not _det_all:
+            st.info(
+                "No completed race data yet. Ingest results for a scored race "
+                "via the 🏁 Results Import tab, then return here."
+            )
+        else:
+            _det_labels = [
+                f"{r['race_date']} · {r['track']} R{r['race_number']} "
+                f"· {r['effective_tp']} ({r['quality_tier']})"
+                for r in _det_all
+            ]
+            # Default to session-state selection from Race History jump, else index 0
+            _det_default = 0
+            if st.session_state.get("review_run_id"):
+                _ss_run = st.session_state["review_run_id"]
+                _det_default = next(
+                    (i for i, r in enumerate(_det_all) if r["run_id"] == _ss_run),
+                    0,
+                )
+
+            _det_idx = st.selectbox(
+                "Select race",
+                range(len(_det_all)),
+                index=_det_default,
+                format_func=lambda i: _det_labels[i],
+                key="det_race_sel",
+            )
+            _det_race = _det_all[_det_idx]
+
+            # ── Race header ───────────────────────────────────────────────────
+            _dh1, _dh2, _dh3, _dh4, _dh5, _dh6 = st.columns(6)
+            _dh1.metric("Track",    _det_race["track"])
+            _dh2.metric("Date",     _det_race["race_date"])
+            _dh3.metric("Race #",   _det_race["race_number"])
+            _dh4.metric("Surface",  (_det_race["surface"] or "").title())
+            _d_dist = _det_race.get("distance_furlongs")
+            _dh5.metric("Distance", f"{_d_dist:.1f}f" if _d_dist else "—")
+            _dh6.metric("Field",    _det_race["field_size"] or "—")
+
+            _dm1, _dm2, _dm3, _dm4 = st.columns(4)
+            _dm1.metric("Orig TP",    _det_race.get("original_tp") or "—")
+            _dm2.metric("Eff TP",     _det_race.get("effective_tp") or "—")
+            _dm3.metric("Winner",     _det_race.get("actual_winner") or "—")
+            _d_chaos_intensity = _det_race.get("chaos_intensity")
+            _dm4.metric(
+                "Chaos",
+                f"Active ({_d_chaos_intensity:.1%})" if _det_race.get("chaos_active") and _d_chaos_intensity else
+                ("Active" if _det_race.get("chaos_active") else "Off"),
+            )
+
+            st.divider()
+
+            # ── Per-runner merged table ───────────────────────────────────────
+            _detail_rows = _load_detail(_det_race["run_id"], _det_race["card_id"])
+
+            if not _detail_rows:
+                st.warning("No entry_scores found for this run.")
+            else:
+                _orig_tp_name = _det_race.get("original_tp")
+                _eff_tp_name  = _det_race.get("effective_tp")
+                _winner_name  = _det_race.get("actual_winner")
+
+                # Identify special rows for highlights
+                _winner_rank = next(
+                    (r["model_rank"] for r in _detail_rows if r.get("official_finish") == 1),
+                    None,
+                )
+                _biggest_miss = (_winner_rank is not None and _winner_rank > 5)
+
+                # Build display rows
+                _det_display = []
+                for _dr in _detail_rows:
+                    _d_fin = (
+                        "SCR" if _dr.get("is_scratched")
+                        else "DQ"  if _dr.get("is_disqualified")
+                        else str(int(_dr["finish_position"])) if _dr.get("finish_position") is not None
+                        else "—"
+                    )
+                    _d_wp  = _dr.get("win_probability")
+                    _d_fo  = _dr.get("fair_odds")
+                    _d_oo  = _dr.get("official_odds_decimal")
+                    _d_vs  = _dr.get("value_score")
+                    _d_cs  = _dr.get("chaos_score")
+                    _d_cb  = _dr.get("chaos_boost")
+                    _d_ct  = _dr.get("chaos_tier") or "none"
+                    _det_display.append({
+                        "Rank":   _dr["model_rank"],
+                        "Horse":  _dr["horse_name"],
+                        "Post":   _dr.get("post_position") or "",
+                        "ML":     f"{_dr.get('morning_line_odds', 0):.0f}-1",
+                        "Win%":   f"{_d_wp*100:.1f}%" if _d_wp else "—",
+                        "Fair":   f"{_d_fo:.1f}-1" if _d_fo else "—",
+                        "Edge":   (f"+{_d_vs:.3f}" if _d_vs and _d_vs > 0
+                                   else f"{_d_vs:.3f}" if _d_vs is not None else "—"),
+                        "Tag":    _dr.get("bet_tag") or "—",
+                        "Chaos%": f"{_d_cs*100:.1f}%" if _d_cs is not None else "—",
+                        "Boost":  (f"+{_d_cb*100:.1f}%" if _d_cb and _d_cb > 0
+                                   else f"{_d_cb*100:.1f}%" if _d_cb is not None else "—"),
+                        "Tier":   _d_ct if _d_ct != "none" else "—",
+                        "SCR":    "✓" if _dr.get("is_scratched") else "",
+                        "Fin":    _d_fin,
+                        "OddsOff": f"{_d_oo:.2f}" if _d_oo else "—",
+                    })
+
+                _det_df = _pd.DataFrame(_det_display)
+
+                def _style_detail(df: "_pd.DataFrame") -> "_pd.DataFrame":
+                    styles = _pd.DataFrame("", index=df.index, columns=df.columns)
+                    for _i, _row in df.iterrows():
+                        _hname = _detail_rows[_i]["horse_name"]
+                        _is_scr = bool(_detail_rows[_i].get("is_scratched"))
+                        _is_win = (_detail_rows[_i].get("official_finish") == 1
+                                   and not _detail_rows[_i].get("is_disqualified"))
+                        if _is_scr:
+                            for _c in df.columns:
+                                styles.at[_i, _c] = "color:#6e7681"
+                        elif _is_win:
+                            for _c in df.columns:
+                                styles.at[_i, _c] = "background-color:rgba(46,160,67,.12)"
+                        if _hname == _orig_tp_name and not _is_scr:
+                            styles.at[_i, "Horse"] = (
+                                "color:#58a6ff;font-weight:bold"
+                                + (";background-color:rgba(46,160,67,.12)" if _is_win else "")
+                            )
+                        if _hname == _eff_tp_name and _eff_tp_name != _orig_tp_name:
+                            styles.at[_i, "Horse"] = (
+                                styles.at[_i, "Horse"]
+                                + ";border-left:3px solid #f0883e"
+                            )
+                        # Positive-edge loser (bet-tagged, didn't win)
+                        if (_detail_rows[_i].get("bet_tag") == "bet"
+                                and not _is_win and not _is_scr):
+                            styles.at[_i, "Edge"] = "color:#f0883e"
+                        # Chaos mover — highlight Tier / Boost columns
+                        _ct = _detail_rows[_i].get("chaos_tier") or "none"
+                        if _ct == "strong" and not _is_scr:
+                            styles.at[_i, "Tier"]  = "color:#d29922;font-weight:bold"
+                            styles.at[_i, "Boost"] = "color:#d29922"
+                        elif _ct == "light" and not _is_scr:
+                            styles.at[_i, "Tier"] = "color:#8b949e"
+                    return styles
+
+                _det_styled = _det_df.style.apply(_style_detail, axis=None)
+                st.dataframe(
+                    _det_styled,
+                    use_container_width=True,
+                    hide_index=True,
+                    height=min(40 + 35 * len(_det_display), 600),
+                )
+
+                # ── Quick-stat legend row ─────────────────────────────────────
+                _qs_cols = st.columns(4)
+                _qs_cols[0].caption(
+                    f"🏆 Winner rank: **{_winner_rank}**"
+                    + (" ⚠ big miss" if _biggest_miss else "")
+                )
+                _n_scr = sum(1 for r in _detail_rows if r.get("is_scratched"))
+                _qs_cols[1].caption(f"🚫 Scratched: **{_n_scr}**")
+                _n_bet = sum(1 for r in _detail_rows if r.get("bet_tag") == "bet")
+                _n_bet_won = sum(1 for r in _detail_rows
+                                 if r.get("bet_tag") == "bet" and r.get("official_finish") == 1)
+                _qs_cols[2].caption(f"🎯 Bet tags: **{_n_bet}** · won **{_n_bet_won}**")
+                _qs_cols[3].caption(
+                    "🔵 blue = model TP · 🟠 orange = eff TP · "
+                    "🟢 green = winner · 🟡 gold = chaos strong"
+                )
+
+    # ══════════════════════════════════════════════════════════════════════════
+    # SUB-TAB 3: Calibration
+    # ══════════════════════════════════════════════════════════════════════════
+    with _r9sub3:
+        st.markdown("#### Calibration & Outcomes")
+
+        # ── Pending Results queue ─────────────────────────────────────────────
+        _pending = sorted(
+            [r for r in _all_races_for_status if get_race_workflow_status(r) == "scored_no_result"],
+            key=lambda r: r.get("latest_run_at") or "",
+            reverse=True,
         )
+        if _pending:
+            st.markdown("#### ⏳ Pending Results")
+            st.caption(
+                f"{len(_pending)} scored race(s) awaiting results ingestion. "
+                "Go to the 🏁 Results Import tab to upload results for any of these."
+            )
+            _pend_rows = []
+            for _pr in _pending:
+                _run_ts = (_pr.get("latest_run_at") or "")
+                _pend_rows.append({
+                    "Race":   format_race_label(_pr),
+                    "Detail": format_race_hint(_pr),
+                    "Scored": _run_ts[:16].replace("T", " ") if _run_ts else "—",
+                })
+            st.dataframe(_pd.DataFrame(_pend_rows), use_container_width=True, hide_index=True,
+                         height=min(40 + 35 * len(_pend_rows), 300))
+            _pjump_labels = [format_race_label(r) for r in _pending]
+            _pj1, _pj2 = st.columns([4, 1])
+            with _pj1:
+                _pjump_sel = st.selectbox(
+                    "Jump to pending race", range(len(_pending)),
+                    format_func=lambda i: _pjump_labels[i],
+                    key="cal_pending_jump", label_visibility="collapsed",
+                )
+            with _pj2:
+                if st.button("↗ Select", key="cal_pending_go", use_container_width=True):
+                    st.session_state["active_card_id"] = _pending[_pjump_sel]["card_id"]
+                    st.rerun()
+            st.divider()
 
-        st.caption(
-            f"Showing {len(_display_rows)} race(s) · "
-            "TP = model top pick · PTF = post-time market favorite · "
-            "Odds are decimal (e.g. 3.80 = 2.80/1)"
-        )
+        # ── Filter strip ──────────────────────────────────────────────────────
+        _cf1, _cf2, _cf3 = st.columns([2, 2, 2])
+        with _cf1:
+            _cal_tier = st.selectbox("Quality tier",
+                                     ["All", "enriched_proxy", "seed_only"],
+                                     key="cal_tier")
+        with _cf2:
+            _cal_limit = st.selectbox("Show last N races",
+                                      [25, 50, 100, 250], index=1, key="cal_limit")
+        with _cf3:
+            _cal_srf = st.selectbox("Surface",
+                                    ["All", "D (dirt)", "T (turf)", "A (all-weather)"],
+                                    key="cal_srf")
+
+        _outcomes_raw = _load_outcomes(_cal_limit)
+        if _cal_tier != "All":
+            _outcomes_raw = [r for r in _outcomes_raw if r.get("quality_tier") == _cal_tier]
+
+        _cal_all_tracks = sorted({r["track_code"] for r in _outcomes_raw if r.get("track_code")})
+        _cf4, _cf5 = st.columns([2, 2])
+        with _cf4:
+            _cal_track = st.selectbox("Track", ["All"] + _cal_all_tracks, key="cal_track")
+        with _cf5:
+            _cal_dist_flt = st.selectbox("Distance", ["All", "Sprint (<8.5f)", "Route (≥8.5f)"],
+                                         key="cal_dist_flt")
+
+        if _cal_track != "All":
+            _outcomes_raw = [r for r in _outcomes_raw if r.get("track_code") == _cal_track]
+        if _cal_srf != "All":
+            _srf_code = _cal_srf[0]
+            _outcomes_raw = [r for r in _outcomes_raw
+                             if (r.get("surface_code") or "") == _srf_code]
+        if _cal_dist_flt == "Sprint (<8.5f)":
+            _outcomes_raw = [r for r in _outcomes_raw
+                             if (r.get("distance_f") or 99) < 8.5]
+        elif _cal_dist_flt == "Route (≥8.5f)":
+            _outcomes_raw = [r for r in _outcomes_raw
+                             if (r.get("distance_f") or 0) >= 8.5]
+
+        if not _outcomes_raw:
+            st.info(
+                "No calibration data yet. Ingest race results for at least one scored race "
+                "to see model vs market outcomes here."
+            )
+        else:
+            # ── Summary metrics ───────────────────────────────────────────────
+            _n_races = len(_outcomes_raw)
+            _tp_won_n = sum(1 for r in _outcomes_raw if r.get("effective_tp_won"))
+            _tp_wr = round(100.0 * _tp_won_n / _n_races, 1) if _n_races else 0.0
+            _ptf_eligible = [r for r in _outcomes_raw if r.get("post_time_favorite_name")]
+            _ptf_won_n = sum(1 for r in _ptf_eligible if r.get("post_time_favorite_won"))
+            _ptf_wr = round(100.0 * _ptf_won_n / len(_ptf_eligible), 1) if _ptf_eligible else 0.0
+            _n_scr_tp = sum(1 for r in _outcomes_raw if r.get("original_tp_scratched"))
+
+            _sm1, _sm2, _sm3, _sm4 = st.columns(4)
+            _sm1.metric("Races", _n_races)
+            _sm2.metric(
+                "TP Win Rate (eff)",
+                f"{_tp_wr}%",
+                delta=f"{_tp_won_n} of {_n_races}",
+                delta_color="off",
+                help="Accuracy computed off effective TP; scratched originals excluded from miss count",
+            )
+            _sm3.metric(
+                "PTF Win Rate",
+                f"{_ptf_wr}%" if _ptf_eligible else "—",
+                delta=f"{_ptf_won_n} of {len(_ptf_eligible)}" if _ptf_eligible else "no odds",
+                delta_color="off",
+            )
+            _sm4.metric(
+                "Orig TP Scratched",
+                _n_scr_tp,
+                delta=f"{round(100*_n_scr_tp/_n_races,1)}% of races" if _n_races else "",
+                delta_color="off",
+            )
+
+            st.divider()
+
+            # ── Per-race table ────────────────────────────────────────────────
+            st.markdown("##### Per-Race Detail")
+            _display_rows = []
+            for _r in _outcomes_raw:
+                _tp_won_sym = "✓" if _r.get("effective_tp_won") else "✗"
+                _ptf_won_sym = (
+                    "✓" if _r.get("post_time_favorite_won")
+                    else ("✗" if _r.get("post_time_favorite_name") else "—")
+                )
+                _dist = _r.get("distance_f")
+                _dist_str = f"{_dist:.1f}f" if _dist else "?"
+                _tp_prob_str = (f"{_r.get('top_pick_win_prob'):.0%}"
+                                if _r.get("top_pick_win_prob") else "—")
+                _ptf_odds_str = (f"{_r.get('post_time_favorite_odds'):.2f}"
+                                 if _r.get("post_time_favorite_odds") else "—")
+                _w_odds_str = (f"{_r.get('winner_official_odds'):.2f}"
+                               if _r.get("winner_official_odds") else "—")
+                _tp_scr = bool(_r.get("original_tp_scratched"))
+                _eff_fin = _r.get("effective_tp_finish")
+                _tp_fin_disp = (
+                    "SCR" if _tp_scr
+                    else (str(int(_eff_fin)) if _eff_fin is not None else "—")
+                )
+                _display_rows.append({
+                    "Race":      format_race_label({
+                                     "track_abbrev": _r.get("track_code"),
+                                     "race_number":  _r.get("race_number"),
+                                     "card_date":    _r.get("race_date"),
+                                     "race_class":   _r.get("race_type"),
+                                 }),
+                    "Dist":      _dist_str,
+                    "Srf":       _r.get("surface_code") or "?",
+                    "Field":     _r.get("field_size") or "",
+                    "Tier":      _r.get("quality_tier") or "",
+                    "Orig TP":   _r.get("top_pick_name") or "—",
+                    "SCR":       "✓" if _tp_scr else "",
+                    "Eff TP":    _r.get("effective_tp_name") or _r.get("top_pick_name") or "—",
+                    "TP Prob":   _tp_prob_str,
+                    "TP Fin":    _tp_fin_disp,
+                    "TP Won":    _tp_won_sym,
+                    "PTF":       _r.get("post_time_favorite_name") or "—",
+                    "PTF Odds":  _ptf_odds_str,
+                    "PTF Won":   _ptf_won_sym,
+                    "Winner":    _r.get("winner_name") or "—",
+                    "W Odds":    _w_odds_str,
+                })
+
+            _cal_df = _pd.DataFrame(_display_rows)
+
+            def _style_outcomes(df: "_pd.DataFrame") -> "_pd.DataFrame":
+                styles = _pd.DataFrame("", index=df.index, columns=df.columns)
+                for _i, _row in df.iterrows():
+                    if _row.get("TP Won") == "✓":
+                        styles.at[_i, "TP Won"] = "color:#3fb950;font-weight:bold"
+                    elif _row.get("TP Won") == "✗":
+                        styles.at[_i, "TP Won"] = "color:#f85149"
+                    if _row.get("SCR") == "✓":
+                        styles.at[_i, "SCR"] = "color:#d29922"
+                    if _row.get("PTF Won") == "✓":
+                        styles.at[_i, "PTF Won"] = "color:#3fb950;font-weight:bold"
+                    elif _row.get("PTF Won") == "✗":
+                        styles.at[_i, "PTF Won"] = "color:#f85149"
+                return styles
+
+            _cal_styled = _cal_df.style.apply(_style_outcomes, axis=None)
+            st.dataframe(
+                _cal_styled,
+                use_container_width=True,
+                hide_index=True,
+                height=min(40 + 35 * len(_display_rows), 600),
+            )
+            st.caption(
+                f"Showing {len(_display_rows)} race(s) · "
+                "TP = model top pick · SCR = original TP scratched · "
+                "TP Won / TP Fin use effective TP when original scratched · "
+                "PTF = post-time market favorite · odds are decimal"
+            )
+
+            # ── Breakdown tables ──────────────────────────────────────────────
+            st.divider()
+            st.markdown("##### Breakdowns")
+
+            def _breakdown_table(rows: list[dict], key_fn, label: str) -> None:
+                buckets: dict[str, list] = {}
+                for _r in rows:
+                    _k = key_fn(_r)
+                    buckets.setdefault(_k, []).append(_r)
+                _bk_rows = []
+                for _k in sorted(buckets):
+                    _bk = buckets[_k]
+                    _bk_n   = len(_bk)
+                    _bk_won = sum(1 for x in _bk if x.get("effective_tp_won"))
+                    _bk_wr  = round(100 * _bk_won / _bk_n, 1) if _bk_n else 0
+                    _bk_scr = sum(1 for x in _bk if x.get("original_tp_scratched"))
+                    _bk_rows.append({
+                        label:      _k,
+                        "Races":    _bk_n,
+                        "TP Won":   _bk_won,
+                        "Win %":    f"{_bk_wr}%",
+                        "TP Scr":   _bk_scr,
+                    })
+                if _bk_rows:
+                    st.dataframe(_pd.DataFrame(_bk_rows), use_container_width=True,
+                                 hide_index=True)
+
+            _bk1, _bk2 = st.columns(2)
+            with _bk1:
+                st.markdown("###### By Surface")
+                _breakdown_table(
+                    _outcomes_raw,
+                    lambda r: r.get("surface_code") or "?",
+                    "Surface",
+                )
+                st.markdown("###### By Distance")
+                _breakdown_table(
+                    _outcomes_raw,
+                    lambda r: (
+                        "Sprint" if (r.get("distance_f") or 99) < 8.5
+                        else "Route"
+                    ),
+                    "Distance",
+                )
+            with _bk2:
+                st.markdown("###### By Field Size")
+                def _field_bucket(r: dict) -> str:
+                    f = r.get("field_size") or 0
+                    if f < 7:   return "Small (<7)"
+                    if f <= 10: return "Medium (7-10)"
+                    if f <= 14: return "Large (11-14)"
+                    return "Full (15+)"
+                _breakdown_table(_outcomes_raw, _field_bucket, "Field Size")
+
+                st.markdown("###### By Quality Tier")
+                _breakdown_table(
+                    _outcomes_raw,
+                    lambda r: r.get("quality_tier") or "?",
+                    "Tier",
+                )
+
+            _bk3_col1, _bk3_col2 = st.columns(2)
+            with _bk3_col1:
+                st.markdown("###### By Chaos Active")
+                _breakdown_table(
+                    _outcomes_raw,
+                    lambda r: "Chaos On" if r.get("chaos_active") else "Chaos Off",
+                    "Chaos",
+                )
+            with _bk3_col2:
+                st.markdown("###### By Orig TP Scratched")
+                _breakdown_table(
+                    _outcomes_raw,
+                    lambda r: "Scratched" if r.get("original_tp_scratched") else "Not Scratched",
+                    "Orig TP",
+                )
 
 # ── TAB 10: About & Help ───────────────────────────────────────────────────────
 with tab10:

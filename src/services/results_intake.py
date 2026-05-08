@@ -585,6 +585,39 @@ def ingest_results(
     }
 
 
+# ── Scratch-aware helpers ─────────────────────────────────────────────────────
+
+def get_effective_top_pick(
+    conn: sqlite3.Connection, run_id: str, card_id: int
+) -> dict | None:
+    """Return the first non-scratched entry by model rank for a score run.
+
+    Useful for any caller that needs the effective TP without running the full
+    evaluate_score_run pipeline.  Returns None when all entries are scratched
+    or no entry_scores exist for the run.
+    """
+    rows = conn.execute(
+        """SELECT es.entry_id, es.horse_name, es.rank, es.win_probability,
+                  COALESCE(rr.is_scratched, 0) AS is_scratched
+           FROM entry_scores es
+           LEFT JOIN race_results rr
+                  ON rr.entry_id = es.entry_id AND rr.card_id = ?
+           WHERE es.run_id = ?
+           ORDER BY es.rank""",
+        (card_id, run_id),
+    ).fetchall()
+
+    for row in rows:
+        if not row[4]:  # is_scratched == 0
+            return {
+                "entry_id":        row[0],
+                "horse_name":      row[1],
+                "rank":            row[2],
+                "win_probability": row[3],
+            }
+    return None
+
+
 # ── Model evaluation ──────────────────────────────────────────────────────────
 def evaluate_score_run(
     conn: sqlite3.Connection, run_id: str, card_id: int
@@ -674,11 +707,26 @@ def evaluate_score_run(
         next((r for r in active if r["finish_position"] == 1), None),
     )
 
-    top = data[0]
-    top_pick_won = bool(
-        winner_row and winner_row["horse_name"] == top["horse_name"]
+    top = data[0]  # rank=1; may be scratched if horse scratched after scoring
+    original_tp_scratched = bool(top.get("is_scratched"))
+
+    # Effective top pick: original TP when not scratched; otherwise first
+    # non-scratched entry by model rank.  Returns None only if all runners
+    # in the score run are confirmed scratched (degenerate edge case).
+    eff_top = top if not original_tp_scratched else next(
+        (r for r in data if not r.get("is_scratched")),
+        None,
     )
-    top_pick_finish = top.get("finish_position")
+    effective_tp_won = bool(
+        eff_top and winner_row and winner_row["horse_name"] == eff_top["horse_name"]
+    )
+    effective_tp_finish = eff_top.get("finish_position") if eff_top else None
+    effective_tp_rank   = eff_top.get("rank")            if eff_top else None
+
+    # Accuracy stats computed off effective TP so a scratched original pick
+    # doesn't count as a model miss.
+    top_pick_won    = effective_tp_won
+    top_pick_finish = effective_tp_finish if not original_tp_scratched else None
 
     # ML favorite: lowest morning-line odds among non-confirmed-scratches.
     # is_scratched=NULL (horse not in race_results) is treated as not-confirmed-scratch;
@@ -745,6 +793,12 @@ def evaluate_score_run(
         "top_pick":        top["horse_name"],
         "top_pick_finish": top_pick_finish,
         "top_pick_won":    top_pick_won,
+        # Scratch-aware effective TP fields
+        "original_tp_scratched": original_tp_scratched,
+        "effective_tp":          eff_top["horse_name"] if eff_top else None,
+        "effective_tp_rank":     effective_tp_rank,
+        "effective_tp_finish":   effective_tp_finish,
+        "effective_tp_won":      effective_tp_won,
         "ml_favorite_name":        ml_fav["horse_name"] if ml_fav else None,
         "post_time_favorite_name": ptf_fav["horse_name"] if ptf_fav else None,
         "post_time_favorite_won":  ptf_won,
@@ -763,6 +817,7 @@ _OUTCOMES_SQL = """
 WITH base AS (
     SELECT
         sr.run_id, sr.card_id, sr.run_timestamp, sr.model_type,
+        COALESCE(sr.chaos_active, sr.derby_override_active, 0) AS chaos_active,
         mr.model_name,
         t.abbrev  AS track_code,
         rc.card_date, rc.race_number, rc.distance_furlongs,
@@ -786,12 +841,32 @@ WITH base AS (
     WHERE EXISTS (SELECT 1 FROM race_results x WHERE x.card_id = sr.card_id)
 ),
 tp AS (
+    -- Original model rank-1 selection; may be scratched
     SELECT run_id,
            horse_name           AS top_pick_name,
            win_probability      AS top_pick_win_prob,
            finish_position      AS top_pick_finish_pos,
+           is_scratched         AS original_tp_scratched,
            CASE WHEN official_finish = 1 AND is_disqualified = 0 THEN 1 ELSE 0 END AS top_pick_won
     FROM base WHERE rank = 1
+),
+eff_tp_rk AS (
+    -- First non-scratched entry by model rank, per run
+    SELECT run_id, horse_name, rank AS original_rank, finish_position,
+           official_finish, is_disqualified,
+           ROW_NUMBER() OVER (PARTITION BY run_id ORDER BY rank) AS eff_rk
+    FROM base
+    WHERE is_scratched = 0
+),
+eff_tp AS (
+    -- Effective top pick: highest-ranked non-scratched entry
+    SELECT run_id,
+           horse_name      AS effective_tp_name,
+           original_rank   AS effective_tp_rank,
+           finish_position AS effective_tp_finish,
+           CASE WHEN official_finish = 1 AND is_disqualified = 0 THEN 1 ELSE 0 END
+               AS effective_tp_won
+    FROM eff_tp_rk WHERE eff_rk = 1
 ),
 winner AS (
     SELECT run_id,
@@ -825,8 +900,8 @@ mf AS (
     FROM ml_rk WHERE rk = 1
 ),
 meta AS (
-    SELECT DISTINCT run_id, card_id, run_timestamp, model_type, model_name,
-                    track_code, card_date, race_number, distance_furlongs,
+    SELECT DISTINCT run_id, card_id, run_timestamp, model_type, chaos_active,
+                    model_name, track_code, card_date, race_number, distance_furlongs,
                     surface, race_class, field_size
     FROM base
 )
@@ -839,12 +914,18 @@ SELECT
     meta.race_class                             AS race_type,
     meta.field_size,
     meta.model_type                             AS quality_tier,
+    meta.chaos_active,
     meta.model_name,
     meta.run_timestamp                          AS run_created_at,
     tp.top_pick_name,
     tp.top_pick_win_prob,
     tp.top_pick_finish_pos,
     tp.top_pick_won,
+    tp.original_tp_scratched,
+    eff_tp.effective_tp_name,
+    eff_tp.effective_tp_rank,
+    eff_tp.effective_tp_finish,
+    eff_tp.effective_tp_won,
     mf.ml_favorite_name,
     mf.ml_fav_finish_pos                        AS ml_favorite_finish_pos,
     CASE WHEN mf.ml_favorite_name = winner.winner_name THEN 1 ELSE 0 END AS ml_favorite_won,
@@ -855,6 +936,7 @@ SELECT
     winner.winner_official_odds
 FROM meta
 LEFT JOIN tp     ON tp.run_id     = meta.run_id
+LEFT JOIN eff_tp ON eff_tp.run_id = meta.run_id
 LEFT JOIN mf     ON mf.run_id     = meta.run_id
 LEFT JOIN ptf    ON ptf.run_id    = meta.run_id
 LEFT JOIN winner ON winner.run_id = meta.run_id
@@ -864,8 +946,10 @@ LIMIT ?
 
 _OUTCOMES_COLS = [
     "track_code", "race_date", "race_number", "distance_f", "surface_code",
-    "race_type", "field_size", "quality_tier", "model_name", "run_created_at",
+    "race_type", "field_size", "quality_tier", "chaos_active", "model_name", "run_created_at",
     "top_pick_name", "top_pick_win_prob", "top_pick_finish_pos", "top_pick_won",
+    "original_tp_scratched",
+    "effective_tp_name", "effective_tp_rank", "effective_tp_finish", "effective_tp_won",
     "ml_favorite_name", "ml_favorite_finish_pos", "ml_favorite_won",
     "post_time_favorite_name", "post_time_favorite_odds", "post_time_favorite_won",
     "winner_name", "winner_official_odds",
@@ -913,3 +997,257 @@ def load_results_summary(conn: sqlite3.Connection, card_id: int) -> dict:
     except Exception:
         pass
     return {"n_total": 0, "n_runners": 0, "ingested_at": None}
+
+
+# ── Race Review view + query helpers ──────────────────────────────────────────
+
+# DDL kept in sync with db/schema.sql and db/migrations/add_race_review_view.sql
+_RACE_REVIEW_VIEW_DDL = """
+DROP VIEW IF EXISTS race_review;
+CREATE VIEW race_review AS
+WITH ranked_live AS (
+    SELECT
+        es.run_id,
+        sr.card_id,
+        es.entry_id,
+        es.horse_name,
+        es.rank          AS model_rank,
+        es.win_probability,
+        es.value_score,
+        es.bet_tag,
+        ROW_NUMBER() OVER (
+            PARTITION BY es.run_id
+            ORDER BY
+                CASE WHEN COALESCE(rr.is_scratched, 0) = 1 THEN 1 ELSE 0 END,
+                es.rank ASC
+        ) AS effective_live_rank
+    FROM entry_scores es
+    JOIN  score_runs    sr  ON sr.run_id   = es.run_id
+    LEFT JOIN race_results rr
+           ON rr.entry_id = es.entry_id
+          AND rr.card_id  = sr.card_id
+),
+tops AS (
+    SELECT
+        rl.run_id,
+        rl.card_id,
+        MAX(CASE WHEN rl.model_rank = 1 THEN rl.horse_name  END)
+            AS original_tp,
+        MAX(CASE WHEN rl.model_rank = 1 THEN rl.entry_id    END)
+            AS original_tp_entry_id,
+        MAX(CASE WHEN rl.model_rank = 1
+                 THEN COALESCE(rr.is_scratched, 0) END)
+            AS original_tp_scratched,
+        MAX(CASE WHEN rl.effective_live_rank = 1 THEN rl.horse_name  END)
+            AS effective_tp,
+        MAX(CASE WHEN rl.effective_live_rank = 1 THEN rl.entry_id    END)
+            AS effective_tp_entry_id,
+        MAX(CASE WHEN rl.effective_live_rank = 1 THEN rl.model_rank  END)
+            AS effective_tp_rank,
+        MAX(CASE WHEN rl.effective_live_rank = 1 THEN rr.finish_position END)
+            AS effective_tp_finish,
+        MAX(CASE WHEN rl.effective_live_rank = 1
+                  AND rr.official_finish = 1
+                  AND COALESCE(rr.is_disqualified, 0) = 0
+                 THEN 1 ELSE 0 END)
+            AS effective_tp_won
+    FROM ranked_live rl
+    LEFT JOIN race_results rr
+           ON rr.entry_id = rl.entry_id
+          AND rr.card_id  = rl.card_id
+    GROUP BY rl.run_id, rl.card_id
+)
+SELECT
+    rc.card_id,
+    rc.card_date                                                    AS race_date,
+    t.abbrev                                                        AS track,
+    rc.race_number,
+    rc.surface,
+    rc.distance_furlongs,
+    CASE WHEN rc.distance_furlongs < 8.5 THEN 'sprint' ELSE 'route' END
+                                                                    AS dist_category,
+    COALESCE(rc.field_size,
+        (SELECT COUNT(*) FROM entries e
+         WHERE e.card_id = rc.card_id AND e.scratch_flag = 0))     AS field_size,
+    rc.race_class,
+    sr.run_id,
+    sr.model_id,
+    sr.model_type,
+    COALESCE(sr.chaos_active, sr.derby_override_active, 0)         AS chaos_active,
+    sr.chaos_intensity,
+    sr.quality_tier,
+    sr.run_timestamp,
+    tops.original_tp,
+    tops.original_tp_entry_id,
+    tops.original_tp_scratched,
+    tops.effective_tp,
+    tops.effective_tp_entry_id,
+    tops.effective_tp_rank,
+    tops.effective_tp_finish,
+    tops.effective_tp_won,
+    winner_h.name                                                   AS actual_winner,
+    winner_rr.entry_id                                              AS actual_winner_entry_id
+FROM score_runs sr
+JOIN  race_cards rc        ON rc.card_id         = sr.card_id
+JOIN  tracks     t         ON t.track_id         = rc.track_id
+LEFT JOIN tops             ON tops.run_id        = sr.run_id
+LEFT JOIN race_results winner_rr
+       ON winner_rr.card_id                      = rc.card_id
+      AND winner_rr.official_finish              = 1
+      AND COALESCE(winner_rr.is_scratched,    0) = 0
+      AND COALESCE(winner_rr.is_disqualified, 0) = 0
+LEFT JOIN horses winner_h  ON winner_h.horse_id  = winner_rr.horse_id
+"""
+
+_REVIEW_COLS = [
+    "card_id", "race_date", "track", "race_number", "surface", "distance_furlongs",
+    "dist_category", "field_size", "race_class", "run_id", "model_id", "model_type",
+    "chaos_active", "chaos_intensity", "quality_tier", "run_timestamp",
+    "original_tp", "original_tp_entry_id", "original_tp_scratched",
+    "effective_tp", "effective_tp_entry_id", "effective_tp_rank",
+    "effective_tp_finish", "effective_tp_won", "actual_winner", "actual_winner_entry_id",
+]
+
+_DETAIL_COLS = [
+    "model_rank", "horse_name", "post_position", "morning_line_odds",
+    "win_probability", "fair_odds", "value_score", "model_edge", "bet_tag",
+    "low_conf_bet_block", "is_scratched", "is_disqualified",
+    "finish_position", "official_finish", "official_odds_decimal", "beaten_lengths",
+    "chaos_score", "chaos_boost", "chaos_tier", "chaos_eligible",
+]
+
+
+def ensure_race_review_view(conn: sqlite3.Connection) -> None:
+    """Create (or replace) the race_review view.
+
+    Also ensures chaos columns exist on score_runs and entry_scores so the
+    view can reference them.  Idempotent — safe to call on every app start.
+    """
+    _chaos_ddl = [
+        "ALTER TABLE score_runs   ADD COLUMN chaos_active        INTEGER NOT NULL DEFAULT 0",
+        "ALTER TABLE score_runs   ADD COLUMN chaos_intensity     REAL",
+        "ALTER TABLE score_runs   ADD COLUMN field_entropy_score REAL",
+        "ALTER TABLE entry_scores ADD COLUMN chaos_score         REAL",
+        "ALTER TABLE entry_scores ADD COLUMN chaos_boost         REAL",
+        "ALTER TABLE entry_scores ADD COLUMN chaos_tier          TEXT",
+        "ALTER TABLE entry_scores ADD COLUMN chaos_eligible      INTEGER NOT NULL DEFAULT 0",
+    ]
+    for stmt in _chaos_ddl:
+        try:
+            conn.execute(stmt)
+        except Exception:
+            pass  # column already exists
+    try:
+        conn.commit()
+    except Exception:
+        pass
+    conn.executescript(_RACE_REVIEW_VIEW_DDL)
+
+
+def load_race_review(
+    conn: sqlite3.Connection,
+    *,
+    date_from:    str | None = None,
+    date_to:      str | None = None,
+    track:        str | None = None,
+    surface:      str | None = None,
+    dist_cat:     str | None = None,
+    field_min:    int | None = None,
+    field_max:    int | None = None,
+    model_type:   str | None = None,
+    chaos_active: int | None = None,
+    with_results: bool = False,
+    limit: int = 250,
+) -> list[dict]:
+    """Query race_review with optional filters.
+
+    Returns one dict per (race, score_run), most-recent first.
+    When with_results=True only rows where actual_winner is populated
+    (i.e. race_results have been ingested) are returned.
+    """
+    ensure_race_review_view(conn)
+    clauses: list[str] = []
+    params:  list      = []
+
+    if with_results:
+        clauses.append("actual_winner IS NOT NULL")
+    if date_from:
+        clauses.append("race_date >= ?")
+        params.append(date_from)
+    if date_to:
+        clauses.append("race_date <= ?")
+        params.append(date_to)
+    if track:
+        clauses.append("track = ?")
+        params.append(track)
+    if surface:
+        clauses.append("surface = ?")
+        params.append(surface)
+    if dist_cat:
+        clauses.append("dist_category = ?")
+        params.append(dist_cat)
+    if field_min is not None:
+        clauses.append("field_size >= ?")
+        params.append(field_min)
+    if field_max is not None:
+        clauses.append("field_size <= ?")
+        params.append(field_max)
+    if model_type:
+        clauses.append("model_type = ?")
+        params.append(model_type)
+    if chaos_active is not None:
+        clauses.append("chaos_active = ?")
+        params.append(int(chaos_active))
+
+    where  = ("WHERE " + " AND ".join(clauses)) if clauses else ""
+    sql    = (f"SELECT * FROM race_review {where} "
+              f"ORDER BY race_date DESC, run_timestamp DESC LIMIT ?")
+    params.append(limit)
+
+    try:
+        rows = conn.execute(sql, params).fetchall()
+        return [dict(zip(_REVIEW_COLS, r)) for r in rows]
+    except Exception:
+        return []
+
+
+def load_race_detail(
+    conn: sqlite3.Connection,
+    run_id: str,
+    card_id: int,
+) -> list[dict]:
+    """Return one row per runner merging entry_scores + race_results for one run.
+
+    Ordered by model rank.  Result columns are NULL for runners not matched in
+    race_results; is_scratched / is_disqualified default to 0 via COALESCE.
+    """
+    rows = conn.execute(
+        """SELECT
+               es.rank                              AS model_rank,
+               es.horse_name,
+               es.post_position,
+               es.morning_line_odds,
+               es.win_probability,
+               es.fair_odds,
+               es.value_score,
+               es.model_edge,
+               es.bet_tag,
+               es.low_conf_bet_block,
+               COALESCE(rr.is_scratched,    0)     AS is_scratched,
+               COALESCE(rr.is_disqualified, 0)     AS is_disqualified,
+               rr.finish_position,
+               rr.official_finish,
+               rr.official_odds_decimal,
+               rr.beaten_lengths,
+               es.chaos_score,
+               es.chaos_boost,
+               es.chaos_tier,
+               COALESCE(es.chaos_eligible,  0)     AS chaos_eligible
+           FROM entry_scores es
+           LEFT JOIN race_results rr
+                  ON rr.entry_id = es.entry_id AND rr.card_id = ?
+           WHERE es.run_id = ?
+           ORDER BY es.rank""",
+        (card_id, run_id),
+    ).fetchall()
+    return [dict(zip(_DETAIL_COLS, r)) for r in rows]
