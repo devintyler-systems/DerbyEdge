@@ -1394,3 +1394,265 @@ class TestTrailingDashStripping:
         assert by_pp[3]["morning_line"] == "3/1", (
             f"PP3 ML: {by_pp[3]['morning_line']!r}"
         )
+
+
+# ===========================================================================
+# Cross-page horse-block regression (Evangeline R6 / ZOOM ERIN PP7)
+#
+# When a horse-header appears at the bottom of one PDF page and its bare
+# program number is at the top of the next page, pdfplumber inserts footer
+# content in between.  Before the pre-filter fix, the bare-int peek saw the
+# footer line instead of "7" and rejected the candidate; PP7 was then skipped
+# because it had no matching horse-header above it.
+#
+# This fixture simulates the exact cross-page gap:
+#   ZOOM ERIN 23          ← horse-header, bottom of page 3
+#   [page footer lines]   ← brand, URL, page counter
+#   RECENT 5 WINS...      ← stats carryover (top of page 4)
+#   7                     ← bare program number
+#   PP7
+#   J: Elio J. Barrera ML 20
+#   T: Jervon Broussard
+# ===========================================================================
+
+_CROSS_PAGE_TEXT = """\
+5/7/26, 6:14 PM 1/ST BET - The Easy & Smart Way to Bet the Races
+EVANGELINE R 6
+1:45 PM 10 Horses ALW $28,000 1M Dirt / Fast
+FINAL
+REPLAY
+SHIPLAP 7/2
+1
+J: Gerardo Corrales ML 7/2
+PP1
+T: Joseph Saumell
+RECENT 5 WINS 2 TOP 3 4 More Info
+SMOKIN BOOTS 3
+2
+J: Jose Guerrero ML 3
+PP2
+T: Charles Livings
+RECENT 5 More Info
+BAYOU GOLD 5/2
+3
+J: Colby Hernandez ML 5/2
+PP3
+T: Wayne Catalano
+RECENT 5 More Info
+ROCKET FUEL 6
+4
+J: Jareth Loveberry ML 6
+PP4
+T: Keith Bourgeois
+RECENT 5 More Info
+MORNING STAR 8
+5
+J: Corey Lanerie ML 8
+PP5
+T: Todd Pletcher
+RECENT 5 More Info
+DELTA QUEEN 4
+6
+J: Joe Talamo ML 4
+PP6
+T: Brad Cox
+RECENT 5 More Info
+ZOOM ERIN 23
+5/7/26, 6:14 PM 1/ST BET - The Easy & Smart Way to Bet the Races
+https://legacy.1stbet.com
+3/5
+RECENT 5 WINS 0 TOP 3 1 More Info
+7
+PP7
+J: Elio J. Barrera ML 20
+T: Jervon Broussard
+RECENT 5 More Info
+LIGHTNING ROD 10
+8
+J: Flavien Prat ML 10
+PP8
+T: Mark Casse
+RECENT 5 More Info
+COTTON CANDY 15
+9
+J: Luis Quinonez ML 15
+PP9
+T: Steve Asmussen
+RECENT 5 More Info
+IRON FIST 9
+10
+J: Tyler Gaffalione ML 9
+PP10
+T: Todd Pletcher
+RECENT 5 More Info
+"""
+
+_EVA_R6_NAMES = {
+    "Shiplap", "Smokin Boots", "Bayou Gold", "Rocket Fuel", "Morning Star",
+    "Delta Queen", "Zoom Erin", "Lightning Rod", "Cotton Candy", "Iron Fist",
+}
+
+
+class TestCrossPageHorseBlock:
+    """Regression: horse-header at page bottom, program number at page top."""
+
+    def _run(self):
+        warnings: list[str] = []
+        runners = _parse_race_runners_1stbet_multiline(
+            _CROSS_PAGE_TEXT.splitlines(), warnings
+        )
+        return runners, warnings
+
+    def test_all_ten_runners_found(self):
+        runners, _ = self._run()
+        assert len(runners) == 10, (
+            f"Expected 10, got {len(runners)}: {[r['horse_name'] for r in runners]}"
+        )
+
+    def test_zoom_erin_pp7_present(self):
+        """PP7 ZOOM ERIN must be found despite page-footer between header and number."""
+        runners, _ = self._run()
+        by_pp = {r["post_position"]: r for r in runners}
+        assert 7 in by_pp, f"PP7 missing — runners: {[r['horse_name'] for r in runners]}"
+        assert by_pp[7]["horse_name"] == "Zoom Erin", (
+            f"PP7 horse: {by_pp[7]['horse_name']!r}"
+        )
+
+    def test_zoom_erin_fields(self):
+        runners, _ = self._run()
+        by_pp = {r["post_position"]: r for r in runners}
+        r7 = by_pp[7]
+        assert r7["jockey"] == "Elio J. Barrera", f"jockey: {r7['jockey']!r}"
+        assert r7["trainer"] == "Jervon Broussard", f"trainer: {r7['trainer']!r}"
+        assert r7["morning_line"] == "20/1", f"ML: {r7['morning_line']!r}"
+
+    def test_all_names_found(self):
+        runners, _ = self._run()
+        names = {r["horse_name"] for r in runners}
+        assert names == _EVA_R6_NAMES, (
+            f"Missing: {_EVA_R6_NAMES - names}  Extra: {names - _EVA_R6_NAMES}"
+        )
+
+    def test_post_positions_one_through_ten(self):
+        runners, _ = self._run()
+        pps = sorted(r["post_position"] for r in runners)
+        assert pps == list(range(1, 11)), f"Expected [1..10], got {pps}"
+
+    def test_no_duplicate_pp(self):
+        runners, _ = self._run()
+        pps = [r["post_position"] for r in runners]
+        assert len(pps) == len(set(pps)), f"Duplicate PPs: {pps}"
+
+    def test_page_footer_not_a_runner(self):
+        """Brand line, URL, page counter, and timestamp must not become runners."""
+        runners, _ = self._run()
+        names = {r["horse_name"] for r in runners}
+        assert not any("1stbet" in n.lower() for n in names)
+        assert not any("1/St Bet" in n for n in names)
+
+    def test_runners_around_page_break_intact(self):
+        """PP6 (Delta Queen, last before break) and PP8 (Lightning Rod, after) must parse."""
+        runners, _ = self._run()
+        by_pp = {r["post_position"]: r for r in runners}
+        assert by_pp[6]["horse_name"] == "Delta Queen"
+        assert by_pp[8]["horse_name"] == "Lightning Rod"
+
+
+class TestCrossPagePipeline:
+    """End-to-end parse_race_pdf() for the cross-page fixture."""
+
+    def _parse(self):
+        with patch("src.services.pdf_ingest._extract_text",
+                   return_value=_CROSS_PAGE_TEXT):
+            return parse_race_pdf(b"fake-pdf-bytes")
+
+    def test_ok(self):
+        assert self._parse()["ok"] is True
+
+    def test_canonical_runners_ten(self):
+        result = self._parse()
+        assert len(result["runners"]) == 10, (
+            f"Expected 10, got {len(result['runners'])}: "
+            f"{[r.get('horse_name') for r in result['runners']]}"
+        )
+
+    def test_zoom_erin_in_canonical(self):
+        result = self._parse()
+        names = {r["horse_name"] for r in result["runners"]}
+        assert "Zoom Erin" in names, f"Zoom Erin missing from: {names}"
+
+    def test_field_size_from_header(self):
+        """field_size must come from the header (10), not len(runners)."""
+        result = self._parse()
+        assert result["field_size"] == 10, f"field_size: {result['field_size']!r}"
+
+    def test_no_runner_count_warning_when_all_found(self):
+        """No mismatch warning expected — all 10 runners parsed."""
+        result = self._parse()
+        mismatch = [w for w in result["warnings"] if "Runner count mismatch" in w]
+        assert not mismatch, f"Unexpected mismatch warning: {mismatch}"
+
+
+# ===========================================================================
+# field_size mismatch warning
+#
+# When the parser finds fewer runners than the header field_size, a warning
+# must be emitted.  Previously the condition had ±1 tolerance so a 9-vs-10
+# miss was silently swallowed.
+# ===========================================================================
+
+_MISSING_ONE_TEXT = """\
+5/7/26, 4:38 PM 1/ST BET - The Easy & Smart Way to Bet the Races
+HORSESHOE INDIANAPOLIS R 5
+1:14 PM 3 Horses ALW $38,000 1M Dirt / Fast
+FINAL
+REPLAY
+YOTOWIN 9
+1
+J: Evin A. Roman ML 8
+PP1
+T: Rogelio Labra
+RECENT 5 More Info
+INNISFREE LASS 8
+2
+J: Alberto Burgos ML 9/2
+PP2
+T: John Haran
+RECENT 5 More Info
+"""
+
+
+class TestFieldSizeMismatchWarning:
+    """parse_race_pdf must warn when parsed runner count < header field_size."""
+
+    def _parse(self, text: str):
+        with patch("src.services.pdf_ingest._extract_text", return_value=text):
+            return parse_race_pdf(b"fake-pdf-bytes")
+
+    def test_warning_emitted_when_short(self):
+        """Header says 3 horses; only 2 parsed → mismatch warning required."""
+        result = self._parse(_MISSING_ONE_TEXT)
+        mismatch = [w for w in result["warnings"] if "Runner count mismatch" in w]
+        assert mismatch, (
+            f"Expected a mismatch warning; got warnings={result['warnings']}"
+        )
+
+    def test_warning_mentions_missed_runner(self):
+        result = self._parse(_MISSING_ONE_TEXT)
+        mismatch = [w for w in result["warnings"] if "Runner count mismatch" in w]
+        assert mismatch and "missed" in mismatch[0].lower(), (
+            f"Warning should mention missed runner: {mismatch}"
+        )
+
+    def test_no_warning_when_exact_match(self):
+        """Header says 7 horses; all 7 parsed → no mismatch warning."""
+        result = self._parse(_IND_R5_LIVE_RAW_TEXT)
+        mismatch = [w for w in result["warnings"] if "Runner count mismatch" in w]
+        assert not mismatch, f"Unexpected mismatch warning: {mismatch}"
+
+    def test_field_size_still_from_header(self):
+        """field_size must reflect the header count even when runners are missing."""
+        result = self._parse(_MISSING_ONE_TEXT)
+        assert result["field_size"] == 3, (
+            f"field_size should be 3 (from header), got {result['field_size']!r}"
+        )

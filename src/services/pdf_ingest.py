@@ -618,6 +618,12 @@ def _parse_race_runners_1stbet_multiline(lines: list[str], warnings: list[str]) 
     guard against false positives (e.g. "HORSESHOE INDIANAPOLIS R 5" is rejected
     because its next sibling is the race-info line, not a bare integer).
 
+    Cross-page blocks: when a horse-header appears at the bottom of one page
+    and its program-number line is at the top of the next, pdfplumber inserts
+    page-footer content (brand line, URL, page counter, timestamp) between them.
+    A pre-filter strips those footer lines before any scanning so the bare-integer
+    confirmation works normally across page boundaries.
+
     Candidate parsers run in parallel via _pick_best_1stbet_parse:
       - this function (horse-header anchor) → primary for line-preserving exports
       - _parse_race_runners_1stbet_fallback (PP anchor) → primary for compact exports
@@ -625,14 +631,13 @@ def _parse_race_runners_1stbet_multiline(lines: list[str], warnings: list[str]) 
     runners:    list[dict] = []
     seen_pp:    set[int]   = set()
     seen_names: set[str]   = set()
-    n = len(lines)
     candidates_found = 0
 
     _re_digit    = re.compile(r'^\d{1,2}$')
     _re_pp_lbl   = re.compile(r'^PP(\d{1,2})$', re.I)
     _re_jockey   = re.compile(r'^J:\s+(.+?)(?:\s+ML\s+(\S+))?\s*$', re.I)
     _re_trainer  = re.compile(r'^T:\s+(.+?)\s*$', re.I)
-    _re_ml_line  = re.compile(r'^ML\s+(\S+)', re.I)   # standalone "ML <odds>" line
+    _re_ml_line  = re.compile(r'^ML\s+(\S+)', re.I)
     _re_noise    = re.compile(r'1/ST\s+BET\s*[-–]|https?://', re.I)
     _re_pgcnt    = re.compile(r'^\d+/\d+$')
     # Lines that mark end-of-block content (no more J:/T:/ML to find)
@@ -640,6 +645,30 @@ def _parse_race_runners_1stbet_multiline(lines: list[str], warnings: list[str]) 
         r'^(?:RECENT\b|More\s+Info\b|FINAL\b|REPLAY\b)',
         re.I,
     )
+    # Broader footer pattern for pre-filtering only: catches brand text without
+    # a trailing dash, standalone URLs, and bare timestamp lines.
+    _re_footer   = re.compile(
+        r'1/ST\s+BET'                                    # brand (with or without dash)
+        r'|https?://\S+'                                  # any URL
+        r'|\d{1,2}/\d{1,2}/\d{2,4},?\s+\d{1,2}:\d{2}',  # timestamp "M/D/YY, H:MM"
+        re.I,
+    )
+
+    # ── Pre-filter: remove page-footer lines before scanning ─────────────
+    # A horse-header at the bottom of a page may be separated from its bare
+    # program number at the top of the next page by footer content.  Stripping
+    # those lines first collapses the cross-page gap:
+    #   "ZOOM ERIN 23 → [brand line] → [page counter] → 7"
+    #   becomes  "ZOOM ERIN 23 → 7"  and the bare-int confirmation succeeds.
+    _clean: list[str] = []
+    for _raw in lines:
+        _s = _raw.strip()
+        if _s and (_re_footer.search(_s) or _re_pgcnt.match(_s)):
+            _log.debug("1stbet multiline: pre-filter dropped footer %r", _s)
+            continue
+        _clean.append(_raw)
+    lines = _clean
+    n = len(lines)
 
     def _candidate_horse(line: str) -> tuple[str, str | None] | None:
         """Return (name_part, odds_str_or_None) if line is an ALL-CAPS horse header.
@@ -697,6 +726,22 @@ def _parse_race_runners_1stbet_multiline(lines: list[str], warnings: list[str]) 
             j += 1
         return (j, lines[j].strip()) if j < n else (n, "")
 
+    def _next_conf(start: int) -> tuple[int, str]:
+        """Like _next_nonempty but also skips stop/separator lines.
+
+        Used only for the bare-int confirmation peek so that a stats-carryover
+        line appearing at the top of a new page (e.g. "RECENT 5 WINS 0 TOP 3 1
+        More Info") does not block confirmation of a cross-page horse block.
+        """
+        j = start
+        while j < n:
+            s = lines[j].strip()
+            if not s or _re_stop.match(s) or s in ('-', '–', '—'):
+                j += 1
+                continue
+            return j, s
+        return n, ""
+
     i = 0
     while i < n:
         raw = lines[i].strip()
@@ -715,7 +760,9 @@ def _parse_race_runners_1stbet_multiline(lines: list[str], warnings: list[str]) 
         _log.debug("1stbet multiline: candidate  %r  (odds=%r)", raw_name, raw_odds)
 
         # ── Confirm: next non-empty line must be bare program number 1-30 ─
-        j, nxt = _next_nonempty(i)
+        # Use _next_conf (skips stop/separator lines) so stats-carryover lines
+        # at the top of a new page do not block cross-page horse blocks.
+        j, nxt = _next_conf(i)
         if j >= n or not _re_digit.match(nxt):
             _log.debug(
                 "1stbet multiline: REJECTED %r — next=%r is not a bare integer",
@@ -1287,7 +1334,13 @@ def parse_race_pdf(pdf_bytes: bytes) -> dict[str, Any]:
 
     # Validate parsed runner count against the header field size (1/ST BET path)
     if field_size_hdr and runners:
-        if not (field_size_hdr - 1 <= len(runners) <= field_size_hdr + 1):
+        if len(runners) < field_size_hdr:
+            warnings.append(
+                f"Runner count mismatch: header says {field_size_hdr} horses "
+                f"but only {len(runners)} were parsed — "
+                f"a runner may have been missed (check for cross-page horse blocks)."
+            )
+        elif len(runners) > field_size_hdr + 1:
             warnings.append(
                 f"Runner count mismatch: header says {field_size_hdr} horses "
                 f"but {len(runners)} were parsed — verify the PDF format."
