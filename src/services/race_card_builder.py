@@ -38,13 +38,18 @@ def norm_surface(raw: str) -> str:
 def parse_distance_yards(s: str | None) -> int:
     """Convert a human distance string to integer yards.
 
-    Handles: "6f", "6 furlongs", "1 Mile", "1 1/16 Miles",
+    Handles: "4 1/2F", "4½F", "6f", "6 furlongs", "1 Mile", "1 1/16 Miles",
              "1.25m", "6.5", plain numbers (assumed furlongs if < 100).
     Falls back to DEFAULT_DISTANCE_YARDS (1760 = 1 mile) on parse failure.
     """
     if not s:
         return DEFAULT_DISTANCE_YARDS
-    s = s.strip().lower()
+    s = s.strip().lower().replace("½", " 1/2")
+
+    # "4 1/2f" / "4 1/2 furlongs" — must precede generic digit+f match
+    m = re.match(r"^(\d+)\s+1/2\s*f", s)
+    if m:
+        return int(round((float(m.group(1)) + 0.5) * 220))
 
     # "6f" / "6.5f" / "6 furlongs"
     m = re.match(r"^(\d+(?:\.\d+)?)\s*f", s)

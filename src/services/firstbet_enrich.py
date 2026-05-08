@@ -126,10 +126,14 @@ def _days_since(past_iso: str | None, race_iso: str) -> int | None:
 # ── Distance helper ────────────────────────────────────────────────────────────
 
 def _parse_distance_yards(dist_text: str | None) -> int | None:
-    """Parse 'NF', 'NM', 'N 1/16 Miles' etc. to integer yards."""
+    """Parse 'NF', 'N 1/2F', 'NM', 'N 1/16 Miles' etc. to integer yards."""
     if not dist_text:
         return None
-    s = dist_text.strip().lower()
+    s = dist_text.strip().lower().replace("½", " 1/2")
+    # "4 1/2f" — must precede generic digit+f match
+    m = re.match(r'^(\d+)\s+1/2\s*f', s)
+    if m:
+        return int(round((float(m.group(1)) + 0.5) * 220))
     m = re.match(r'^(\d+(?:\.\d+)?)\s*f', s)
     if m:
         return int(round(float(m.group(1)) * 220))

@@ -199,6 +199,11 @@ def _extract_track(text: str) -> tuple[str | None, str | None]:
 
 
 def _extract_distance(text: str) -> str | None:
+    # "4 1/2F", "4½F" — must come before the generic digit+F pattern
+    # because "4 1/2F" contains "2F" which the generic regex would match first.
+    m = re.search(r'(\d+)\s*(?:1/2|½)\s*(?:furlongs?|f\b)', text, re.I)
+    if m:
+        return f"{float(m.group(1)) + 0.5:g} Furlongs"
     m = re.search(r'(\d+(?:\.\d+)?)\s*(?:furlongs?|f\b)', text, re.I)
     if m:
         return f"{float(m.group(1)):g} Furlongs"
@@ -403,14 +408,21 @@ def _extract_1stbet_header(text: str) -> dict[str, Any]:
     if m:
         result["distance_text"] = f"1 {m.group(1)} Miles"
     else:
-        # Simple: "1M", "8F", "8.5F" — no \b after unit; unit may touch next word
-        m = re.search(r'(?<!\d)(\d+(?:\.\d+)?)\s*([FM])(?!\d)', dist_src)
+        # "4 1/2F", "4½F" — must come before the generic digit+F pattern so that
+        # "4 1/2F" is not mis-matched as "2F" (the first digit-F the regex finds).
+        m = re.search(r'(?<!\d)(\d+)\s*(?:1/2|½)\s*F(?!\d)', dist_src, re.I)
         if m:
-            val, unit = float(m.group(1)), m.group(2).upper()
-            if unit == "M" and 0.25 <= val <= 3.0:
-                result["distance_text"] = "1 Mile" if val == 1.0 else f"{val} Miles"
-            elif unit == "F" and 2.0 <= val <= 20.0:
-                result["distance_text"] = f"{val:g} Furlongs"
+            val = float(m.group(1)) + 0.5
+            result["distance_text"] = f"{val:g} Furlongs"
+        else:
+            # Simple: "1M", "8F", "8.5F" — no \b after unit; unit may touch next word
+            m = re.search(r'(?<!\d)(\d+(?:\.\d+)?)\s*([FM])(?!\d)', dist_src)
+            if m:
+                val, unit = float(m.group(1)), m.group(2).upper()
+                if unit == "M" and 0.25 <= val <= 3.0:
+                    result["distance_text"] = "1 Mile" if val == 1.0 else f"{val} Miles"
+                elif unit == "F" and 2.0 <= val <= 20.0:
+                    result["distance_text"] = f"{val:g} Furlongs"
 
     # Surface — no \b required; unit may be immediately adjacent ("1MDirt")
     m = re.search(r'(Dirt|Turf|Synthetic|Tapeta)', dist_src, re.I)
