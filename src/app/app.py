@@ -28,7 +28,7 @@ from src.utils.db import (
     ensure_score_runs_columns,
     entry_scores_cols,
 )
-from src.derbyedge.odds_math import kelly_fraction, kelly_fraction_full
+from src.derbyedge.odds_math import kelly_fraction, kelly_fraction_full, recommend_bet_size
 from src.derbyedge.chaos_patch import apply_derby_chaos_patch
 from src.services.odds_intake import (
     delete_odds_for_race,
@@ -702,17 +702,25 @@ def _add_kelly(
     kelly_pct: float,           # slider value 1-25 where 25 = full Kelly
     live_odds_by_pp: dict,
 ) -> pd.DataFrame:
-    """Add kelly_frac / stake_dollar and debug columns to df.
+    """Add kelly_frac, stake_dollar (raw), playable_stake, and stake_reason columns.
 
     kelly_pct is a fractional-Kelly multiplier: kelly_pct/25 of the full
     Kelly fraction is used.  Every horse's stake scales proportionally —
     halving kelly_pct halves all stakes.  A hard safety cap of 25% of
     bankroll applies regardless of kelly_pct.
 
-    Debug columns added: full_kelly_frac, dec_odds_used, raw_stake.
+    Columns added:
+      full_kelly_frac — uncapped full Kelly f*
+      kelly_frac      — scaled + capped Kelly fraction
+      dec_odds_used   — decimal odds used for Kelly calculation
+      raw_stake       — pre-cap Kelly dollar amount (debug)
+      stake_dollar    — post-cap Kelly dollar amount (raw, not rounded)
+      playable_stake  — stake_dollar floored to valid WIN denomination
+      stake_reason    — human-readable rounding note or "PASS"
     """
     multiplier   = kelly_pct / _KELLY_SLIDER_MAX   # e.g. 10/25 = 0.40
-    full_fracs, kelly_fracs, dec_odds_col, raw_stakes, stakes = [], [], [], [], []
+    full_fracs, kelly_fracs, dec_odds_col = [], [], []
+    raw_stakes, stakes, playable, reasons = [], [], [], []
 
     for _, row in df.iterrows():
         model_p = float(row.get("win_probability") or 0)
@@ -721,7 +729,8 @@ def _add_kelly(
 
         if model_p <= 0:
             full_fracs.append(0.0); kelly_fracs.append(0.0)
-            dec_odds_col.append(None); raw_stakes.append(0.0); stakes.append(0.0)
+            dec_odds_col.append(None); raw_stakes.append(0.0)
+            stakes.append(0.0); playable.append(0.0); reasons.append("No model prob")
             continue
 
         if lo and lo.get("decimal_odds"):
@@ -732,18 +741,28 @@ def _add_kelly(
 
         if dec is None:
             full_fracs.append(0.0); kelly_fracs.append(0.0)
-            dec_odds_col.append(None); raw_stakes.append(0.0); stakes.append(0.0)
+            dec_odds_col.append(None); raw_stakes.append(0.0)
+            stakes.append(0.0); playable.append(0.0); reasons.append("No odds")
             continue
 
         full_kf = kelly_fraction_full(model_p, dec)           # uncapped
         raw_kf  = full_kf * multiplier                        # scaled, pre-cap
         kf      = round(min(raw_kf, _KELLY_SAFETY_CAP), 4)   # safety cap
 
+        raw_dollar   = round(raw_kf * bankroll, 4)
+        stake_raw    = round(kf * bankroll, 2)
+        rec          = recommend_bet_size(stake_raw, "WIN")
+
         full_fracs.append(full_kf)
         kelly_fracs.append(kf)
         dec_odds_col.append(round(dec, 3))
-        raw_stakes.append(round(raw_kf * bankroll, 4))
-        stakes.append(round(kf * bankroll, 2))
+        raw_stakes.append(raw_dollar)
+        stakes.append(stake_raw)
+        playable.append(rec["rounded_stake"])
+        if rec["recommendation"] == "PASS":
+            reasons.append(f"PASS — below ${rec['min_bet']:.2f} WIN min")
+        else:
+            reasons.append(f"Rounded ↓ to {rec['recommendation']} WIN")
 
     out = df.copy()
     out["full_kelly_frac"] = full_fracs
@@ -751,6 +770,8 @@ def _add_kelly(
     out["dec_odds_used"]   = dec_odds_col
     out["raw_stake"]       = raw_stakes
     out["stake_dollar"]    = stakes
+    out["playable_stake"]  = playable
+    out["stake_reason"]    = reasons
     return out
 
 
@@ -1018,7 +1039,7 @@ with st.sidebar:
     st.divider()
     st.markdown("**Bankroll & Kelly**")
     bankroll = st.number_input(
-        "Bankroll ($)", min_value=0, max_value=1_000_000, value=1_000, step=100,
+        "Bankroll ($)", min_value=0, max_value=1_000_000, value=100, step=100,
         help="Total betting bankroll. Stake$ = bankroll × capped Kelly fraction.",
     )
     kelly_pct = st.slider(
@@ -1343,7 +1364,7 @@ with tab1:
         if chaos_on:
             optional_cols += ["chaos_win_prob", "dark_horse_flag", "dark_horse_tier"]
         if has_kelly:
-            optional_cols += ["kelly_frac", "stake_dollar"]
+            optional_cols += ["kelly_frac", "playable_stake", "stake_reason"]
 
         tbl = disp[base_cols + [c for c in optional_cols if c in disp.columns]].copy()
 
@@ -1378,16 +1399,20 @@ with tab1:
             display_cols["Chaos%"] = "Chaos%"
         if chaos_on and "dark_horse_tier" in tbl.columns:
             display_cols["dark_horse_tier"] = "DH Tier"
-        if has_kelly and "stake_dollar" in tbl.columns:
-            tbl["Stake$"] = tbl["stake_dollar"].apply(
-                lambda x: f"${x:,.2f}" if x > 0 else "—"
+        if has_kelly and "playable_stake" in tbl.columns:
+            tbl["Stake$"] = tbl["playable_stake"].apply(
+                lambda x: f"${x:,.2f}" if x > 0 else "PASS"
             )
+            if "stake_reason" in tbl.columns:
+                tbl["Stake Reason"] = tbl["stake_reason"]
+                display_cols["Stake Reason"] = "Stake Reason"
             display_cols["Stake$"] = "Stake$"
             odds_src = "live odds" if has_live_odds else "ML proxy"
             st.markdown(
                 f'<div class="info-banner">💰 Kelly stakes — bankroll ${bankroll:,} · '
                 f'fraction {kelly_pct}/25 ({kelly_pct/25*100:.0f}% of full Kelly) · '
-                f'odds source: <strong>{odds_src}</strong></div>',
+                f'odds source: <strong>{odds_src}</strong> · '
+                f'WIN denomination: $2 min, $2 step</div>',
                 unsafe_allow_html=True,
             )
 
@@ -1418,31 +1443,34 @@ with tab1:
             _dbg_cols = [
                 "horse_name", "win_probability", "market_implied_prob",
                 "dec_odds_used", "full_kelly_frac", "kelly_frac",
-                "raw_stake", "stake_dollar",
+                "raw_stake", "stake_dollar", "playable_stake", "stake_reason",
             ]
             _dbg = disp[[c for c in _dbg_cols if c in disp.columns]].copy()
             _dbg.rename(columns={
-                "horse_name":        "Horse",
-                "win_probability":   "Model p",
+                "horse_name":          "Horse",
+                "win_probability":     "Model p",
                 "market_implied_prob": "Market p",
-                "dec_odds_used":     "Dec Odds",
-                "full_kelly_frac":   "Full Kelly f*",
-                "kelly_frac":        "Final Kelly f",
-                "raw_stake":         "Raw Stake ($)",
-                "stake_dollar":      "Stake$ (final)",
+                "dec_odds_used":       "Dec Odds",
+                "full_kelly_frac":     "Full Kelly f*",
+                "kelly_frac":          "Kelly f (capped)",
+                "raw_stake":           "Raw Stake ($)",
+                "stake_dollar":        "Kelly $ (raw)",
+                "playable_stake":      "Playable $",
+                "stake_reason":        "Reason",
             }, inplace=True)
             st.dataframe(
                 _dbg,
                 use_container_width=True,
                 hide_index=True,
                 column_config={
-                    "Model p":       st.column_config.NumberColumn(format="%.4f"),
-                    "Market p":      st.column_config.NumberColumn(format="%.4f"),
-                    "Dec Odds":      st.column_config.NumberColumn(format="%.3f"),
-                    "Full Kelly f*": st.column_config.NumberColumn(format="%.6f"),
-                    "Final Kelly f": st.column_config.NumberColumn(format="%.4f"),
-                    "Raw Stake ($)": st.column_config.NumberColumn(format="%.4f"),
-                    "Stake$ (final)":st.column_config.NumberColumn(format="%.2f"),
+                    "Model p":          st.column_config.NumberColumn(format="%.4f"),
+                    "Market p":         st.column_config.NumberColumn(format="%.4f"),
+                    "Dec Odds":         st.column_config.NumberColumn(format="%.3f"),
+                    "Full Kelly f*":    st.column_config.NumberColumn(format="%.6f"),
+                    "Kelly f (capped)": st.column_config.NumberColumn(format="%.4f"),
+                    "Raw Stake ($)":    st.column_config.NumberColumn(format="%.4f"),
+                    "Kelly $ (raw)":    st.column_config.NumberColumn(format="%.2f"),
+                    "Playable $":       st.column_config.NumberColumn(format="%.2f"),
                 },
             )
 

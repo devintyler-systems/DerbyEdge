@@ -607,6 +607,38 @@ def ingest_results(
                  )""",
             (cid, cid, cid),
         )
+
+        # Normalize "silent scratches": a horse present in race_results with
+        # is_scratched=0 but no finish when other runners in the same race have
+        # finish positions. This happens when results CSVs list scratched horses
+        # with a blank finish column but no explicit scratch flag.
+        conn.execute(
+            """UPDATE race_results SET is_scratched = 1
+               WHERE card_id = ?
+                 AND is_scratched = 0
+                 AND finish_position IS NULL
+                 AND official_finish IS NULL
+                 AND EXISTS (
+                     SELECT 1 FROM race_results rr2
+                     WHERE rr2.card_id = ?
+                       AND rr2.is_scratched = 0
+                       AND rr2.finish_position IS NOT NULL
+                 )""",
+            (cid, cid),
+        )
+        # Propagate newly-identified scratches to entries
+        conn.execute(
+            """UPDATE entries SET scratch_flag = 1
+               WHERE card_id = ?
+                 AND scratch_flag = 0
+                 AND entry_id IN (
+                     SELECT entry_id FROM race_results
+                     WHERE card_id = ? AND is_scratched = 1
+                       AND entry_id IS NOT NULL
+                 )""",
+            (cid, cid),
+        )
+
     if processed_card_ids:
         conn.commit()
 
@@ -1203,6 +1235,36 @@ def ensure_race_review_view(conn: sqlite3.Connection) -> None:
                      SELECT 1 FROM race_results rr
                      WHERE rr.entry_id = entries.entry_id
                        AND rr.card_id  = entries.card_id
+                 )"""
+        )
+        conn.commit()
+    except Exception:
+        pass
+
+    # Normalize "silent scratches" in race_results: is_scratched=0 with no finish
+    # when other runners in the same race have finish positions. Handles results
+    # CSVs that include scratched horses with a blank finish but no scratch column.
+    try:
+        conn.execute(
+            """UPDATE race_results SET is_scratched = 1
+               WHERE is_scratched = 0
+                 AND finish_position IS NULL
+                 AND official_finish IS NULL
+                 AND EXISTS (
+                     SELECT 1 FROM race_results rr2
+                     WHERE rr2.card_id = race_results.card_id
+                       AND rr2.is_scratched = 0
+                       AND rr2.finish_position IS NOT NULL
+                 )"""
+        )
+        conn.execute(
+            """UPDATE entries SET scratch_flag = 1
+               WHERE scratch_flag = 0
+                 AND entry_id IN (
+                     SELECT rr.entry_id FROM race_results rr
+                     WHERE rr.card_id = entries.card_id
+                       AND rr.is_scratched = 1
+                       AND rr.entry_id IS NOT NULL
                  )"""
         )
         conn.commit()

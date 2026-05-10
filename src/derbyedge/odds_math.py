@@ -174,6 +174,67 @@ def kelly_fraction_full(model_prob: float, decimal_odds: float) -> float:
     return round(max(f, 0.0), 6)
 
 
+# ---- Bet denomination / playable stake rounding ----------------------------
+
+# (min_bet, step) in USD. Conservative: always round DOWN to nearest step.
+# WIN/PLACE/SHOW use $2 pari-mutuel minimum; exotics vary by track.
+BET_DENOMINATION: dict[str, tuple[float, float]] = {
+    "WIN":        (2.00, 2.00),
+    "PLACE":      (2.00, 2.00),
+    "SHOW":       (2.00, 2.00),
+    "EXACTA":     (1.00, 1.00),
+    "TRIFECTA":   (0.50, 0.50),
+    "SUPERFECTA": (0.10, 0.10),
+    "DEFAULT":    (1.00, 1.00),
+}
+
+
+def recommend_bet_size(
+    raw_kelly_stake: float,
+    bet_type: str = "WIN",
+) -> dict:
+    """Round a raw Kelly dollar stake to the nearest valid betting denomination.
+
+    Conservative rounding: floors to the nearest allowed increment so the
+    recommended amount is always achievable at the window.
+
+    Returns a dict:
+      raw_stake      — input stake (unmodified)
+      rounded_stake  — floored to nearest step; 0.0 when below minimum
+      min_bet        — track minimum for this bet type
+      step           — valid increment for this bet type
+      is_bettable    — True when rounded_stake >= min_bet
+      recommendation — human-readable: "$2.00" or "PASS"
+    """
+    key = bet_type.upper()
+    min_bet, step = BET_DENOMINATION.get(key, BET_DENOMINATION["DEFAULT"])
+
+    if raw_kelly_stake < min_bet:
+        return {
+            "raw_stake":      round(raw_kelly_stake, 4),
+            "rounded_stake":  0.0,
+            "min_bet":        min_bet,
+            "step":           step,
+            "is_bettable":    False,
+            "recommendation": "PASS",
+        }
+
+    # Floor to nearest step (avoid float drift with epsilon guard)
+    steps_down = int(raw_kelly_stake / step + 1e-9)
+    rounded = round(steps_down * step, 2)
+    if rounded > raw_kelly_stake + 1e-9:
+        rounded = round((steps_down - 1) * step, 2)
+
+    return {
+        "raw_stake":      round(raw_kelly_stake, 4),
+        "rounded_stake":  rounded,
+        "min_bet":        min_bet,
+        "step":           step,
+        "is_bettable":    rounded >= min_bet,
+        "recommendation": f"${rounded:.2f}",
+    }
+
+
 def bet_tag(model_prob: float, market_prob: float, decimal_odds: float,
             min_edge: float = 0.20, strong_edge: float = 0.40) -> str:
     e = edge(model_prob, market_prob)

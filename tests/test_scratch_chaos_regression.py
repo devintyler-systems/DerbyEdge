@@ -17,7 +17,9 @@ import pytest
 from tests.conftest import insert_minimal_race
 from src.services.results_intake import (
     evaluate_score_run,
+    ensure_race_review_view,
     get_effective_top_pick,
+    ingest_results,
     load_outcomes_frame,
     load_race_review,
 )
@@ -220,3 +222,126 @@ class TestLoadOutcomesFrame:
         rows = load_outcomes_frame(mem_conn)
         assert len(rows) > 0
         assert rows[0]["original_tp_scratched"] == 1
+
+
+# ── Suite 6: "silent scratch" normalization (CT R9 / EVD R7 pattern) ─────────
+#
+# Regression for two 2026-05-07 races where the results CSV listed the original
+# TP with a blank finish column and no explicit scratch flag, producing a
+# race_results row with is_scratched=0, finish_position=NULL, official_finish=NULL.
+# The normalization pass (added in ingest_results and ensure_race_review_view)
+# must detect this pattern and fix is_scratched=1 so downstream scratch logic
+# works correctly.
+
+class TestSilentScratchNormalization:
+    def _insert_silent_scratch_results(self, conn, ids):
+        """Insert race_results as a CSV-ingest without an explicit scratch column.
+
+        Rank-1 (Alpha = original TP) has is_scratched=0 but no finish, mimicking
+        a results file that omits the scratch column and just leaves finish blank.
+        Ranks 2-5 have valid finish positions.
+        """
+        # Rank-1: "silent scratch" — is_scratched=0 but no finish (CT R9 / EVD R7 pattern)
+        conn.execute(
+            """INSERT INTO race_results
+                   (card_id, entry_id, horse_id, official_finish, finish_position,
+                    is_scratched, ingested_at)
+               VALUES (?, ?, ?, NULL, NULL, 0, '2026-05-07T18:00:00Z')""",
+            (ids["card_id"], ids["entry_ids"][0], ids["horse_ids"][0]),
+        )
+        # Ranks 2-5: normal finishers
+        for i in range(1, 5):
+            conn.execute(
+                """INSERT INTO race_results
+                       (card_id, entry_id, horse_id, official_finish, finish_position,
+                        is_scratched, ingested_at)
+                   VALUES (?, ?, ?, ?, ?, 0, '2026-05-07T18:00:00Z')""",
+                (ids["card_id"], ids["entry_ids"][i], ids["horse_ids"][i], i, i),
+            )
+        conn.commit()
+
+    def test_ingest_normalization_fixes_silent_scratch_in_race_results(self, mem_conn):
+        """After ingest backfill, race_results.is_scratched=1 for the silent-scratch row."""
+        ids = insert_minimal_race(mem_conn)
+        self._insert_silent_scratch_results(mem_conn, ids)
+
+        # Simulate the post-ingest normalization (called inside ingest_results).
+        # Here we call the startup backfill variant which exercises the same SQL.
+        ensure_race_review_view(mem_conn)
+
+        row = mem_conn.execute(
+            "SELECT is_scratched FROM race_results WHERE entry_id = ?",
+            (ids["entry_ids"][0],),
+        ).fetchone()
+        assert row is not None
+        assert row[0] == 1, "Silent-scratch row should be normalized to is_scratched=1"
+
+    def test_entries_scratch_flag_propagated_after_normalization(self, mem_conn):
+        ids = insert_minimal_race(mem_conn)
+        self._insert_silent_scratch_results(mem_conn, ids)
+        ensure_race_review_view(mem_conn)
+
+        row = mem_conn.execute(
+            "SELECT scratch_flag FROM entries WHERE entry_id = ?",
+            (ids["entry_ids"][0],),
+        ).fetchone()
+        assert row is not None
+        assert row[0] == 1, "entries.scratch_flag must be 1 after silent-scratch normalization"
+
+    def test_original_tp_scratched_via_evaluate_score_run(self, mem_conn):
+        """evaluate_score_run must set original_tp_scratched=True for the CT R9 / EVD R7 pattern."""
+        ids = insert_minimal_race(mem_conn)
+        self._insert_silent_scratch_results(mem_conn, ids)
+        ensure_race_review_view(mem_conn)
+
+        result = evaluate_score_run(mem_conn, ids["run_id"], ids["card_id"])
+        assert result is not None
+        assert result["original_tp_scratched"] is True, (
+            "Original TP (Alpha) is a silent scratch — original_tp_scratched must be True"
+        )
+        assert result["effective_tp"] == "Bravo", (
+            "Effective TP must shift to rank-2 when rank-1 is a silent scratch"
+        )
+
+    def test_original_tp_scratched_via_race_review_view(self, mem_conn):
+        """race_review view must show original_tp_scratched=1 for the CT R9 / EVD R7 pattern."""
+        ids = insert_minimal_race(mem_conn)
+        self._insert_silent_scratch_results(mem_conn, ids)
+        # load_race_review calls ensure_race_review_view internally
+        rows = load_race_review(mem_conn, with_results=True)
+        assert len(rows) == 1
+        assert rows[0]["original_tp"] == "Alpha"
+        assert rows[0]["original_tp_scratched"] == 1
+        assert rows[0]["effective_tp"] == "Bravo"
+
+    def test_outcomes_frame_original_tp_scratched_after_normalization(self, mem_conn):
+        """load_outcomes_frame must reflect original_tp_scratched=1 after normalization."""
+        ids = insert_minimal_race(mem_conn)
+        self._insert_silent_scratch_results(mem_conn, ids)
+        ensure_race_review_view(mem_conn)
+
+        rows = load_outcomes_frame(mem_conn)
+        assert len(rows) > 0
+        assert rows[0]["original_tp_scratched"] == 1
+        assert rows[0]["effective_tp_name"] == "Bravo"
+
+    def test_non_silent_scratch_not_affected(self, mem_conn):
+        """A horse with is_scratched=0 AND a valid finish must not be re-marked as scratched."""
+        ids = insert_minimal_race(mem_conn)
+        # All horses finish normally — no silent scratches
+        for i in range(5):
+            conn_exec = mem_conn.execute(
+                """INSERT INTO race_results
+                       (card_id, entry_id, horse_id, official_finish, finish_position,
+                        is_scratched, ingested_at)
+                   VALUES (?, ?, ?, ?, ?, 0, '2026-05-07T18:00:00Z')""",
+                (ids["card_id"], ids["entry_ids"][i], ids["horse_ids"][i], i + 1, i + 1),
+            )
+        mem_conn.commit()
+        ensure_race_review_view(mem_conn)
+
+        count = mem_conn.execute(
+            "SELECT COUNT(*) FROM race_results WHERE card_id=? AND is_scratched=1",
+            (ids["card_id"],),
+        ).fetchone()[0]
+        assert count == 0, "No horse should be marked scratched when all have valid finishes"
