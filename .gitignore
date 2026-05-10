@@ -76,3 +76,4 @@ samples/
 # Stray malformed files from bad path pastes (Windows path-separator artifacts)
 C*
 !tests/conftest.py
+!src/**/*.py
