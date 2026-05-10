@@ -60,6 +60,8 @@ import sqlite3
 from datetime import datetime, timezone
 from typing import Any
 
+from src.derbyedge.tracks import resolve_track as _resolve_track
+
 # ── Column alias sets ─────────────────────────────────────────────────────────
 RACE_DATE_ALIASES  = {"race_date", "date", "race_dt"}
 TRACK_CODE_ALIASES = {"track_code", "track", "trk", "track_abbrev"}
@@ -347,6 +349,12 @@ def _normalize_result_row(row: dict) -> dict:
 
 
 # ── DB lookup helpers ─────────────────────────────────────────────────────────
+def _resolve_track_code(raw: str) -> str:
+    """Return canonical track code for raw; falls back to raw uppercased if unresolved."""
+    res = _resolve_track(track_code=raw, track_name=raw)
+    return res["track_code"] or raw.strip().upper()
+
+
 def _find_card_id(
     conn: sqlite3.Connection,
     track_code: str,
@@ -414,7 +422,8 @@ def preview_results_match(
 
     for row in parsed_rows:
         row = _normalize_result_row(row)
-        key = (row["track_code"], row["race_date"], row["race_number"])
+        resolved_tc = _resolve_track_code(row["track_code"])
+        key = (resolved_tc, row["race_date"], row["race_number"])
 
         if key not in card_cache:
             cid = _find_card_id(conn, *key)
@@ -423,14 +432,14 @@ def preview_results_match(
                 seen_race_keys.add(key)
                 if cid:
                     races_found.append({
-                        "track_code":  row["track_code"],
+                        "track_code":  resolved_tc,
                         "race_date":   row["race_date"],
                         "race_number": row["race_number"],
                         "card_id":     cid,
                     })
                 else:
                     races_missing.append({
-                        "track_code":  row["track_code"],
+                        "track_code":  resolved_tc,
                         "race_date":   row["race_date"],
                         "race_number": row["race_number"],
                     })
@@ -497,7 +506,8 @@ def ingest_results(
 
     for row in parsed_rows:
         row = _normalize_result_row(row)
-        key = (row["track_code"], row["race_date"], row["race_number"])
+        resolved_tc = _resolve_track_code(row["track_code"])
+        key = (resolved_tc, row["race_date"], row["race_number"])
         if key not in card_cache:
             card_cache[key] = _find_card_id(conn, *key)
         card_id = card_cache[key]
@@ -505,7 +515,8 @@ def ingest_results(
         if card_id is None:
             n_unmatched_race += 1
             warnings.append(
-                f"Race not in DB: {row['track_code']} R{row['race_number']} {row['race_date']}"
+                f"Race not in DB: {resolved_tc} R{row['race_number']} {row['race_date']}"
+                + (f" (raw track_code={row['track_code']!r})" if resolved_tc != row["track_code"] else "")
             )
             continue
 
@@ -575,6 +586,30 @@ def ingest_results(
             )
 
     conn.commit()
+
+    # Back-fill: entries with no race_results row are pre-ingest scratches — but only
+    # when at least one non-scratched result was ingested for that race (meaning the full
+    # field was processed and the absent horse was truly scratched, not just un-ingested).
+    processed_card_ids = {cid for cid in card_cache.values() if cid is not None}
+    for cid in processed_card_ids:
+        conn.execute(
+            """UPDATE entries SET scratch_flag = 1
+               WHERE card_id = ?
+                 AND scratch_flag = 0
+                 AND EXISTS (
+                     SELECT 1 FROM race_results rr
+                     WHERE rr.card_id = ? AND rr.is_scratched = 0
+                 )
+                 AND NOT EXISTS (
+                     SELECT 1 FROM race_results rr
+                     WHERE rr.entry_id = entries.entry_id
+                       AND rr.card_id = ?
+                 )""",
+            (cid, cid, cid),
+        )
+    if processed_card_ids:
+        conn.commit()
+
     return {
         "n_inserted":        n_inserted,
         "n_unmatched_race":  n_unmatched_race,
@@ -598,8 +633,9 @@ def get_effective_top_pick(
     """
     rows = conn.execute(
         """SELECT es.entry_id, es.horse_name, es.rank, es.win_probability,
-                  COALESCE(rr.is_scratched, 0) AS is_scratched
+                  COALESCE(rr.is_scratched, e.scratch_flag, 0) AS is_scratched
            FROM entry_scores es
+           JOIN  entries e ON e.entry_id = es.entry_id
            LEFT JOIN race_results rr
                   ON rr.entry_id = es.entry_id AND rr.card_id = ?
            WHERE es.run_id = ?
@@ -639,7 +675,7 @@ def evaluate_score_run(
     except Exception:
         return None
 
-    # Fetch prediction + result rows
+    # Fetch prediction + result rows; check entries.scratch_flag for pre-ingest scratches
     rows = conn.execute(
         """SELECT
                es.rank,
@@ -652,11 +688,12 @@ def evaluate_score_run(
                es.market_implied_prob,
                rr.finish_position,
                rr.official_finish,
-               rr.is_scratched,
+               COALESCE(rr.is_scratched, e.scratch_flag, 0) AS is_scratched,
                rr.is_disqualified,
                rr.official_odds_decimal,
                rr.beaten_lengths
            FROM entry_scores es
+           JOIN  entries e ON e.entry_id = es.entry_id
            LEFT JOIN race_results rr ON es.entry_id = rr.entry_id
                                      AND rr.card_id = ?
            WHERE es.run_id = ?
@@ -828,14 +865,15 @@ WITH base AS (
         ) AS field_size,
         es.rank, es.horse_name, es.win_probability, es.morning_line_odds,
         rr.finish_position, rr.official_finish,
-        COALESCE(rr.is_scratched,    0) AS is_scratched,
-        COALESCE(rr.is_disqualified, 0) AS is_disqualified,
+        COALESCE(rr.is_scratched, e.scratch_flag, 0) AS is_scratched,
+        COALESCE(rr.is_disqualified, 0)             AS is_disqualified,
         rr.official_odds_decimal
     FROM score_runs sr
     JOIN model_registry mr ON sr.model_id   = mr.model_id
     JOIN race_cards     rc ON sr.card_id     = rc.card_id
     JOIN tracks          t ON rc.track_id    = t.track_id
     JOIN entry_scores   es ON es.run_id      = sr.run_id
+    JOIN entries         e ON e.entry_id     = es.entry_id
     LEFT JOIN race_results rr
            ON rr.entry_id = es.entry_id AND rr.card_id = sr.card_id
     WHERE EXISTS (SELECT 1 FROM race_results x WHERE x.card_id = sr.card_id)
@@ -1015,14 +1053,18 @@ WITH ranked_live AS (
         es.win_probability,
         es.value_score,
         es.bet_tag,
+        -- Scratch flag: prefer race_results (post-ingest), fall back to
+        -- entries.scratch_flag so pre-ingest scratches are detected too.
+        COALESCE(rr.is_scratched, e.scratch_flag, 0) AS is_scratched,
         ROW_NUMBER() OVER (
             PARTITION BY es.run_id
             ORDER BY
-                CASE WHEN COALESCE(rr.is_scratched, 0) = 1 THEN 1 ELSE 0 END,
+                CASE WHEN COALESCE(rr.is_scratched, e.scratch_flag, 0) = 1 THEN 1 ELSE 0 END,
                 es.rank ASC
         ) AS effective_live_rank
     FROM entry_scores es
     JOIN  score_runs    sr  ON sr.run_id   = es.run_id
+    JOIN  entries        e  ON e.entry_id  = es.entry_id
     LEFT JOIN race_results rr
            ON rr.entry_id = es.entry_id
           AND rr.card_id  = sr.card_id
@@ -1035,8 +1077,8 @@ tops AS (
             AS original_tp,
         MAX(CASE WHEN rl.model_rank = 1 THEN rl.entry_id    END)
             AS original_tp_entry_id,
-        MAX(CASE WHEN rl.model_rank = 1
-                 THEN COALESCE(rr.is_scratched, 0) END)
+        -- Use pre-computed is_scratched from ranked_live (includes entries.scratch_flag)
+        MAX(CASE WHEN rl.model_rank = 1 THEN rl.is_scratched END)
             AS original_tp_scratched,
         MAX(CASE WHEN rl.effective_live_rank = 1 THEN rl.horse_name  END)
             AS effective_tp,
@@ -1093,7 +1135,7 @@ JOIN  tracks     t         ON t.track_id         = rc.track_id
 LEFT JOIN tops             ON tops.run_id        = sr.run_id
 LEFT JOIN race_results winner_rr
        ON winner_rr.card_id                      = rc.card_id
-      AND winner_rr.official_finish              = 1
+      AND winner_rr.finish_position              = 1
       AND COALESCE(winner_rr.is_scratched,    0) = 0
       AND COALESCE(winner_rr.is_disqualified, 0) = 0
 LEFT JOIN horses winner_h  ON winner_h.horse_id  = winner_rr.horse_id
@@ -1141,6 +1183,28 @@ def ensure_race_review_view(conn: sqlite3.Connection) -> None:
         conn.commit()
     except Exception:
         pass
+
+    # Idempotent startup back-fill: entries absent from race_results for an already-ingested
+    # race (one with at least one non-scratched result) were scratched pre-ingest.
+    # The is_scratched=0 guard prevents marking all horses as scratched in a race where
+    # only a single scratched-horse result row exists (e.g. a scratch notification ingest).
+    try:
+        conn.execute(
+            """UPDATE entries SET scratch_flag = 1
+               WHERE scratch_flag = 0
+                 AND card_id IN (
+                     SELECT DISTINCT card_id FROM race_results WHERE is_scratched = 0
+                 )
+                 AND NOT EXISTS (
+                     SELECT 1 FROM race_results rr
+                     WHERE rr.entry_id = entries.entry_id
+                       AND rr.card_id  = entries.card_id
+                 )"""
+        )
+        conn.commit()
+    except Exception:
+        pass
+
     conn.executescript(_RACE_REVIEW_VIEW_DDL)
 
 
@@ -1200,8 +1264,16 @@ def load_race_review(
         params.append(int(chaos_active))
 
     where  = ("WHERE " + " AND ".join(clauses)) if clauses else ""
-    sql    = (f"SELECT * FROM race_review {where} "
-              f"ORDER BY race_date DESC, run_timestamp DESC LIMIT ?")
+    # Deduplicate: return only the most-recent score_run per race card.
+    # _rn is intentionally excluded from _REVIEW_COLS so zip drops it.
+    sql    = (
+        f"SELECT * FROM ("
+        f"  SELECT *, ROW_NUMBER() OVER"
+        f"    (PARTITION BY card_id ORDER BY run_timestamp DESC) AS _rn"
+        f"  FROM race_review {where}"
+        f") WHERE _rn = 1"
+        f" ORDER BY race_date DESC, run_timestamp DESC LIMIT ?"
+    )
     params.append(limit)
 
     try:
@@ -1233,8 +1305,8 @@ def load_race_detail(
                es.model_edge,
                es.bet_tag,
                es.low_conf_bet_block,
-               COALESCE(rr.is_scratched,    0)     AS is_scratched,
-               COALESCE(rr.is_disqualified, 0)     AS is_disqualified,
+               COALESCE(rr.is_scratched, e.scratch_flag, 0) AS is_scratched,
+               COALESCE(rr.is_disqualified, 0)              AS is_disqualified,
                rr.finish_position,
                rr.official_finish,
                rr.official_odds_decimal,
@@ -1244,6 +1316,7 @@ def load_race_detail(
                es.chaos_tier,
                COALESCE(es.chaos_eligible,  0)     AS chaos_eligible
            FROM entry_scores es
+           JOIN  entries e ON e.entry_id = es.entry_id
            LEFT JOIN race_results rr
                   ON rr.entry_id = es.entry_id AND rr.card_id = ?
            WHERE es.run_id = ?

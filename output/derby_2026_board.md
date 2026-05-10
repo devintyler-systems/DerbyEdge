@@ -6,18 +6,18 @@
 |-------|-------|
 | Model type | `seed_only_baseline` |
 | Version | `1.0.0-seed-only` |
-| Score timestamp | 2026-04-29T08:42:27Z |
-| Model ID | 1 |
+| Score timestamp | 2026-05-10T01:10:21Z |
+| Model ID | 30 |
 | Race | 2026 Kentucky Derby (G1) · Churchill Downs · 2026-05-02 |
-| Total horses | 20 |
+| Total horses | 10 |
 | Bet-tagged | 0 (none) |
-| Underlay-tagged | 5 (Renegade, Commandment, Chief Wallabee, The Puma, Emerging Market) |
-| Low-conf BET blocked | 2 (Intrepido, Six Speed) |
-| Top win probability | Renegade 13.4% (fair 6.4-1) |
-| Top value score | Intrepido +0.028 (neutral) |
-| Kendall tau vs market | 0.4908 |
-| Mean abs edge | 0.0217 |
-| Low-confidence entries | 16 of 20 (dist_starts <= 1; distance_fit unreliable) |
+| Underlay-tagged | 4 (General Issue, Spurs Up, Head Lad, Sisyphus) |
+| Low-conf BET blocked | 2 (Iceteca, Blameitonthefun) |
+| Top win probability | General Issue 16.8% (fair 4.9-1) |
+| Top value score | Blameitonthefun +0.034 (neutral) |
+| Kendall tau vs market | 1.0000 |
+| Mean abs edge | 0.0189 |
+| Low-confidence entries | 10 of 10 (dist_starts <= 1; distance_fit unreliable) |
 
 ---
 
@@ -27,26 +27,16 @@
 
 | Rank | Horse | Post | Trainer | Jockey | ML | Win% | Fair | PaceFit | Form | SuDist | Edge | Tag | Conf |
 |------|-------|------|---------|--------|----|------|------|---------|------|--------|------|-----|------|
-| 1 | **Renegade** | 1 | Todd Pletcher | Irad Ortiz Jr. | 4-1 | 13.4% | 6.4-1 | 0.750 | 1.000 | 0.928 | -0.021 | ~~UL~~ | MED |
-| 2 | **Further Ado** | 18 | Brad Cox | John Velazquez | 6-1 | 13.2% | 6.5-1 | 0.750 | 0.626 | 0.867 | +0.021 | -- | MED |
-| 3 | **Commandment** | 6 | Brad Cox | Luis Saez | 6-1 | 6.7% | 13.9-1 | 0.550 | 0.775 | 0.811 | -0.044 | ~~UL~~ | MED |
-| 4 | **So Happy** | 8 | Mark Glatt | Mike Smith | 15-1 | 4.4% | 21.9-1 | 0.650 | 0.526 | 0.491 | -0.005 | -- | LOW! |
-| 5 | **Danon Bourbon** | 7 | Manabu Ikezoe | Atsuya Nishimura | 20-1 | 4.3% | 22.0-1 | 0.650 | 0.526 | 0.491 | +0.006 | -- | LOW! |
-| 6 | **Incredibolt** | 11 | Riley Mott | Jaime Torres | 20-1 | 4.3% | 22.0-1 | 0.650 | 0.526 | 0.491 | +0.006 | -- | LOW! |
-| 7 | **Silent Tactic** | 13 | Mark Casse | Cristian Torres | 20-1 | 4.3% | 22.0-1 | 0.650 | 0.526 | 0.491 | +0.006 | -- | LOW! |
-| 8 | **Potente** | 14 | Bob Baffert | Juan Hernandez | 20-1 | 4.3% | 22.0-1 | 0.650 | 0.526 | 0.491 | +0.006 | -- | LOW! |
-| 9 | **Fulleffort** | 20 | Brad Cox | Tyler Gaffalione | 20-1 | 4.3% | 22.0-1 | 0.650 | 0.526 | 0.491 | +0.006 | -- | LOW! |
-| 10 | **Albus** | 2 | Riley Mott | Manny Franco | 30-1 | 4.3% | 22.2-1 | 0.650 | 0.526 | 0.491 | +0.018 | -- | LOW! |
-| 11 | **Litmus Test** | 4 | Bob Baffert | Martin Garcia | 30-1 | 4.3% | 22.2-1 | 0.650 | 0.526 | 0.491 | +0.018 | -- | LOW! |
-| 12 | **Right To Party** | 5 | Kenny McPeek | Chris Elliott | 30-1 | 4.3% | 22.2-1 | 0.650 | 0.526 | 0.491 | +0.018 | -- | LOW! |
-| 13 | **Wonder Dean** | 10 | Daisuke Takayanagi | Ryusei Sakai | 30-1 | 4.3% | 22.2-1 | 0.650 | 0.526 | 0.491 | +0.018 | -- | LOW! |
-| 14 | **Pavlovian** | 16 | Doug O'Neill | Edward Maldonado | 30-1 | 4.3% | 22.2-1 | 0.650 | 0.526 | 0.491 | +0.018 | -- | LOW! |
-| 15 | **Golden Tempo** | 19 | Cherie deVaux | Jose Ortiz | 30-1 | 4.3% | 22.2-1 | 0.650 | 0.526 | 0.491 | +0.018 | -- | LOW! |
-| 16 | **Intrepido** | 3 | Jeff Mullins | Hector Berrios | 50-1 | 4.3% | 22.3-1 | 0.650 | 0.526 | 0.491 | +0.028 | --[B] | LOW! |
-| 17 | **Six Speed** | 17 | Bhupat Seemar | Brian Hernandez Jr. | 50-1 | 4.3% | 22.3-1 | 0.650 | 0.526 | 0.491 | +0.028 | --[B] | LOW! |
-| 18 | **Chief Wallabee** | 12 | Bill Mott | Junior Alvarado | 8-1 | 3.2% | 30.1-1 | 0.900 | 0.299 | 0.226 | -0.054 | ~~UL~~ | LOW! |
-| 19 | **The Puma** | 9 | Gustavo Delgado | Javier Castellano | 10-1 | 2.1% | 46.6-1 | 0.750 | 0.290 | 0.136 | -0.050 | ~~UL~~ | LOW! |
-| 20 | **Emerging Market** | 15 | Chad Brown | Flavien Prat | 15-1 | 0.7% | 148.0-1 | 0.600 | 0.278 | 0.000 | -0.042 | ~~UL~~ | MED |
+| 1 | **General Issue** | 3 | Ronney W. Brown | Warren Ebow Iii | 4-1 | 16.8% | 4.9-1 | 0.650 | 0.500 | 0.500 | -0.029 | ~~UL~~ | LOW! |
+| 2 | **Spurs Up** | 5 | Michael E. Jones, Jr. | Jeiron Barbosa | 4-1 | 13.6% | 6.3-1 | 0.650 | 0.500 | 0.500 | -0.025 | ~~UL~~ | LOW! |
+| 3 | **Head Lad** | 7 | Ronney W. Brown | Moises Santaella | 5-1 | 12.6% | 6.9-1 | 0.650 | 0.500 | 0.500 | -0.022 | ~~UL~~ | LOW! |
+| 4 | **Sisyphus** | 4 | Adam King | Christian Hiraldo | 6-1 | 11.8% | 7.5-1 | 0.650 | 0.500 | 0.500 | -0.019 | ~~UL~~ | LOW! |
+| 5 | **English Painter** | 9 | None | Gerald Almodovar | 9-1 | 8.9% | 10.3-1 | 0.650 | 0.500 | 0.500 | +0.000 | -- | LOW! |
+| 6 | **Ascendance** | 2 | Jesus Rodriguez | Jose Mauricio | 11-1 | 8.1% | 11.3-1 | 0.650 | 0.500 | 0.500 | +0.007 | -- | LOW! |
+| 7 | **Gran Andrews** | 1 | Tyler S. Shanley | Reshawn Latchman | 13-1 | 7.7% | 12.1-1 | 0.650 | 0.500 | 0.500 | +0.013 | -- | LOW! |
+| 8 | **Rhumjar** | 10 | Sherry L. Jackson | Walter Cullum | 13-1 | 7.7% | 12.1-1 | 0.650 | 0.500 | 0.500 | +0.013 | -- | LOW! |
+| 9 | **Iceteca** | 8 | Timothy Shanley | Denis Vicente Araujo | 21-1 | 6.7% | 14.0-1 | 0.650 | 0.500 | 0.500 | +0.026 | --[B] | LOW! |
+| 10 | **Blameitonthefun** | 6 | Timothy Shanley | Joe Stokes | 31-1 | 6.2% | 15.1-1 | 0.650 | 0.500 | 0.500 | +0.034 | --[B] | LOW! |
 
 ### Low-Confidence Entries
 
@@ -54,22 +44,16 @@ These horses have `dist_starts <= 1`; their distance_fit score is based on `stam
 
 | Horse | Post | Dist Starts | Additional Missing Flags |
 |-------|------|-------------|--------------------------|
-| So Happy | 8 | 0 | dist_fit_single_start |
-| Danon Bourbon | 7 | 0 | dist_fit_single_start |
-| Incredibolt | 11 | 0 | dist_fit_single_start |
-| Silent Tactic | 13 | 0 | dist_fit_single_start |
-| Potente | 14 | 0 | dist_fit_single_start |
-| Fulleffort | 20 | 0 | dist_fit_single_start |
-| Albus | 2 | 0 | dist_fit_single_start |
-| Litmus Test | 4 | 0 | dist_fit_single_start |
-| Right To Party | 5 | 0 | dist_fit_single_start |
-| Wonder Dean | 10 | 0 | dist_fit_single_start |
-| Pavlovian | 16 | 0 | dist_fit_single_start |
-| Golden Tempo | 19 | 0 | dist_fit_single_start |
-| Intrepido | 3 | 0 | dist_fit_single_start |
-| Six Speed | 17 | 0 | dist_fit_single_start |
-| Chief Wallabee | 12 | 2 | dist_fit_single_start |
-| The Puma | 9 | 2 | dist_fit_single_start |
+| General Issue | 3 | 0 | dist_fit_single_start |
+| Spurs Up | 5 | 0 | dist_fit_single_start |
+| Head Lad | 7 | 0 | dist_fit_single_start |
+| Sisyphus | 4 | 0 | dist_fit_single_start |
+| English Painter | 9 | 0 | dist_fit_single_start |
+| Ascendance | 2 | 0 | dist_fit_single_start |
+| Gran Andrews | 1 | 0 | dist_fit_single_start |
+| Rhumjar | 10 | 0 | dist_fit_single_start |
+| Iceteca | 8 | 0 | dist_fit_single_start |
+| Blameitonthefun | 6 | 0 | dist_fit_single_start |
 
 ---
 
@@ -87,21 +71,21 @@ These horses have `dist_starts <= 1`; their distance_fit score is based on `stam
 
 | Feature | Weight | Tier |
 |---------|--------|------|
-| `distance_fit` | 0.1320 | DEGRADED |
-| `pace_fit_score` | 0.1080 | IMPLEMENTED |
-| `derby_override_score` | 0.0900 | DEGRADED |
-| `speed_best_3` | 0.0880 | DEGRADED |
-| `surface_fit` | 0.0880 | DEGRADED |
+| `speed_best_3` | 0.1000 | DEGRADED |
+| `pace_fit_score` | 0.0975 | IMPLEMENTED |
+| `distance_fit` | 0.0935 | DEGRADED |
+| `speed_last` | 0.0875 | IMPLEMENTED |
+| `surface_fit` | 0.0765 | DEGRADED |
 
 ### Calibration
 
 | Parameter | Value |
 |-----------|-------|
 | Method | temperature-scaled softmax |
-| Temperature | 4.15 |
+| Temperature | 20.0 |
 | Calibration target | overround-adjusted morning line |
 | Sum of win probabilities | 1.000000 |
-| KL divergence vs market | 0.1573 |
+| KL divergence vs market | 0.0330 |
 
 ### Model Limitations
 

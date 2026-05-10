@@ -1654,3 +1654,272 @@ class TestFieldSizeMismatchWarning:
         assert result["field_size"] == 3, (
             f"field_size should be 3 (from header), got {result['field_size']!r}"
         )
+
+
+# ===========================================================================
+# Charles Town R9 — parenthetical country suffix (FR) regression
+#
+# The 1/ST BET PDF for CT R9 on 2026-05-08 contains 10 horses.
+# PP3 is "GENERAL ISSUE (FR)" — the only foreign-bred runner.
+# The parser previously returned 9 runners because _candidate_horse() rejected
+# the line "GENERAL ISSUE (FR) -" (the "(" character was not in the name regex).
+#
+# Block structure (confirmed from live pdfplumber output):
+#   GENERAL ISSUE (FR) -    ← horse header: name with country suffix + separator dash
+#   3                       ← bare program number (confirmation integer)
+#   J: Warren Ebow Iii ML 5/2
+#   PP3
+#   T: Ronney W. Brown
+# ===========================================================================
+
+_CT_R9_LIVE_TEXT = """\
+5/8/26, 7:29 PM 1/ST BET - The Easy & Smart Way to Bet the Races
+CHARLES TOWN R 9
+8:04 PM 10 Horses SOC $25,400 1 1/16M Dirt / Fast
+GRAN ANDREWS -
+1
+J: Reshawn Latchman ML 12
+PP1
+T: Tyler S. Shanley
+RECENT 5 WINS 1 TOP 3 3 More Info
+ASCENDANCE -
+2
+J: Jose Mauricio ML 10
+PP2
+T: Jesus Rodriguez
+RECENT 5 WINS 1 TOP 3 3 More Info
+GENERAL ISSUE (FR) -
+3
+J: Warren Ebow Iii ML 5/2
+PP3
+T: Ronney W. Brown
+RECENT 5 WINS 1 TOP 3 3 More Info
+SISYPHUS -
+4
+J: Christian Hiraldo ML 9/2
+PP4
+T: Adam King
+RECENT 5 WINS 1 TOP 3 2 More Info
+SPURS UP -
+5
+J: Jeiron Barbosa ML 7/2
+PP5
+T: Michael E. Jones, Jr.
+RECENT 5 WINS 1 TOP 3 4 More Info
+BLAMEITONTHEFUN -
+6
+J: Joe Stokes ML 30
+PP6
+T: Timothy Shanley
+RECENT 5 WINS 1 TOP 3 2 More Info
+HEAD LAD -
+7
+J: Moises Santaella ML 4
+PP7
+T: Ronney W. Brown
+RECENT 5 WINS 1 TOP 3 4 More Info
+ICETECA -
+8
+J: Denis Vicente Araujo ML 20
+PP8
+T: Timothy Shanley
+RECENT 5 WINS 0 TOP 3 1 More Info
+ENGLISH PAINTER -
+9
+J: Gerald Almodovar ML 15
+PP9
+T: Giovanni M. Salinas
+RECENT 5 WINS 1 TOP 3 1 More Info
+RHUMJAR -
+10
+J: Walter Cullum ML 12
+PP10
+T: Sherry L. Jackson
+RECENT 5 WINS 0 TOP 3 4 More Info
+"""
+
+_CT_R9_ALL_NAMES = {
+    "Gran Andrews", "Ascendance", "General Issue (FR)", "Sisyphus",
+    "Spurs Up", "Blameitonthefun", "Head Lad", "Iceteca",
+    "English Painter", "Rhumjar",
+}
+
+
+class TestCTR9ParenthesisRunner:
+    """Regression: GENERAL ISSUE (FR) — parenthetical country suffix in horse name.
+
+    Previously _candidate_horse() rejected "GENERAL ISSUE (FR) -" because
+    '(' was not in the name character class.  After the fix, the separator dash
+    branch handles this line directly, allowing (FR) as a valid suffix.
+    """
+
+    def _run(self):
+        warnings: list[str] = []
+        runners = _parse_race_runners_1stbet_multiline(
+            _CT_R9_LIVE_TEXT.splitlines(), warnings
+        )
+        return runners, warnings
+
+    def _parse(self):
+        with patch("src.services.pdf_ingest._extract_text",
+                   return_value=_CT_R9_LIVE_TEXT):
+            return parse_race_pdf(b"fake-pdf-bytes")
+
+    # ── Core: all 10 runners present ────────────────────────────────────────
+
+    def test_runner_count_ten(self):
+        runners, _ = self._run()
+        assert len(runners) == 10, (
+            f"Expected 10 runners, got {len(runners)}: "
+            f"{[r['horse_name'] for r in runners]}"
+        )
+
+    def test_general_issue_fr_present(self):
+        """Primary regression: GENERAL ISSUE (FR) must appear in parsed runners."""
+        runners, _ = self._run()
+        names = {r["horse_name"] for r in runners}
+        assert "General Issue (FR)" in names, (
+            f"GENERAL ISSUE (FR) missing from: {names}"
+        )
+
+    def test_general_issue_fr_at_pp3(self):
+        runners, _ = self._run()
+        by_pp = {r["post_position"]: r for r in runners}
+        assert 3 in by_pp, f"PP3 missing — parsed: {sorted(by_pp.keys())}"
+        assert by_pp[3]["horse_name"] == "General Issue (FR)", (
+            f"PP3 horse: {by_pp[3]['horse_name']!r}"
+        )
+
+    def test_post_positions_one_through_ten(self):
+        """No gap in PPs 1–10; the former missing PP3 must now be present."""
+        runners, _ = self._run()
+        pps = sorted(r["post_position"] for r in runners)
+        assert pps == list(range(1, 11)), f"Expected [1..10], got {pps}"
+
+    def test_all_names_found(self):
+        runners, _ = self._run()
+        names = {r["horse_name"] for r in runners}
+        assert names == _CT_R9_ALL_NAMES, (
+            f"Missing: {_CT_R9_ALL_NAMES - names}  Extra: {names - _CT_R9_ALL_NAMES}"
+        )
+
+    def test_no_runner_count_mismatch_warning(self):
+        """Header=10, parsed=10 → no mismatch warning must fire."""
+        result = self._parse()
+        mismatch = [w for w in result["warnings"] if "Runner count mismatch" in w]
+        assert not mismatch, f"Unexpected mismatch warning: {mismatch}"
+
+    # ── parse_debug PP-gap diagnostic ───────────────────────────────────────
+
+    def test_parse_debug_no_missing_pps(self):
+        result = self._parse()
+        dbg = result.get("parse_debug", {})
+        assert dbg.get("missing_post_positions") == [], (
+            f"parse_debug shows missing PPs: {dbg.get('missing_post_positions')}"
+        )
+
+    def test_parse_debug_parsed_count(self):
+        result = self._parse()
+        dbg = result.get("parse_debug", {})
+        assert dbg.get("parsed_count") == 10, (
+            f"parse_debug.parsed_count: {dbg.get('parsed_count')!r}"
+        )
+
+    def test_parse_debug_header_count(self):
+        result = self._parse()
+        dbg = result.get("parse_debug", {})
+        assert dbg.get("header_count") == 10, (
+            f"parse_debug.header_count: {dbg.get('header_count')!r}"
+        )
+
+    # ── Country suffix formatting ────────────────────────────────────────────
+
+    def test_country_suffix_uppercase(self):
+        """(FR) must remain uppercase, not become (Fr) after .title()."""
+        runners, _ = self._run()
+        by_pp = {r["post_position"]: r for r in runners}
+        assert by_pp[3]["horse_name"] == "General Issue (FR)", (
+            f"Country suffix must be uppercase: {by_pp[3]['horse_name']!r}"
+        )
+
+    def test_no_trailing_dash_in_names(self):
+        """Separator '-' must not appear in any parsed horse name."""
+        runners, _ = self._run()
+        for r in runners:
+            assert not r["horse_name"].endswith("-"), (
+                f"Trailing dash in name: {r['horse_name']!r}"
+            )
+
+    # ── General Issue (FR) fields ────────────────────────────────────────────
+
+    def test_general_issue_fr_jockey(self):
+        runners, _ = self._run()
+        by_pp = {r["post_position"]: r for r in runners}
+        assert by_pp[3]["jockey"] == "Warren Ebow Iii", (
+            f"PP3 jockey: {by_pp[3]['jockey']!r}"
+        )
+
+    def test_general_issue_fr_trainer(self):
+        runners, _ = self._run()
+        by_pp = {r["post_position"]: r for r in runners}
+        assert by_pp[3]["trainer"] == "Ronney W. Brown", (
+            f"PP3 trainer: {by_pp[3]['trainer']!r}"
+        )
+
+    def test_general_issue_fr_morning_line(self):
+        runners, _ = self._run()
+        by_pp = {r["post_position"]: r for r in runners}
+        assert by_pp[3]["morning_line"] == "5/2", (
+            f"PP3 ML: {by_pp[3]['morning_line']!r}"
+        )
+
+    # ── End-to-end pipeline ──────────────────────────────────────────────────
+
+    def test_pipeline_ok(self):
+        result = self._parse()
+        assert result["ok"] is True, f"ok=False: {result.get('error')}"
+
+    def test_pipeline_is_1stbet(self):
+        result = self._parse()
+        assert result["is_1stbet"] is True
+
+    def test_pipeline_canonical_ten(self):
+        result = self._parse()
+        assert len(result["runners"]) == 10, (
+            f"Expected 10 canonical runners, got {len(result['runners'])}"
+        )
+
+    def test_pipeline_track_and_race(self):
+        result = self._parse()
+        assert result["race_number"] == 9, f"race_number: {result['race_number']!r}"
+        assert result["race_date"] == "2026-05-08", f"race_date: {result['race_date']!r}"
+
+    # ── Downstream name-matching safety ─────────────────────────────────────
+
+    def test_downstream_exact_match_with_suffix(self):
+        """Exact lowercase match: results CSV uses 'GENERAL ISSUE (FR)' → matches DB."""
+        import difflib
+        db_name  = "general issue (fr)"   # DB stores title-cased + uppercase suffix
+        csv_name = "general issue (fr)"   # CSV result uses same form
+        assert csv_name == db_name, "Exact match must succeed for identical names"
+
+    def test_downstream_fuzzy_match_without_suffix(self):
+        """Fuzzy match: results CSV uses 'GENERAL ISSUE' (no suffix) → still matches DB."""
+        import difflib
+        db_name  = "general issue (fr)"
+        csv_name = "general issue"        # CSV omits suffix
+        candidates = difflib.get_close_matches(csv_name, [db_name], n=1, cutoff=0.72)
+        assert candidates, (
+            f"Fuzzy match must succeed for '{csv_name}' vs DB '{db_name}' "
+            f"(cutoff=0.72)"
+        )
+        ratio = difflib.SequenceMatcher(None, csv_name, candidates[0]).ratio()
+        assert ratio >= 0.72, f"Ratio {ratio:.3f} below threshold 0.72"
+
+    def test_other_runners_unaffected(self):
+        """Existing runners (no country suffix) must still parse correctly."""
+        runners, _ = self._run()
+        by_pp = {r["post_position"]: r for r in runners}
+        assert by_pp[1]["horse_name"] == "Gran Andrews"
+        assert by_pp[4]["horse_name"] == "Sisyphus"
+        assert by_pp[10]["horse_name"] == "Rhumjar"

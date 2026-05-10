@@ -73,6 +73,13 @@ _TRACKS: tuple[_TrackRecord, ...] = (
         "Indiana Grand Racing & Casino",
         "Indiana Downs",
     )),
+    _TrackRecord("PRM", "Prairie Meadows", (
+        "Prairie Meadows",
+        "Prairie Meadows Racetrack",
+        "Prairie Meadows Racetrack and Casino",
+        # Legacy / operator alias used before canonical code was registered
+        "PRA",
+    )),
 )
 
 # Internal lookups built at import time
@@ -114,6 +121,15 @@ def resolve_track(
                 "track_code":           code,
                 "track_name_canonical": _CODE_TO_NAME[code],
                 "resolution_source":    "parsed_code",
+            }
+        # Not a primary code — try it as an alias (handles legacy codes like PRA → PRM).
+        _norm_code = normalize_track_name(code)
+        _alias_code = _ALIAS_TO_CODE.get(_norm_code)
+        if _alias_code:
+            return {
+                "track_code":           _alias_code,
+                "track_name_canonical": _CODE_TO_NAME[_alias_code],
+                "resolution_source":    "alias_exact",
             }
 
     if track_name:

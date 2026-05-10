@@ -1,8 +1,8 @@
 # DerbyEdge Feature Store Report
 
-**Generated**: 2026-04-29T08:32:18Z  
+**Generated**: 2026-05-10T01:10:21Z  
 **Race**     : 2026 Kentucky Derby (G1) — Churchill Downs  
-**Entries**  : 20
+**Entries**  : 10
 
 ## Feature Count
 
@@ -25,45 +25,43 @@
 
 | Feature | Tier | Null count | Null % |
 |---------|------|-----------|--------|
-| `pace_early_mean_3` | PLACEHOLDER | 20 | 100% |
-| `pace_mid_mean_3` | PLACEHOLDER | 20 | 100% |
-| `field_strength_last` | PLACEHOLDER | 20 | 100% |
-| `bullet_30d` | PLACEHOLDER | 20 | 100% |
-| `days_since_last_work` | PLACEHOLDER | 20 | 100% |
-| `trainer_jockey_itm_cond` | PLACEHOLDER | 20 | 100% |
-| `jockey_route_cond` | PLACEHOLDER | 20 | 100% |
-| `trainer_derby_cond` | PLACEHOLDER | 20 | 100% |
-| `post_win_bias` | PLACEHOLDER | 20 | 100% |
-| `trouble_recovery_proxy` | PLACEHOLDER | 20 | 100% |
-| `churchill_readiness` | PLACEHOLDER | 20 | 100% |
-| `jan_apr_improvement_curve` | PLACEHOLDER | 20 | 100% |
-| `speed_last` | IMPLEMENTED | 14 | 70% |
-| `speed_best` | IMPLEMENTED | 14 | 70% |
-| `speed_avg` | IMPLEMENTED | 14 | 70% |
-| `beyer_last` | IMPLEMENTED | 14 | 70% |
-| `speed_best_3` | DEGRADED | 14 | 70% |
-| `finish_energy_proxy` | DEGRADED | 14 | 70% |
-| `form_cycle_idx` | DEGRADED | 14 | 70% |
-| `layoff_days` | IMPLEMENTED | 14 | 70% |
-| `career_win_pct` | IMPLEMENTED | 14 | 70% |
-| `career_itm_pct` | IMPLEMENTED | 14 | 70% |
-| `class_delta` | DEGRADED | 14 | 70% |
-| `horses_beaten_pct_last` | DEGRADED | 14 | 70% |
-| `field_size_exp` | DEGRADED | 14 | 70% |
-| `works_30d` | IMPLEMENTED | 14 | 70% |
-| `work_readiness_score` | DEGRADED | 14 | 70% |
-| `trainer_intent_proxy` | DEGRADED | 14 | 70% |
-| `surface_fit` | DEGRADED | 14 | 70% |
-| `distance_fit` | DEGRADED | 14 | 70% |
-| `route_progression` | DEGRADED | 14 | 70% |
-| `gate_reliability` | DEGRADED | 14 | 70% |
-| `traffic_resilience_proxy` | DEGRADED | 14 | 70% |
-| `early_intent` | IMPLEMENTED | 14 | 70% |
-| `run_style_bucket` | IMPLEMENTED | 14 | 70% |
-| `publicness_score` | DEGRADED | 14 | 70% |
-| `public_underlay_penalty` | DEGRADED | 14 | 70% |
-| `classic_distance_projection` | DEGRADED | 14 | 70% |
-| `derby_override_score` | DEGRADED | 14 | 70% |
+| `speed_last` | IMPLEMENTED | 10 | 100% |
+| `speed_best` | IMPLEMENTED | 10 | 100% |
+| `speed_avg` | IMPLEMENTED | 10 | 100% |
+| `beyer_last` | IMPLEMENTED | 10 | 100% |
+| `speed_best_3` | DEGRADED | 10 | 100% |
+| `pace_early_mean_3` | PLACEHOLDER | 10 | 100% |
+| `pace_mid_mean_3` | PLACEHOLDER | 10 | 100% |
+| `finish_energy_proxy` | DEGRADED | 10 | 100% |
+| `form_cycle_idx` | DEGRADED | 10 | 100% |
+| `layoff_days` | IMPLEMENTED | 10 | 100% |
+| `career_win_pct` | IMPLEMENTED | 10 | 100% |
+| `career_itm_pct` | IMPLEMENTED | 10 | 100% |
+| `field_strength_last` | PLACEHOLDER | 10 | 100% |
+| `horses_beaten_pct_last` | DEGRADED | 10 | 100% |
+| `field_size_exp` | DEGRADED | 10 | 100% |
+| `works_30d` | IMPLEMENTED | 10 | 100% |
+| `bullet_30d` | PLACEHOLDER | 10 | 100% |
+| `days_since_last_work` | PLACEHOLDER | 10 | 100% |
+| `work_readiness_score` | DEGRADED | 10 | 100% |
+| `trainer_intent_proxy` | DEGRADED | 10 | 100% |
+| `trainer_jockey_itm_cond` | PLACEHOLDER | 10 | 100% |
+| `jockey_route_cond` | PLACEHOLDER | 10 | 100% |
+| `trainer_derby_cond` | PLACEHOLDER | 10 | 100% |
+| `surface_fit` | DEGRADED | 10 | 100% |
+| `distance_fit` | DEGRADED | 10 | 100% |
+| `route_progression` | DEGRADED | 10 | 100% |
+| `post_win_bias` | PLACEHOLDER | 10 | 100% |
+| `gate_reliability` | DEGRADED | 10 | 100% |
+| `trouble_recovery_proxy` | PLACEHOLDER | 10 | 100% |
+| `traffic_resilience_proxy` | DEGRADED | 10 | 100% |
+| `early_intent` | IMPLEMENTED | 10 | 100% |
+| `run_style_bucket` | IMPLEMENTED | 10 | 100% |
+| `publicness_score` | DEGRADED | 10 | 100% |
+| `classic_distance_projection` | DEGRADED | 10 | 100% |
+| `churchill_readiness` | PLACEHOLDER | 10 | 100% |
+| `jan_apr_improvement_curve` | PLACEHOLDER | 10 | 100% |
+| `class_delta` | DEGRADED | 0 | 0% |
 | `pedigree_route_proxy` | DEGRADED | 0 | 0% |
 | `pace_pressure` | IMPLEMENTED | 0 | 0% |
 | `lone_speed_edge` | IMPLEMENTED | 0 | 0% |
@@ -71,6 +69,8 @@
 | `pace_fit_score` | IMPLEMENTED | 0 | 0% |
 | `market_implied_prob` | IMPLEMENTED | 0 | 0% |
 | `morning_line_rank` | IMPLEMENTED | 0 | 0% |
+| `public_underlay_penalty` | DEGRADED | 0 | 0% |
+| `derby_override_score` | DEGRADED | 0 | 0% |
 
 ## Features Degraded Due to Missing History
 
@@ -118,24 +118,24 @@ real historical data is imported into `horse_starts`, `workouts`,
 
 | Rank | Feature | Null % | Tier |
 |------|---------|--------|------|
-| 1 | `pace_early_mean_3` | 100% | PLACEHOLDER |
-| 2 | `pace_mid_mean_3` | 100% | PLACEHOLDER |
-| 3 | `field_strength_last` | 100% | PLACEHOLDER |
-| 4 | `bullet_30d` | 100% | PLACEHOLDER |
-| 5 | `days_since_last_work` | 100% | PLACEHOLDER |
-| 6 | `trainer_jockey_itm_cond` | 100% | PLACEHOLDER |
-| 7 | `jockey_route_cond` | 100% | PLACEHOLDER |
-| 8 | `trainer_derby_cond` | 100% | PLACEHOLDER |
-| 9 | `post_win_bias` | 100% | PLACEHOLDER |
-| 10 | `trouble_recovery_proxy` | 100% | PLACEHOLDER |
+| 1 | `speed_last` | 100% | IMPLEMENTED |
+| 2 | `speed_best` | 100% | IMPLEMENTED |
+| 3 | `speed_avg` | 100% | IMPLEMENTED |
+| 4 | `beyer_last` | 100% | IMPLEMENTED |
+| 5 | `speed_best_3` | 100% | DEGRADED |
+| 6 | `pace_early_mean_3` | 100% | PLACEHOLDER |
+| 7 | `pace_mid_mean_3` | 100% | PLACEHOLDER |
+| 8 | `finish_energy_proxy` | 100% | DEGRADED |
+| 9 | `form_cycle_idx` | 100% | DEGRADED |
+| 10 | `layoff_days` | 100% | IMPLEMENTED |
 
 ## Sample Output (first 5 entries by post position)
 
 ```
-    horse_name  post_position  speed_last  speed_best_3  distance_fit  classic_distance_projection  derby_override_score  market_implied_prob  morning_line_rank
-      Renegade              1       105.0        106.33        0.7357                       0.7587                0.7685             0.200000                  1
-         Albus              2         NaN           NaN           NaN                          NaN                   NaN             0.032258                 13
-     Intrepido              3         NaN           NaN           NaN                          NaN                   NaN             0.019608                 19
-   Litmus Test              4         NaN           NaN           NaN                          NaN                   NaN             0.032258                 13
-Right To Party              5         NaN           NaN           NaN                          NaN                   NaN             0.032258                 13
+   horse_name  post_position speed_last speed_best_3 distance_fit classic_distance_projection  derby_override_score  market_implied_prob  morning_line_rank
+ Gran Andrews              1       None         None         None                        None                 0.685             0.071429                  7
+   Ascendance              2       None         None         None                        None                 0.685             0.083333                  6
+General Issue              3       None         None         None                        None                 0.685             0.222222                  1
+     Sisyphus              4       None         None         None                        None                 0.685             0.153846                  4
+     Spurs Up              5       None         None         None                        None                 0.685             0.181818                  2
 ```

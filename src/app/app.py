@@ -3086,6 +3086,17 @@ with tab7:
                     f'<div class="warn-banner">⚠ PDF parse failed: {_pr7["error"]}</div>',
                     unsafe_allow_html=True,
                 )
+                _diag7 = _pr7.get("parse_diagnostics") or {}
+                if _diag7:
+                    with st.expander("🔍 Parse diagnostics", expanded=True):
+                        st.json({
+                            "detected_format":    _diag7.get("detected_format"),
+                            "parsed_track":       _diag7.get("parsed_track"),
+                            "parsed_date":        _diag7.get("parsed_date"),
+                            "parsed_race_number": _diag7.get("parsed_race_number"),
+                            "n_finishers":        _diag7.get("n_finishers"),
+                            "parse_failure_reason": _diag7.get("parse_failure_reason"),
+                        })
             else:
                 if _pr7["warnings"]:
                     with st.expander(
@@ -3097,7 +3108,11 @@ with tab7:
                 # Race preview
                 st.markdown("**Race Preview**")
                 _r71, _r72, _r73, _r74 = st.columns(4)
-                _r71.metric("Track",     _pr7.get("track_code") or _pr7.get("track_name") or "?")
+                _r7_display_tc = (
+                    _pr7.get("track_code_resolved") or _pr7.get("track_code")
+                    or _pr7.get("track_name") or "?"
+                )
+                _r71.metric("Track",     _r7_display_tc)
                 _r72.metric("Date",      _pr7.get("race_date") or "?")
                 _r73.metric("Race",      f"R{_pr7['race_number']}" if _pr7.get("race_number") else "?")
                 _r74.metric("Finishers", _pr7.get("field_size", len(_pr7.get("runners", []))))
@@ -3134,11 +3149,14 @@ with tab7:
                             use_container_width=True, hide_index=True,
                         )
 
-                # Match to race in DB
+                # Match to race in DB — prefer resolved canonical code over raw parsed code
+                _r7_tc_for_match = (
+                    _pr7.get("track_code_resolved") or _pr7.get("track_code") or ""
+                )
                 _r7_exist_cid = None
-                if _pr7.get("track_code") and _pr7.get("race_date") and _pr7.get("race_number"):
+                if _r7_tc_for_match and _pr7.get("race_date") and _pr7.get("race_number"):
                     _r7_exist_cid = find_race_card(
-                        _conn7, _pr7["track_code"], _pr7["race_date"], int(_pr7["race_number"])
+                        _conn7, _r7_tc_for_match, _pr7["race_date"], int(_pr7["race_number"])
                     )
                 if _r7_exist_cid:
                     st.markdown(
@@ -3929,7 +3947,10 @@ with tab9:
                     "SCR":       "✓" if bool(_hr.get("original_tp_scratched")) else "",
                     "Eff TP":    _h_eff_tp + _h_scr_badge,
                     "TP Fin":    _h_fin_disp(_hr),
-                    "TP Won":    "✓" if _hr.get("effective_tp_won") else "✗",
+                    "TP Won": (
+                        "✓" if _hr.get("effective_tp_won")
+                        else ("—" if not _hr.get("actual_winner") else "✗")
+                    ),
                     "Winner":    _hr.get("actual_winner") or "—",
                     "Chaos":     (f"✓ {_hr['chaos_intensity']:.0%}"
                                   if _hr.get("chaos_active") and _hr.get("chaos_intensity")
@@ -4208,6 +4229,31 @@ with tab9:
                 if st.button("↗ Select", key="cal_pending_go", use_container_width=True):
                     st.session_state["active_card_id"] = _pending[_pjump_sel]["card_id"]
                     st.rerun()
+            st.divider()
+
+        # ── Unscored races with reason ────────────────────────────────────────
+        _unscored_races = [
+            r for r in _all_races_for_status
+            if get_race_workflow_status(r) == "unscored"
+        ]
+        if _unscored_races:
+            st.markdown("#### ⬜ Unscored Races")
+            st.caption(
+                f"{len(_unscored_races)} race(s) have no model score run yet. "
+                "Select the race in the sidebar and use ⚡ Build+Score to generate predictions."
+            )
+            _ur_rows = []
+            for _ur in _unscored_races:
+                _ur_rows.append({
+                    "Race":   format_race_label(_ur),
+                    "Detail": format_race_hint(_ur),
+                    "Reason": "no_model_run",
+                })
+            st.dataframe(
+                _pd.DataFrame(_ur_rows),
+                use_container_width=True, hide_index=True,
+                height=min(40 + 35 * len(_ur_rows), 300),
+            )
             st.divider()
 
         # ── Filter strip ──────────────────────────────────────────────────────

@@ -73,5 +73,6 @@ samples/
 *.xlsx
 *.pdf
 
-# Stray malformed files from bad path pastes (Windows drive-letter paths)
-C:*
+# Stray malformed files from bad path pastes (Windows path-separator artifacts)
+C*
+!tests/conftest.py

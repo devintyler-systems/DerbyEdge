@@ -160,10 +160,15 @@ def _extract_date(text: str) -> str | None:
     if m:
         mo = _MONTH_MAP.get(m.group(1).lower(), 0)
         return f"{m.group(3)}-{mo:02d}-{int(m.group(2)):02d}" if mo else None
-    # MM/DD/YYYY  (4-digit year only — 2-digit year handled by 1/ST BET path)
+    # MM/DD/YYYY  (4-digit year)
     m = re.search(r'\b(\d{1,2})/(\d{1,2})/(\d{4})\b', text)
     if m:
         return f"{m.group(3)}-{int(m.group(1)):02d}-{int(m.group(2)):02d}"
+    # M/D/YY or MM/DD/YY (2-digit year → 2000+yy); must not be part of a longer number
+    m = re.search(r'(?<!\d)(\d{1,2})/(\d{1,2})/(\d{2})(?!\d)', text)
+    if m:
+        year = 2000 + int(m.group(3))
+        return f"{year}-{int(m.group(1)):02d}-{int(m.group(2)):02d}"
     return None
 
 
@@ -503,8 +508,9 @@ def _parse_race_runners_1stbet_fallback(text: str, warnings: list[str]) -> list[
         # ── Horse extraction: STRICT then LENIENT ────────────────────────────
         # STRICT (Layout A/B): requires \\s+ (space) before J:/T:/ML label.
         # This prevents the horse name from stopping at "T" inside "WHAT ABOUT NOW".
+        # Character class includes \(\) to allow parenthetical country suffixes like (FR).
         m = re.search(
-            r'\bPP(?P<pp>\d+)\s*(?P<horse>[A-Z0-9\'\s]+?)'
+            r'\bPP(?P<pp>\d+)\s*(?P<horse>[A-Z0-9\'\s\(\)]+?)'
             r'(?=\s+(?:J:|T:|[-–]?\s*ML\b))',
             seg_pp, re.I,
         )
@@ -513,7 +519,7 @@ def _parse_race_runners_1stbet_fallback(text: str, warnings: list[str]) -> list[
             # name to follow — (?-i:...) disables re.I for the case check,
             # which distinguishes "T Rogelio" (trainer) from "T" in "WHAT ABOUT".
             m = re.search(
-                r'\bPP(?P<pp>\d+)\s*(?P<horse>[A-Z0-9\'\s]+?)'
+                r'\bPP(?P<pp>\d+)\s*(?P<horse>[A-Z0-9\'\s\(\)]+?)'
                 r'(?=(?-i:\s*J[:\s]+[A-Z][a-z]|\s*T[:\s]+[A-Z][a-z])|\s*[-–]?\s*ML\b)',
                 seg_pp, re.I,
             )
@@ -531,6 +537,12 @@ def _parse_race_runners_1stbet_fallback(text: str, warnings: list[str]) -> list[
                                horse_raw, flags=re.I).strip()
 
         horse_name = horse_raw.title() if horse_raw == horse_raw.upper() else horse_raw
+        # Restore uppercase for parenthetical country/origin codes: (Fr) → (FR)
+        horse_name = re.sub(
+            r'\(([A-Za-z]{2,4})\)',
+            lambda m: '(' + m.group(1).upper() + ')',
+            horse_name,
+        )
         horse_name = re.sub(r'\s+', ' ', horse_name).strip()
         if not horse_name or horse_name in seen_names:
             continue
@@ -685,25 +697,32 @@ def _parse_race_runners_1stbet_multiline(lines: list[str], warnings: list[str]) 
     def _candidate_horse(line: str) -> tuple[str, str | None] | None:
         """Return (name_part, odds_str_or_None) if line is an ALL-CAPS horse header.
 
-        Three accepted forms — trailing token is OPTIONAL:
+        Accepted forms — trailing token is OPTIONAL:
 
-          "SCRIPTED LOVE"        → ("SCRIPTED LOVE", None)  no trailing token
-          "YOTOWIN 9"            → ("YOTOWIN",        "9")   integer live odds
-          "TAP BONNET 5/2"       → ("TAP BONNET",     "5/2") fractional live odds
-          "WHAT YOU WISHED SCR"  → ("WHAT YOU WISHED","SCR") scratched
+          "SCRIPTED LOVE"           → ("SCRIPTED LOVE",        None)  no trailing token
+          "YOTOWIN 9"               → ("YOTOWIN",              "9")   integer live odds
+          "TAP BONNET 5/2"          → ("TAP BONNET",           "5/2") fractional live odds
+          "WHAT YOU WISHED SCR"     → ("WHAT YOU WISHED",      "SCR") scratched
+          "GRAN ANDREWS -"          → ("GRAN ANDREWS",         None)  separator dash
+          "GENERAL ISSUE (FR) -"    → ("GENERAL ISSUE (FR)",   None)  country suffix + dash
 
-        Name-part regex:  ^[A-Z][A-Z0-9'\\s\\-\\.]+$
+        Name-part regex:  ^[A-Z][A-Z0-9'\\s\\-\\.]*(?:\\s*\\([A-Z]{2,4}\\))?$
           First char must be an uppercase letter; subsequent chars may be uppercase
-          letters, digits, spaces, apostrophes, hyphens, or dots.
+          letters, digits, spaces, apostrophes, hyphens, or dots; optionally followed
+          by a parenthetical country/origin suffix such as (FR), (IRE), (GB), (CHI).
 
-        Trailing-token regex (applied when line has ≥2 whitespace-separated parts):
-          fractional  r'^\\d+[-/]\\d+$'     e.g. "5/2", "7-2"
-          integer     r'^\\d+(?:\\.\\d+)?$'  e.g. "9", "8"
-          scratched   "SCR"
+        Trailing-token handling (applied when line has ≥2 whitespace-separated parts):
+          separator   "-", "–", "—" → drop token; validate name_part with extended regex
+          scratched   "SCR"          → is_scr=True; validate name_part
+          fractional  r'^\\d+[-/]\\d+$'      e.g. "5/2", "7-2"  → validate name_part
+          integer     r'^\\d+(?:\\.\\d+)?$'  e.g. "9", "8"      → validate name_part
           anything else → treat full line as horse name (no trailing token)
 
         Caller confirms the candidate with a bare-integer peek on the next line.
         """
+        # Extended name validation: base chars + optional parenthetical country suffix
+        _name_re = r'^[A-Z][A-Z0-9\'\s\-\.]*(?:\s*\([A-Z]{2,4}\))?$'
+
         parts = line.rsplit(None, 1)
 
         # ── Single-word line ──────────────────────────────────────────────
@@ -718,17 +737,24 @@ def _parse_race_runners_1stbet_multiline(lines: list[str], warnings: list[str]) 
 
         if trailing.upper() == "SCR":
             pass  # SCR accepted; name_part validated below
+        elif trailing in ('-', '–', '—'):
+            # Separator dash — 1/ST BET appends " -" to horse-name lines.
+            # Validate name_part directly (not full_name) so country suffixes
+            # like "GENERAL ISSUE (FR)" are not rejected by the trailing "-".
+            if re.match(_name_re, name_part.strip()):
+                return name_part.strip(), None
+            return None
         elif (re.match(r'^\d+[-/]\d+$', trailing)
               or re.match(r'^\d+(?:\.\d+)?$', trailing)):
             pass  # odds token accepted; name_part validated below
         else:
-            # Trailing word is not odds/SCR — treat the full line as horse name
+            # Trailing word is not odds/SCR/dash — treat the full line as horse name
             full_name = line.strip()
             if re.match(r'^[A-Z][A-Z0-9\'\s\-\.]+$', full_name):
                 return full_name, None
             return None
 
-        if not re.match(r'^[A-Z][A-Z0-9\'\s\-\.]+$', name_part):
+        if not re.match(_name_re, name_part.strip()):
             return None
         return name_part.strip(), trailing
 
@@ -798,6 +824,12 @@ def _parse_race_runners_1stbet_multiline(lines: list[str], warnings: list[str]) 
         # Strip trailing separator dashes that pdfplumber may merge into the
         # horse-name line when the "-" separator sits at the same y-position.
         horse_name = raw_name.rstrip('-').strip().title()
+        # Restore uppercase for parenthetical country/origin codes: (Fr) → (FR)
+        horse_name = re.sub(
+            r'\(([A-Za-z]{2,4})\)',
+            lambda m: '(' + m.group(1).upper() + ')',
+            horse_name,
+        )
 
         if horse_name in seen_names:
             i = j + 1
@@ -1341,6 +1373,7 @@ def parse_race_pdf(pdf_bytes: bytes) -> dict[str, Any]:
         runners_primary: list[dict] = runners
         runners_fallback: list[dict] = []
         field_size_hdr = None
+        _parse_source  = "generic"
 
     if not race_date:
         warnings.append("Could not extract race date")
@@ -1374,6 +1407,23 @@ def parse_race_pdf(pdf_bytes: bytes) -> dict[str, Any]:
 
     _res = _resolve_track(track_name=track_name, track_code=track_code)
 
+    # Structured parse-quality diagnostic — surfaces PP gaps for the operator
+    _parsed_pps = sorted(r['post_position'] for r in runners)
+    if field_size_hdr:
+        _expected_pps = list(range(1, field_size_hdr + 1))
+        _missing_pps  = [pp for pp in _expected_pps if pp not in set(_parsed_pps)]
+    else:
+        _expected_pps = _parsed_pps
+        _missing_pps  = []
+
+    parse_debug = {
+        "header_count":           field_size_hdr,
+        "parsed_count":           len(runners),
+        "parsed_post_positions":  _parsed_pps,
+        "missing_post_positions": _missing_pps,
+        "parse_source":           _parse_source,
+    }
+
     return {
         "ok":            True,
         "error":         None,
@@ -1392,7 +1442,8 @@ def parse_race_pdf(pdf_bytes: bytes) -> dict[str, Any]:
         "runners_primary":  runners_primary,
         "runners_fallback": runners_fallback,
         "is_1stbet":        detected_1stbet,
-        "raw_text":      text,
+        "raw_text":         text,
+        "parse_debug":      parse_debug,
         # resolver enrichment — never overwrites the raw parsed fields above
         "track_code_resolved":     _res["track_code"],
         "track_name_canonical":    _res["track_name_canonical"],
@@ -1411,6 +1462,17 @@ def parse_results_pdf(pdf_bytes: bytes) -> dict[str, Any]:
         runners  — ordered by finish position
         scratches — scratch-only rows
         footnotes — raw text if present (≤500 chars)
+        track_code_resolved   — canonical code from tracks registry
+        track_name_canonical  — canonical name from tracks registry
+        track_resolution_source
+        parse_diagnostics     — {detected_format, parsed_track, parsed_date,
+                                   parsed_race_number, n_finishers,
+                                   parse_failure_reason}
+
+    Returns ok=False with a clear operator-facing error when:
+      • PDF text cannot be extracted
+      • File is detected as a pre-race PP card, not a results chart
+      • No finisher rows could be parsed
     """
     warnings: list[str] = []
 
@@ -1428,6 +1490,32 @@ def parse_results_pdf(pdf_bytes: bytes) -> dict[str, Any]:
         return {
             "ok": False,
             "error": "No text found in PDF — use the CSV Results Import fallback.",
+            "warnings": [], "runners": [], "scratches": [],
+        }
+
+    # ── Format guard: reject pre-race PP cards before wasting parse effort ────
+    # 1/ST BET PP cards are the most common accidental upload.
+    if _is_1stbet(text):
+        _diag = {
+            "detected_format":    "1stbet_pp_card",
+            "parsed_track":       None,
+            "parsed_date":        None,
+            "parsed_race_number": None,
+            "n_finishers":        0,
+            "parse_failure_reason": (
+                "File detected as a 1/ST BET pre-race PP card, not a results chart."
+            ),
+        }
+        _log.warning("parse_results_pdf: rejected 1/ST BET PP card")
+        return {
+            "ok": False,
+            "error": (
+                "Unsupported PDF format: this file appears to be a pre-race PP card "
+                "(1/ST BET race detail page), not an official results chart. "
+                "Use the Results Import only with Equibase official chart PDFs. "
+                "If results are not available as an Equibase chart, use CSV import."
+            ),
+            "parse_diagnostics": _diag,
             "warnings": [], "runners": [], "scratches": [],
         }
 
@@ -1463,17 +1551,71 @@ def parse_results_pdf(pdf_bytes: bytes) -> dict[str, Any]:
     if not track_code:
         warnings.append("Could not extract track code")
 
-    # 1/ST BET / Equibase chart: detected by the standard results-chart header
+    # ── 1/ST BET / Equibase chart: detected by standard results-chart header ──
+    is_equibase_chart = bool(re.search(r'Last\s+Raced\s+Pgm\s+Horse\s+Name', text))
+    detected_format   = "equibase_chart" if is_equibase_chart else "unknown"
+
     runners: list[dict] = []
     scratches: list[dict] = []
-    if re.search(r'Last\s+Raced\s+Pgm\s+Horse\s+Name', text):
-        parsed = _parse_results_1stbet(text, warnings)
-        runners  = parsed["finishers"]
+    if is_equibase_chart:
+        parsed    = _parse_results_1stbet(text, warnings)
+        runners   = parsed["finishers"]
         scratches = [{"horse_name": n, "is_scratched": True} for n in parsed["scratches"]]
     if not runners:
         runners, scratches = _parse_results_runners(text, warnings)
 
     finishers = [r for r in runners if not r.get("is_scratched")]
+
+    _log.debug(
+        "parse_results_pdf: format=%s track=%r date=%r race=%s finishers=%d",
+        detected_format, track_code, race_date, race_number, len(finishers),
+    )
+
+    # ── Explicit failure when no finishers could be extracted ─────────────────
+    if not finishers:
+        _fail_reason = (
+            f"No finishers extracted from PDF "
+            f"(format={detected_format}, track={track_code!r}, "
+            f"date={race_date!r}, race={race_number}). "
+            "The file may not be a standard Equibase results chart. "
+            "Check that you uploaded an official chart PDF, not a race program or PP card. "
+            "Use the CSV import as fallback."
+        )
+        warnings.append(_fail_reason)
+        _log.warning("parse_results_pdf: %s", _fail_reason)
+        _diag = {
+            "detected_format":    detected_format,
+            "parsed_track":       track_code,
+            "parsed_date":        race_date,
+            "parsed_race_number": race_number,
+            "n_finishers":        0,
+            "parse_failure_reason": _fail_reason,
+        }
+        return {
+            "ok":              False,
+            "error":           _fail_reason,
+            "warnings":        warnings,
+            "runners":         [],
+            "scratches":       scratches,
+            "parse_diagnostics": _diag,
+            # Still expose track/date/race so the UI can give the operator context
+            "track_code":      track_code,
+            "track_name":      track_name,
+            "race_date":       race_date,
+            "race_number":     race_number,
+        }
+
+    # ── Track resolution ──────────────────────────────────────────────────────
+    _res = _resolve_track(track_name=track_name, track_code=track_code)
+
+    _diag = {
+        "detected_format":    detected_format,
+        "parsed_track":       track_code,
+        "parsed_date":        race_date,
+        "parsed_race_number": race_number,
+        "n_finishers":        len(finishers),
+        "parse_failure_reason": None,
+    }
 
     return {
         "ok":              True,
@@ -1493,4 +1635,10 @@ def parse_results_pdf(pdf_bytes: bytes) -> dict[str, Any]:
         "runners":         runners,
         "scratches":       scratches,
         "footnotes":       footnotes,
+        # Track resolution enrichment
+        "track_code_resolved":      _res["track_code"],
+        "track_name_canonical":     _res["track_name_canonical"],
+        "track_resolution_source":  _res["resolution_source"],
+        # Parse diagnostics for operator visibility
+        "parse_diagnostics":        _diag,
     }

@@ -605,14 +605,16 @@ WITH ranked_live AS (
         es.win_probability,
         es.value_score,
         es.bet_tag,
+        COALESCE(rr.is_scratched, e.scratch_flag, 0) AS is_scratched,
         ROW_NUMBER() OVER (
             PARTITION BY es.run_id
             ORDER BY
-                CASE WHEN COALESCE(rr.is_scratched, 0) = 1 THEN 1 ELSE 0 END,
+                CASE WHEN COALESCE(rr.is_scratched, e.scratch_flag, 0) = 1 THEN 1 ELSE 0 END,
                 es.rank ASC
         ) AS effective_live_rank
     FROM entry_scores es
     JOIN  score_runs    sr  ON sr.run_id   = es.run_id
+    JOIN  entries        e  ON e.entry_id  = es.entry_id
     LEFT JOIN race_results rr
            ON rr.entry_id = es.entry_id
           AND rr.card_id  = sr.card_id
@@ -623,8 +625,7 @@ tops AS (
         rl.card_id,
         MAX(CASE WHEN rl.model_rank = 1 THEN rl.horse_name  END)
             AS original_tp,
-        MAX(CASE WHEN rl.model_rank = 1
-                 THEN COALESCE(rr.is_scratched, 0) END)
+        MAX(CASE WHEN rl.model_rank = 1 THEN rl.is_scratched END)
             AS original_tp_scratched,
         MAX(CASE WHEN rl.effective_live_rank = 1 THEN rl.horse_name  END)
             AS effective_tp,
