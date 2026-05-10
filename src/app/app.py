@@ -22,7 +22,12 @@ import plotly.express as px
 import plotly.graph_objects as go
 import streamlit as st
 
-from src.utils.db import get_connection
+from src.utils.db import (
+    get_connection,
+    ensure_entry_scores_columns,
+    ensure_score_runs_columns,
+    entry_scores_cols,
+)
 from src.derbyedge.odds_math import kelly_fraction, kelly_fraction_full
 from src.derbyedge.chaos_patch import apply_derby_chaos_patch
 from src.services.odds_intake import (
@@ -136,11 +141,13 @@ TAG_BADGE = {
     "neutral": '<span class="status-badge badge-neutral">—</span>',
 }
 CONF_BADGE = {
+    "high":   '<span class="status-badge badge-bet">HIGH</span>',
     "medium": '<span class="status-badge badge-med">MED</span>',
     "low":    '<span class="status-badge badge-low">LOW!</span>',
 }
 TAG_ICON  = {"bet": "🟢 BET", "underlay": "🔴 UL",  "neutral": "—"}
-CONF_ICON = {1: "🔵 MED",    0: "🟡 LOW"}
+CONF_ICON = {"HIGH": "🟢 HIGH", "MEDIUM": "🔵 MED",  "LOW": "🟡 LOW",
+             1: "🔵 MED", 0: "🟡 LOW"}   # integer fallback for legacy rows
 
 
 # ── Data loaders ──────────────────────────────────────────────────────────────
@@ -148,6 +155,10 @@ CONF_ICON = {1: "🔵 MED",    0: "🟡 LOW"}
 def load_board(run_id: str | None = None) -> tuple[pd.DataFrame | None, dict | None]:
     try:
         conn = get_connection()
+        # Ensure schema is current before any query — handles old local DBs gracefully.
+        ensure_entry_scores_columns(conn)
+        ensure_score_runs_columns(conn)
+
         if run_id is None:
             run = conn.execute(
                 "SELECT run_id FROM score_runs ORDER BY run_timestamp DESC LIMIT 1"
@@ -157,8 +168,26 @@ def load_board(run_id: str | None = None) -> tuple[pd.DataFrame | None, dict | N
                 return None, None
             run_id = run["run_id"]
 
+        # Build confidence SELECT dynamically so old DBs (pre-migration) still render.
+        # After ensure_entry_scores_columns the columns will always exist, but this
+        # guard protects against any code path that reaches here without the ensure call.
+        _es_cols = entry_scores_cols(conn)
+        if "confidence_score" in _es_cols:
+            _conf_fragment = (
+                "es.confidence_score,\n"
+                "                   es.confidence_bucket,\n"
+                "                   es.confidence_reasons,"
+            )
+        else:
+            _conf_fragment = (
+                "NULL AS confidence_score,\n"
+                "                   CASE WHEN es.confidence_flag = 0 THEN 'LOW'"
+                " ELSE 'MEDIUM' END AS confidence_bucket,\n"
+                "                   NULL AS confidence_reasons,"
+            )
+
         df = pd.read_sql(
-            """
+            f"""
             SELECT es.rank, es.horse_name, es.post_position,
                    es.morning_line_odds,
                    es.win_probability, es.place_probability, es.show_probability,
@@ -166,6 +195,7 @@ def load_board(run_id: str | None = None) -> tuple[pd.DataFrame | None, dict | N
                    es.pace_fit_score, es.form_score, es.surface_dist_fit,
                    es.market_implied_prob,
                    es.confidence_flag, es.missing_data_flag,
+                   {_conf_fragment}
                    vel.trainer, vel.jockey, vel.sire, vel.dam, vel.owner,
                    vel.pace_style,
                    vel.career_starts, vel.career_wins, vel.career_places,
@@ -544,6 +574,7 @@ def _edge_str(v: float) -> str:
 
 
 def _conf_label(flag: int) -> str:
+    """Legacy helper — maps binary flag to text; prefer confidence_bucket when available."""
     return "medium" if flag == 1 else "low"
 
 
@@ -717,6 +748,8 @@ if "startup_ddl_done" not in st.session_state:
         ensure_is_hidden_column(_startup_conn)
         ensure_firstbet_pp_table(_startup_conn)
         ensure_race_review_view(_startup_conn)
+        ensure_entry_scores_columns(_startup_conn)
+        ensure_score_runs_columns(_startup_conn)
         _startup_conn.close()
     except Exception:
         pass
@@ -1169,7 +1202,10 @@ with tab1:
         if filt_hide_ul:
             disp = disp[disp["bet_tag"] != "underlay"]
         if filt_conf_med:
-            disp = disp[disp["confidence_flag"] == 1]
+            if "confidence_bucket" in disp.columns and disp["confidence_bucket"].notna().any():
+                disp = disp[disp["confidence_bucket"].isin(["MEDIUM", "HIGH"])]
+            else:
+                disp = disp[disp["confidence_flag"] == 1]
         if filt_bet_only:
             disp = disp[disp["bet_tag"] == "bet"]
 
@@ -1177,7 +1213,11 @@ with tab1:
         sum_wp    = board_df["win_probability"].sum()
         n_bets    = (board_df["bet_tag"] == "bet").sum()
         n_ul      = (board_df["bet_tag"] == "underlay").sum()
-        n_low     = (board_df["confidence_flag"] == 0).sum()
+        n_low = (
+            board_df["confidence_bucket"].eq("LOW").sum()
+            if "confidence_bucket" in board_df.columns and board_df["confidence_bucket"].notna().any()
+            else (board_df["confidence_flag"] == 0).sum()
+        )
         top_horse = board_df.iloc[0]
 
         c1, c2, c3, c4, c5 = st.columns(5)
@@ -1276,7 +1316,11 @@ with tab1:
         tbl = disp[base_cols + [c for c in optional_cols if c in disp.columns]].copy()
 
         tbl["Tag"]  = tbl["bet_tag"].map(TAG_ICON)
-        tbl["Conf"] = tbl["confidence_flag"].map(CONF_ICON)
+        # Prefer confidence_bucket (new scored system); fall back to binary flag for legacy rows
+        if "confidence_bucket" in tbl.columns and tbl["confidence_bucket"].notna().any():
+            tbl["Conf"] = tbl["confidence_bucket"].map(CONF_ICON)
+        else:
+            tbl["Conf"] = tbl["confidence_flag"].map(CONF_ICON)
         tbl["Win%"] = (tbl["win_probability"] * 100).round(2)
         tbl["ML"]   = tbl["morning_line_odds"].apply(lambda x: f"{x:.0f}-1")
         tbl["Edge"] = tbl["value_score"].apply(_edge_str)
@@ -1455,12 +1499,24 @@ with tab1:
                 pass
 
         # ── Low-confidence notice ──────────────────────────────────────────────
-        low_conf_horses = board_df[board_df["confidence_flag"] == 0]["horse_name"].tolist()
+        _low_mask = (
+            board_df["confidence_bucket"].eq("LOW")
+            if "confidence_bucket" in board_df.columns and board_df["confidence_bucket"].notna().any()
+            else board_df["confidence_flag"].eq(0)
+        )
+        low_conf_horses = board_df[_low_mask]["horse_name"].tolist()
         if low_conf_horses:
+            # Build a concise per-horse reason summary
+            _reasons_list = []
+            for _, _lrow in board_df[_low_mask].iterrows():
+                _rsn = _lrow.get("confidence_reasons") or ""
+                _scr = _lrow.get("confidence_score")
+                _scr_str = f" ({_scr:.2f})" if _scr is not None and not (isinstance(_scr, float) and np.isnan(_scr)) else ""
+                _reasons_list.append(f"{_lrow['horse_name']}{_scr_str}")
             st.markdown(
                 f'<div class="warn-banner">🟡 <strong>Low confidence</strong> '
-                f'({len(low_conf_horses)} entries — dist_starts ≤ 1; distance_fit based on '
-                f'stamina_index only): {", ".join(low_conf_horses)}</div>',
+                f'({len(low_conf_horses)} entries — score &lt; 0.45): '
+                f'{", ".join(_reasons_list)}</div>',
                 unsafe_allow_html=True,
             )
 
@@ -3194,7 +3250,7 @@ with tab7:
                                 "race_number":    _r7_rn,
                                 "finish_position":_r7r.get("official_finish"),
                                 "official_finish":_r7r.get("official_finish"),
-                                "official_odds":  _r7r.get("official_odds_decimal"),
+                                "official_odds_decimal": _r7r.get("official_odds_decimal"),
                                 "post_position":  _r7r.get("post_position"),
                                 "scratched":      False,
                                 "disqualified":   False,
@@ -3213,7 +3269,7 @@ with tab7:
                                 "race_number":    _r7_rn,
                                 "finish_position":None,
                                 "official_finish":None,
-                                "official_odds":  None,
+                                "official_odds_decimal": None,
                                 "post_position":  _r7s.get("program_number"),
                                 "scratched":      True,
                                 "disqualified":   False,

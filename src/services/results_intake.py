@@ -68,7 +68,7 @@ TRACK_CODE_ALIASES = {"track_code", "track", "trk", "track_abbrev"}
 RACE_NUM_ALIASES   = {"race_number", "race_num", "race", "rn"}
 HORSE_ALIASES      = {"horse_name", "horse", "name", "entry"}
 FINISH_ALIASES     = {"finish_position", "finish", "fin", "pos", "position", "place"}
-ODDS_ALIASES       = {"official_odds", "odds", "mutuels", "final_odds", "win_odds"}
+ODDS_ALIASES       = {"official_odds", "official_odds_decimal", "odds", "mutuels", "final_odds", "win_odds"}
 POST_ALIASES       = {"post_position", "post", "pp", "pgm"}
 BEATEN_ALIASES     = {"beaten_lengths", "lengths_behind", "beaten", "lb", "blen"}
 SCRATCH_ALIASES    = {"scratched", "scratch", "scr", "is_scratched"}
@@ -774,8 +774,9 @@ def evaluate_score_run(
     # Post-time favorite: lowest official_odds_decimal among horses that actually started.
     # official_odds_decimal is NULL for any horse not in race_results (scratches, etc.),
     # so the odds filter alone is sufficient to exclude scratches.
+    # Tie-break: lowest post_position wins when odds are identical (program order).
     ptf_pool = [r for r in data if not r.get("is_scratched") and r.get("official_odds_decimal") is not None]
-    ptf_fav  = min(ptf_pool, key=lambda r: r["official_odds_decimal"]) if ptf_pool else None
+    ptf_fav  = min(ptf_pool, key=lambda r: (r["official_odds_decimal"], r.get("post_position") or 9999)) if ptf_pool else None
     ptf_won  = bool(ptf_fav and winner_row and winner_row["horse_name"] == ptf_fav["horse_name"])
 
     # Top-3 hit rate
@@ -864,6 +865,7 @@ WITH base AS (
             (SELECT COUNT(*) FROM entries e WHERE e.card_id = rc.card_id AND e.scratch_flag = 0)
         ) AS field_size,
         es.rank, es.horse_name, es.win_probability, es.morning_line_odds,
+        COALESCE(rr.post_position, es.post_position) AS post_position,
         rr.finish_position, rr.official_finish,
         COALESCE(rr.is_scratched, e.scratch_flag, 0) AS is_scratched,
         COALESCE(rr.is_disqualified, 0)             AS is_disqualified,
@@ -914,8 +916,10 @@ winner AS (
     WHERE official_finish = 1 AND is_disqualified = 0 AND is_scratched = 0
 ),
 ptf_rk AS (
+    -- Tie-break: lowest post_position wins when odds are identical (program order).
     SELECT run_id, horse_name, official_odds_decimal,
-           RANK() OVER (PARTITION BY run_id ORDER BY official_odds_decimal) AS rk
+           ROW_NUMBER() OVER (PARTITION BY run_id
+                              ORDER BY official_odds_decimal, post_position) AS rk
     FROM base
     WHERE official_odds_decimal IS NOT NULL AND is_scratched = 0
 ),

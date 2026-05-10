@@ -23,6 +23,7 @@ from src.services.results_intake import (
     evaluate_score_run,
     get_effective_top_pick,
     ingest_results,
+    load_outcomes_frame,
     load_race_review,
 )
 
@@ -518,3 +519,134 @@ class TestWinnerFromFinishPosition:
         assert rows[0]["actual_winner"] != "Alpha", (
             "A scratched runner with finish_position=1 must not be returned as winner"
         )
+
+
+# ── Suite 8: PTF / winner odds pipeline ──────────────────────────────────────
+
+_ODDS = [3.50, 5.00, 8.00, 12.00, 20.00]  # Alpha lowest → PTF
+
+
+def _insert_results_with_odds(
+    conn: sqlite3.Connection,
+    ids: dict,
+    *,
+    winner_idx: int = 0,
+    odds: list[float | None] | None = None,
+    scratch_idx: int | None = None,
+) -> None:
+    """Insert race_results for all 5 horses with optional per-horse odds."""
+    if odds is None:
+        odds = _ODDS[:]
+    names = ["Alpha", "Bravo", "Charlie", "Delta", "Echo"]
+    for i, (eid, hid, name, odd) in enumerate(
+        zip(ids["entry_ids"], ids["horse_ids"], names, odds)
+    ):
+        finish = 1 if i == winner_idx else i + 2
+        is_scr = 1 if i == scratch_idx else 0
+        conn.execute(
+            """INSERT INTO race_results
+                   (card_id, entry_id, horse_id, post_position,
+                    finish_position, official_finish, is_scratched,
+                    official_odds_decimal, ingested_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, '2026-05-02T12:00:00Z')""",
+            (ids["card_id"], eid, hid, i + 1, finish, finish, is_scr, odd),
+        )
+    conn.commit()
+
+
+class TestPTFAndWinnerOdds:
+    """PTF/winner odds must populate in outcomes frame after results ingest."""
+
+    def test_ingest_persists_official_odds(self, mem_conn):
+        """ingest_results must store official_odds_decimal when provided."""
+        ids = insert_minimal_race(mem_conn)
+        rows = [
+            {
+                "race_date":           "2026-05-02",
+                "track_code":          "CD",
+                "race_number":         1,
+                "horse_name":          "Alpha",
+                "finish_position":     1,
+                "official_odds_decimal": 3.50,
+            }
+        ]
+        result = ingest_results(mem_conn, rows)
+        assert result["n_inserted"] == 1
+        stored = mem_conn.execute(
+            "SELECT official_odds_decimal FROM race_results WHERE entry_id=?",
+            (ids["entry_ids"][0],),
+        ).fetchone()[0]
+        assert stored == pytest.approx(3.50)
+
+    def test_outcomes_frame_populates_ptf_and_winner(self, mem_conn):
+        """load_outcomes_frame returns populated PTF and winner_official_odds."""
+        ids = insert_minimal_race(mem_conn)
+        _insert_results_with_odds(mem_conn, ids, winner_idx=0)
+        rows = load_outcomes_frame(mem_conn)
+        assert rows, "outcomes frame must not be empty after ingest"
+        row = rows[0]
+        assert row["post_time_favorite_name"] == "Alpha"
+        assert row["post_time_favorite_odds"] == pytest.approx(3.50)
+        assert row["post_time_favorite_won"] == 1
+        assert row["winner_name"] == "Alpha"
+        assert row["winner_official_odds"] == pytest.approx(3.50)
+
+    def test_winner_not_ptf_still_populates_winner_odds(self, mem_conn):
+        """winner_official_odds populates even when the winner was not the favorite."""
+        ids = insert_minimal_race(mem_conn)
+        # Alpha is PTF (lowest odds 3.50), but Charlie wins (idx=2)
+        _insert_results_with_odds(mem_conn, ids, winner_idx=2)
+        rows = load_outcomes_frame(mem_conn)
+        row = rows[0]
+        assert row["post_time_favorite_name"] == "Alpha"
+        assert row["post_time_favorite_won"] == 0
+        assert row["winner_name"] == "Charlie"
+        assert row["winner_official_odds"] == pytest.approx(_ODDS[2])
+
+    def test_scratched_horse_cannot_be_ptf(self, mem_conn):
+        """A scratched runner must be excluded from PTF even if its odds are lowest."""
+        ids = insert_minimal_race(mem_conn)
+        # Alpha scratched (is_scratched=1, lowest odds) → PTF must be Bravo
+        _insert_results_with_odds(mem_conn, ids, winner_idx=1, scratch_idx=0)
+        rows = load_outcomes_frame(mem_conn)
+        row = rows[0]
+        assert row["post_time_favorite_name"] != "Alpha", (
+            "Scratched Alpha must not be PTF even with lowest odds"
+        )
+        assert row["post_time_favorite_name"] == "Bravo"
+
+    def test_tied_odds_ptf_deterministic_by_post_position(self, mem_conn):
+        """When two horses share the lowest odds, the lower post_position wins."""
+        ids = insert_minimal_race(mem_conn)
+        # Alpha (pp=1) and Bravo (pp=2) both at 3.50 — Alpha must win the tie
+        tied_odds = [3.50, 3.50, 8.00, 12.00, 20.00]
+        _insert_results_with_odds(mem_conn, ids, winner_idx=2, odds=tied_odds)
+        rows = load_outcomes_frame(mem_conn)
+        row = rows[0]
+        assert row["post_time_favorite_name"] == "Alpha", (
+            "Alpha (pp=1) must be PTF over Bravo (pp=2) when odds are tied"
+        )
+        assert row["post_time_favorite_odds"] == pytest.approx(3.50)
+
+    def test_missing_odds_degrade_gracefully(self, mem_conn):
+        """Races with no official_odds_decimal must not crash; PTF fields are None/blank."""
+        ids = insert_minimal_race(mem_conn)
+        # Insert results with NO odds (all None)
+        _insert_results_with_odds(mem_conn, ids, winner_idx=0, odds=[None] * 5)
+        rows = load_outcomes_frame(mem_conn)
+        row = rows[0]
+        assert row["post_time_favorite_name"] is None, (
+            "No odds → PTF name must be None, not a false assignment"
+        )
+        assert row["post_time_favorite_odds"] is None
+        assert row["winner_name"] == "Alpha", "winner_name must still populate from finish_position"
+
+    def test_ptf_won_zero_when_ptf_did_not_win(self, mem_conn):
+        """post_time_favorite_won is 0 when the PTF finished off the board."""
+        ids = insert_minimal_race(mem_conn)
+        _insert_results_with_odds(mem_conn, ids, winner_idx=4)  # Echo wins, Alpha is PTF
+        rows = load_outcomes_frame(mem_conn)
+        row = rows[0]
+        assert row["post_time_favorite_name"] == "Alpha"
+        assert row["post_time_favorite_won"] == 0
+        assert row["winner_name"] == "Echo"

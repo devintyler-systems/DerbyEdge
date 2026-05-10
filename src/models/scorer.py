@@ -7,14 +7,16 @@ Bet-tag thresholds:
   underlay: model_edge <  -0.015
   neutral : -0.015 <= model_edge < +0.025
 
-Confidence tiers (seed-only install):
-  medium : dist_starts >= 2 AND all model features non-null
-  low    : dist_starts <= 1 (distance_fit based on stamina_index only)
-  high   : not possible until horse_starts table is populated
+Confidence tiers (4-component scored system — see src/models/confidence.py):
+  high   : score >= 0.70
+  medium : 0.45 <= score < 0.70
+  low    : score < 0.45
 
-Missing-data flags are per-horse text labels combining:
-  - Global (every horse in seed-only install): the 5 most impactful PLACEHOLDERs
-  - Per-horse: dist_fit_single_start when dist_starts <= 1
+Score = 0.35*A(horse evidence) + 0.25*B(race evidence)
+      + 0.30*C(model certainty) + 0.10*D(calibration)
+
+Sparse distance history alone no longer forces LOW when other signals are strong.
+Missing-data flags are per-horse text labels (CRITICAL_MISSING + dist_fit_single_start).
 """
 
 import datetime
@@ -26,6 +28,12 @@ from typing import Optional
 import numpy as np
 import pandas as pd
 
+from src.models.confidence import (
+    compute_horse_confidence,
+    legacy_missing_flags,
+    CRITICAL_MISSING,
+    DERBY_EXTRA_MISSING,
+)
 from src.models.trainer import (
     ModelArtifact,
     TRAIN_CONFIGS,
@@ -37,25 +45,14 @@ from src.models.trainer import (
     train_or_build,
     build_seed_baseline,
 )
-from src.utils.db import get_connection, get_derby_card_id
+from src.utils.db import (
+    get_connection,
+    get_derby_card_id,
+    ensure_entry_scores_columns,
+)
 
 ROOT       = Path(__file__).resolve().parents[2]
 OUTPUT_DIR = ROOT / "output"
-
-# Critical PLACEHOLDER features (most impactful if they were available)
-CRITICAL_MISSING = [
-    "no_race_splits",       # pace_early_mean_3 / pace_mid_mean_3
-    "no_workout_detail",    # bullet_30d / days_since_last_work
-    "no_connections_stats", # trainer_jockey_itm_cond / jockey_route_cond
-    "no_track_form",        # churchill_readiness
-    "no_post_bias",         # post_win_bias
-]
-
-# Derby-specific PLACEHOLDER flags (added on top of CRITICAL_MISSING)
-DERBY_EXTRA_MISSING = [
-    "no_jan_apr_curve",       # jan_apr_improvement_curve: sequential speed progression
-    "no_churchill_readiness", # churchill_readiness: Churchill Downs specific form
-]
 
 # Derby context detection criteria
 _DERBY_CRITERIA = {
@@ -83,7 +80,7 @@ _DERBY_DEFAULT_CHAOS_INDEX = 0.85   # default for scorer; UI slider default matc
 
 
 # ---------------------------------------------------------------------------
-# Schema guard — adds chaos columns if missing (idempotent, called before writes)
+# Schema guards — add new columns if missing (idempotent, called before writes)
 # ---------------------------------------------------------------------------
 def _ensure_chaos_columns(conn: sqlite3.Connection) -> None:
     for stmt in (
@@ -100,6 +97,8 @@ def _ensure_chaos_columns(conn: sqlite3.Connection) -> None:
         except Exception:
             pass
     conn.commit()
+
+
 
 
 # ---------------------------------------------------------------------------
@@ -229,96 +228,8 @@ def _bet_tag(edge: float, bet_threshold: float, underlay_threshold: float) -> st
     return "neutral"
 
 
-def _model_confidence(
-    dist_starts: int,
-    career_starts: int,
-    has_null_model_feat: bool,
-    derby_override: bool = False,
-    pedigree_route_proxy: Optional[float] = None,
-) -> str:
-    """
-    Confidence tiers for seed-only mode.
-    'high' is not possible until horse_starts is populated.
-
-    Derby tightening (derby_override=True):
-      - dist_starts <= 1: always low
-      - dist_starts == 2: low unless pedigree_route_proxy >= 0.75
-      - dist_starts >= 3: medium (if model features present)
-    """
-    if has_null_model_feat:
-        return "low"
-    if dist_starts <= 1:
-        return "low"
-    if derby_override and dist_starts == 2:
-        if pedigree_route_proxy is None or pedigree_route_proxy < 0.75:
-            return "low"   # limited route experience, weak pedigree
-    return "medium"
-
-
-def _missing_flags(dist_starts: int, derby_override: bool = False) -> str:
-    flags = list(CRITICAL_MISSING)
-    if derby_override:
-        flags.extend(DERBY_EXTRA_MISSING)
-    if dist_starts <= 1:
-        flags.append("dist_fit_single_start")
-    return ",".join(flags)
-
-
-def _compute_confidence_and_flags(
-    feat_df:        pd.DataFrame,
-    entries_df:     pd.DataFrame,
-    model_features: list[str],
-    derby_override: bool = False,
-) -> pd.DataFrame:
-    """
-    Return DataFrame with entry_id, model_confidence, missing_data_flags,
-    confidence_flag (0/1 for DB).
-    """
-    check_cols = [c for c in model_features if c in feat_df.columns]
-
-    rows = []
-    for _, erow in entries_df.iterrows():
-        eid  = int(erow["entry_id"])
-        frow = feat_df[feat_df["entry_id"] == eid]
-        if frow.empty:
-            base_flags = CRITICAL_MISSING + (DERBY_EXTRA_MISSING if derby_override else [])
-            rows.append({"entry_id": eid, "model_confidence": "low",
-                         "missing_data_flags": ",".join(base_flags),
-                         "confidence_flag": 0})
-            continue
-
-        fr = frow.iloc[0]
-        has_null = any(
-            fr.get(c) is None or (isinstance(fr.get(c), float) and np.isnan(fr.get(c)))
-            for c in check_cols
-        )
-        def _int_or_zero(v):
-            return 0 if (v is None or (isinstance(v, float) and np.isnan(v))) else int(v)
-        dist_starts   = _int_or_zero(erow.get("dist_starts"))
-        career_starts = _int_or_zero(erow.get("career_starts"))
-        ped_proxy     = fr.get("pedigree_route_proxy")
-        if ped_proxy is not None:
-            try:
-                ped_proxy = float(ped_proxy)
-            except (TypeError, ValueError):
-                ped_proxy = None
-
-        confidence = _model_confidence(
-            dist_starts, career_starts, has_null,
-            derby_override=derby_override,
-            pedigree_route_proxy=ped_proxy,
-        )
-        flags     = _missing_flags(dist_starts, derby_override=derby_override)
-        conf_flag = 1 if confidence == "medium" else 0
-
-        rows.append({
-            "entry_id":           eid,
-            "model_confidence":   confidence,
-            "missing_data_flags": flags,
-            "confidence_flag":    conf_flag,
-        })
-
-    return pd.DataFrame(rows)
+pass  # _model_confidence / _missing_flags / _compute_confidence_and_flags
+# removed — replaced by src.models.confidence.compute_horse_confidence
 
 
 # ---------------------------------------------------------------------------
@@ -428,7 +339,7 @@ def _write_board(
         f"| Kendall tau vs market | {metrics['kendall_tau_vs_ml']:.4f} |",
         f"| Mean abs edge | {metrics['mean_edge_abs']:.4f} |",
         f"| Low-confidence entries | {low_conf} of {len(board)} "
-        f"(dist_starts <= 1; distance_fit unreliable) |",
+        f"(score < 0.45 — see confidence_reasons per entry) |",
         "",
         "---",
         "",
@@ -458,27 +369,26 @@ def _write_board(
             f"| {conf_str} |"
         )
 
-    # ── Missing-data detail ────────────────────────────────────────────────
+    # ── Low-confidence detail ─────────────────────────────────────────────
     low_conf_horses = board[board["model_confidence"] == "low"]
     if not low_conf_horses.empty:
         lines += [
             "",
             "### Low-Confidence Entries",
             "",
-            "These horses have `dist_starts <= 1`; their distance_fit score is based on "
-            "`stamina_index` alone (no race history at 1.25 miles).",
+            "These horses scored < 0.45 on the 4-component confidence system "
+            "(horse evidence × 0.35, race evidence × 0.25, model certainty × 0.30, "
+            "calibration × 0.10).",
             "",
-            "| Horse | Post | Dist Starts | Additional Missing Flags |",
-            "|-------|------|-------------|--------------------------|",
+            "| Horse | Post | Score | Reasons |",
+            "|-------|------|-------|---------|",
         ]
         for _, r in low_conf_horses.iterrows():
-            flags = r['missing_data_flags'].replace(
-                ",".join(CRITICAL_MISSING) + ",", ""
-            ).replace(",".join(CRITICAL_MISSING), "")
+            score   = r.get("confidence_score", 0.0)
+            reasons = r.get("confidence_reasons", "—")
             lines.append(
                 f"| {r['horse_name']} | {int(r['post_position'])} "
-                f"| {int(r.get('dist_starts_raw') or 0) if not (isinstance(r.get('dist_starts_raw'), float) and np.isnan(r.get('dist_starts_raw') or 0)) else 0} "
-                f"| dist_fit_single_start |"
+                f"| {score:.3f} | {reasons} |"
             )
 
     # ── Diagnostic footer ──────────────────────────────────────────────────
@@ -799,28 +709,29 @@ def score_race(card_id: Optional[int] = None) -> pd.DataFrame:
     form_arr         = group_scores.get("form_class",      np.zeros(len(feat_df)))
     surf_dist_arr    = group_scores.get("distance_surface", np.zeros(len(feat_df)))
 
-    # ── Confidence + missing flags ─────────────────────────────────────────
+    # ── Confidence scoring (4-component scored system) ────────────────────
     model_feats = [
         f for g in config["feature_groups"].values()
         for f in g["features"]
     ]
-    conf_df = _compute_confidence_and_flags(feat_df, entries_df, model_feats,
-                                             derby_override=derby_active)
+    conf_df = compute_horse_confidence(
+        feat_df, entries_df, win_probs, market_probs,
+        model_feats, derby_override=derby_active,
+    )
 
     # ── Low-confidence BET guardrail ──────────────────────────────────────
-    # LOW-conf entries owe their raw BET edge purely to the odds-floor vs the
-    # market probability gap, not to real model signal.  Force them to neutral
-    # and record the block so operators can manually elevate after review.
-    _conf_by_eid = {
-        int(r["entry_id"]): r["model_confidence"]
+    # LOW-bucket entries: edge may be artefact of odds-floor vs market gap,
+    # not genuine model signal.  Force to neutral and record the block.
+    _bucket_by_eid = {
+        int(r["entry_id"]): r["confidence_bucket"]
         for _, r in conf_df.iterrows()
     }
     final_bet_tags     = []
     low_conf_bet_block = []
     for i, (_, erow) in enumerate(entries_df.iterrows()):
         raw_tag = bet_tags[i]
-        conf    = _conf_by_eid.get(int(erow["entry_id"]), "low")
-        if conf == "low" and raw_tag == "bet":
+        bucket  = _bucket_by_eid.get(int(erow["entry_id"]), "LOW")
+        if bucket == "LOW" and raw_tag == "bet":
             final_bet_tags.append("neutral")
             low_conf_bet_block.append(1)
         else:
@@ -851,6 +762,7 @@ def score_race(card_id: Optional[int] = None) -> pd.DataFrame:
 
     # ── DB writes ──────────────────────────────────────────────────────────
     _ensure_chaos_columns(conn)
+    ensure_entry_scores_columns(conn)
     run_id = str(uuid.uuid4())[:8]
 
     quality_tier = "seed_only"
@@ -881,8 +793,15 @@ def score_race(card_id: Optional[int] = None) -> pd.DataFrame:
 
     for i, (_, erow) in enumerate(entries_df.iterrows()):
         eid = int(erow["entry_id"])
-        conf_row  = conf_df[conf_df["entry_id"] == eid]
-        conf_flag = int(conf_row["confidence_flag"].iloc[0]) if not conf_row.empty else 0
+        conf_row    = conf_df[conf_df["entry_id"] == eid]
+        if not conf_row.empty:
+            cr = conf_row.iloc[0]
+            conf_flag   = int(cr["confidence_flag"])
+            conf_score  = float(cr["confidence_score"])
+            conf_bucket = str(cr["confidence_bucket"])
+            conf_reasons= str(cr["confidence_reasons"])
+        else:
+            conf_flag, conf_score, conf_bucket, conf_reasons = 0, 0.25, "LOW", "no feature data"
         conn.execute(
             """
             INSERT INTO entry_scores (
@@ -892,8 +811,9 @@ def score_race(card_id: Optional[int] = None) -> pd.DataFrame:
                 market_implied_prob, bet_tag,
                 confidence_flag, missing_data_flag, low_conf_bet_block, rank,
                 trainer_name, jockey_name,
-                chaos_score, chaos_boost, chaos_tier, chaos_eligible
-            ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                chaos_score, chaos_boost, chaos_tier, chaos_eligible,
+                confidence_score, confidence_bucket, confidence_reasons
+            ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
             """,
             (
                 run_id, eid, erow["horse_name"], int(erow["post_position"]),
@@ -917,6 +837,9 @@ def score_race(card_id: Optional[int] = None) -> pd.DataFrame:
                 round(float(chaos_boosts[i]), 6) if chaos_applied else None,
                 chaos_tiers[i]                   if chaos_applied else None,
                 int(chaos_eligs[i]),
+                conf_score,
+                conf_bucket,
+                conf_reasons,
             ),
         )
 
@@ -948,7 +871,10 @@ def score_race(card_id: Optional[int] = None) -> pd.DataFrame:
     board["rank"]               = rank_arr
 
     # Merge confidence columns
-    conf_merge = conf_df[["entry_id", "model_confidence", "missing_data_flags"]]
+    conf_merge = conf_df[[
+        "entry_id", "model_confidence", "missing_data_flags",
+        "confidence_score", "confidence_bucket", "confidence_reasons",
+    ]]
     board = board.merge(conf_merge, on="entry_id", how="left")
     board["dist_starts_raw"] = board["dist_starts"]  # for low-conf table
 
