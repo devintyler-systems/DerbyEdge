@@ -189,6 +189,7 @@ def load_board(run_id: str | None = None) -> tuple[pd.DataFrame | None, dict | N
         df = pd.read_sql(
             f"""
             SELECT es.rank, es.horse_name, es.post_position,
+                   es.entry_id,
                    es.morning_line_odds,
                    es.win_probability, es.place_probability, es.show_probability,
                    es.fair_odds, es.value_score, es.bet_tag,
@@ -196,6 +197,7 @@ def load_board(run_id: str | None = None) -> tuple[pd.DataFrame | None, dict | N
                    es.market_implied_prob,
                    es.confidence_flag, es.missing_data_flag,
                    {_conf_fragment}
+                   vel.trainer_id, vel.jockey_id,
                    vel.trainer, vel.jockey, vel.sire, vel.dam, vel.owner,
                    vel.pace_style,
                    vel.career_starts, vel.career_wins, vel.career_places,
@@ -539,6 +541,36 @@ def load_firstbet_career_stats(card_id: int) -> pd.DataFrame:
         return df
     except Exception:
         return pd.DataFrame()
+
+
+@st.cache_data(ttl=60)
+def load_horse_profile(entry_id: int) -> dict:
+    from src.services.horse_profile import get_horse_profile
+    conn = get_connection()
+    try:
+        return get_horse_profile(conn, entry_id)
+    finally:
+        conn.close()
+
+
+@st.cache_data(ttl=60)
+def load_speed_figures_cached(entry_id: int) -> dict:
+    from src.services.horse_profile import get_speed_figures
+    conn = get_connection()
+    try:
+        return get_speed_figures(conn, entry_id)
+    finally:
+        conn.close()
+
+
+@st.cache_data(ttl=60)
+def load_connections_stats(trainer_id: int | None, jockey_id: int | None) -> dict:
+    from src.services.horse_profile import get_connections_stats
+    conn = get_connection()
+    try:
+        return get_connections_stats(conn, trainer_id, jockey_id)
+    finally:
+        conn.close()
 
 
 def _run_pipeline_step(script_name: str, card_id: int) -> tuple[bool, str]:
@@ -1581,6 +1613,23 @@ with tab2:
         m5.metric(_mkt_label,   f"{_mkt_prob*100:.1f}%")
 
         st.divider()
+
+        # ── Profile and speed figures (entry_id-keyed — avoids name-match issues) ──
+        _eid = int(horse["entry_id"])
+        _prof = load_horse_profile(_eid)
+        _spd  = load_speed_figures_cached(_eid)
+        _tid_raw = horse.get("trainer_id")
+        _jid_raw = horse.get("jockey_id")
+        def _safe_int_id(v):
+            try:
+                f = float(v)
+                return int(f) if f == f else None
+            except (TypeError, ValueError):
+                return None
+        _conn_s = load_connections_stats(
+            _safe_int_id(_tid_raw), _safe_int_id(_jid_raw)
+        )
+
         left, right = st.columns([1, 1])
 
         with left:
@@ -1597,48 +1646,82 @@ with tab2:
                 except (TypeError, ValueError):
                     return None
 
+            def _last5_str(starts, wins):
+                if starts is None:
+                    return "—"
+                return f"{int(starts)}S" + (f" {int(wins)}W" if wins is not None else "")
+
             cs  = _hf("career_starts");  cw  = _hf("career_wins")
             cp  = _hf("career_places");  csh = _hf("career_shows")
             ce  = _hf("career_earnings")
-            ds  = _hf("dirt_starts");    dw  = _hf("dirt_wins")
-            dts = _hf("dist_starts");    dtw = _hf("dist_wins")
-            lrd = _hf("last_race_days"); lrf = _hf("last_race_finish")
             si  = _hf("stamina_index")
 
+            # Augment from profile when entries columns are null
+            if cs  is None: cs  = _prof.get("career_starts")
+            if cw  is None: cw  = _prof.get("career_wins")
+            if cp  is None: cp  = _prof.get("career_places")
+            if csh is None: csh = _prof.get("career_shows")
+
+            # Dirt / distance: entries first, profile fallback
+            _ds_v  = _hf("dirt_starts");  ds  = _ds_v  if _ds_v  is not None else _prof.get("dirt_last5_starts")
+            _dw_v  = _hf("dirt_wins");    dw  = _dw_v  if _dw_v  is not None else _prof.get("dirt_last5_wins")
+            _dts_v = _hf("dist_starts");  dts = _dts_v if _dts_v is not None else _prof.get("distance_last5_starts")
+            _dtw_v = _hf("dist_wins");    dtw = _dtw_v if _dtw_v is not None else _prof.get("distance_last5_wins")
+
+            # Last race: entries first, profile fallback
+            lrd = _hf("last_race_days")
+            if lrd is None: lrd = _prof.get("last_race_days")
+            lrf = _hf("last_race_finish")
+            if lrf is None: lrf = _prof.get("last_race_finish")
+
+            # Compute days-since-last-race from pp date when entries is null
+            if lrd is None and _prof.get("last_race_date"):
+                _rc_date = race_info.get("card_date") if race_info else None
+                if _rc_date:
+                    try:
+                        from datetime import date as _date
+                        _diff = (
+                            _date.fromisoformat(_rc_date)
+                            - _date.fromisoformat(_prof["last_race_date"])
+                        ).days
+                        lrd = _diff if _diff >= 0 else None
+                    except (ValueError, TypeError):
+                        pass
+
+            # Win% / ITM% — profile covers all sources (entries > firstbet > pp_derived)
             if cs and cs > 0 and cw is not None:
                 win_pct_str = f"{cw / cs * 100:.0f}%"
                 itm_pct_str = f"{(cw + (cp or 0) + (csh or 0)) / cs * 100:.0f}%"
-            elif _fb_stat_row is not None:
-                # Fallback: use 1/ST BET career percentages when entries.career_starts is null
-                _fb_wp = _fb_stat_row.get("career_win_pct")
-                _fb_sp = _fb_stat_row.get("career_itm_pct")
-                win_pct_str = f"{_fb_wp*100:.0f}% *" if _fb_wp is not None else "—"
-                itm_pct_str = f"{_fb_sp*100:.0f}% *" if _fb_sp is not None else "—"
+            elif _prof.get("career_win_pct") is not None:
+                _pct_sfx    = "" if _prof["pct_source"] == "entries" else " *"
+                win_pct_str = f"{_prof['career_win_pct'] * 100:.0f}%{_pct_sfx}"
+                _itp        = _prof.get("career_itm_pct")
+                itm_pct_str = f"{_itp * 100:.0f}%{_pct_sfx}" if _itp is not None else "—"
             else:
                 win_pct_str = itm_pct_str = "—"
 
-            career_rec = (
-                f"{int(cs)}-{int(cw)}-{int(cp)}-{int(csh)}"
-                if None not in (cs, cw, cp, csh)
-                else "—"
-            )
+            # Career record: full record if seeded, else last-5 from PPs
+            if None not in (cs, cw, cp, csh) and cs and cs > 0:
+                career_rec = f"{int(cs)}-{int(cw)}-{int(cp)}-{int(csh)}"
+            elif _prof.get("last5_starts", 0) > 0:
+                career_rec = (
+                    f"Last 5: {_prof['last5_wins']}-"
+                    f"{_prof['last5_places']}-{_prof['last5_shows']}"
+                )
+            else:
+                career_rec = "—"
 
-            # Last race days / finish: prefer entries, fall back to firstbet_pp_starts row 1
-            if lrd is None and not _fb_horse_pp.empty:
-                _fb_pp1 = _fb_horse_pp[_fb_horse_pp["start_rank"] == 1]
-                if not _fb_pp1.empty:
-                    _fb_row1 = _fb_pp1.iloc[0]
-                    lrf = _fb_row1.get("finish_position")
-                    # days calculation requires race_info date
-                    _fb_pp1_date = _fb_row1.get("race_date")
-                    _rc_date = race_info.get("card_date") if race_info else None
-                    if _fb_pp1_date and _rc_date:
-                        try:
-                            from datetime import date as _date
-                            _diff = (_date.fromisoformat(_rc_date) - _date.fromisoformat(_fb_pp1_date)).days
-                            lrd = _diff if _diff >= 0 else None
-                        except (ValueError, TypeError):
-                            pass
+            # Connections stats summary (local race_results data)
+            _tr_s = _conn_s.get("trainer", {})
+            _jk_s = _conn_s.get("jockey",  {})
+            _conn_parts = []
+            if _tr_s.get("starts", 0) > 0:
+                _wp = f"{_tr_s['win_pct']*100:.0f}%" if _tr_s.get("win_pct") is not None else "?"
+                _conn_parts.append(f"T: {_tr_s['starts']}st {_wp}")
+            if _jk_s.get("starts", 0) > 0:
+                _wp = f"{_jk_s['win_pct']*100:.0f}%" if _jk_s.get("win_pct") is not None else "?"
+                _conn_parts.append(f"J: {_jk_s['starts']}st {_wp}")
+            _conn_line = " · ".join(_conn_parts) + " *(local)" if _conn_parts else "—"
 
             for k, v in [
                 ("Trainer",       horse.get("trainer") or "—"),
@@ -1648,10 +1731,11 @@ with tab2:
                 ("Career record", career_rec),
                 ("Win% / ITM%",   f"{win_pct_str} / {itm_pct_str}"),
                 ("Earnings",      f"${int(ce):,}" if ce is not None else "—"),
-                ("Dirt (last 5)", f"{int(ds)}S" if ds is not None else "—"),
-                ("@ Distance (last 5)", f"{int(dts)}S" if dts is not None else "—"),
+                ("Dirt (last 5)", _last5_str(ds, dw)),
+                ("@ Distance (last 5)", _last5_str(dts, dtw)),
                 ("Last race",     f"{int(lrd)}d ago, finished {int(lrf)}"
                                   if None not in (lrd, lrf) else "—"),
+                ("T/J (local)",   _conn_line),
                 ("Pace style",    str(horse.get("pace_style") or "—").title()),
                 ("Stamina index", f"{si:.2f}" if si is not None else "—"),
             ]:
@@ -1663,9 +1747,25 @@ with tab2:
 
         with right:
             st.markdown("**Speed Figures**")
+            _spd_src = _spd.get("source", "none")
+            _4th_lbl = "DE Spd" if _spd_src == "de_derived" else "Beyer"
+
+            def _coalesce_spd(h_key: str, s_key: str):
+                """entries figure first; fall back to derived speed figure."""
+                v = horse.get(h_key)
+                try:
+                    f = float(v)
+                    if f == f:
+                        return f
+                except (TypeError, ValueError):
+                    pass
+                return _spd.get(s_key)
+
             _spd_raw = [
-                horse.get("best_speed_fig"), horse.get("last_speed_fig"),
-                horse.get("avg_speed_fig"),  horse.get("beyer_fig"),
+                _coalesce_spd("best_speed_fig", "speed_best"),
+                _coalesce_spd("last_speed_fig", "speed_last"),
+                _coalesce_spd("avg_speed_fig",  "speed_avg"),
+                horse.get("beyer_fig") or _spd.get("beyer"),
             ]
             _spd_text = []
             for _sv in _spd_raw:
@@ -1674,18 +1774,23 @@ with tab2:
                 except (TypeError, ValueError):
                     _spd_text.append("—")
             fig_spd = go.Figure(go.Bar(
-                x=["Best", "Last", "Avg", "Beyer"],
+                x=["Best", "Last", "Avg", _4th_lbl],
                 y=_spd_raw,
                 marker_color=["#ffd700", "#4facfe", "#a8edea", "#f093fb"],
                 text=_spd_text,
                 textposition="outside",
             ))
             fig_spd.update_layout(
-                yaxis_range=[70, 125],
+                yaxis_range=[55, 125],
                 height=260,
                 **_plotly_dark(),
             )
             st.plotly_chart(fig_spd, use_container_width=True)
+            if _spd_src == "de_derived":
+                st.caption(
+                    "DE Spd = DerbyEdge internal metric · finish pos / field size · "
+                    "NOT an official Beyer / TimeForm figure."
+                )
 
             # Group score radar (from artifact)
             if artifact is not None and horse["horse_name"] in (feat_df["horse_name"].values if not feat_df.empty else []):
