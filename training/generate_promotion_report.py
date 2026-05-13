@@ -9,6 +9,7 @@ Inputs (from most recent eval_run_* directory, or --eval-dir override)
   metrics_summary.json
   segment_metrics.csv
   calibration_table.csv
+  insufficient_segments.csv
   promotion_decision.json
 
 Usage
@@ -85,22 +86,28 @@ def generate_report(eval_dir: Path | None = None) -> Path:
     promotion  = _load_json(eval_dir / "promotion_decision.json")
     seg_path   = eval_dir / "segment_metrics.csv"
     calib_path = eval_dir / "calibration_table.csv"
+    insuf_path = eval_dir / "insufficient_segments.csv"
+    jdiag_path = eval_dir / "join_diagnostics.json"
 
     seg_df   = pd.read_csv(seg_path)   if seg_path.exists()   else pd.DataFrame()
     calib_df = pd.read_csv(calib_path) if calib_path.exists() else pd.DataFrame()
+    insuf_df = pd.read_csv(insuf_path) if insuf_path.exists() else pd.DataFrame()
+    jdiag    = _load_json(jdiag_path)  if jdiag_path.exists() else {}
 
     h = summary.get("heuristic") or {}
     m = summary.get("ml")        or {}
-    decision   = promotion.get("decision", "HOLD")
-    reasons    = promotion.get("reasons", [])
-    rec_action = promotion.get("recommended_action", "remain in shadow")
-    eval_ts    = summary.get("evaluated_at", "N/A")
-    n_races    = summary.get("n_races_total", "N/A")
-    n_labeled  = summary.get("n_labeled_rows", "N/A")
-    ll_imp     = summary.get("ll_improvement_pct")
-    brier_imp  = summary.get("brier_improvement_pct")
-    integrity_ok = promotion.get("integrity_checks_passed", False)
-    int_checks   = promotion.get("integrity_checks", [])
+    decision    = promotion.get("decision", "HOLD")
+    reasons     = promotion.get("reasons", [])
+    rec_action  = promotion.get("recommended_action", "remain in shadow")
+    eval_ts     = summary.get("evaluated_at", "N/A")
+    n_races     = summary.get("n_races_total", "N/A")
+    n_labeled   = summary.get("n_labeled_rows", "N/A")
+    ll_imp      = summary.get("ll_improvement_pct")
+    brier_imp   = summary.get("brier_improvement_pct")
+    integrity_ok  = promotion.get("integrity_checks_passed", False)
+    int_checks    = promotion.get("integrity_checks", [])
+    insuf_segs    = promotion.get("insufficient_segments", [])
+    thresholds    = promotion.get("thresholds", {})
 
     lines = [
         "# ML Promotion Report — DerbyEdge Engine",
@@ -128,25 +135,71 @@ def generate_report(eval_dir: Path | None = None) -> Path:
         "",
     ]
 
+    # Join diagnostics (if available)
+    if jdiag:
+        mr     = jdiag.get("match_rate", 0.0)
+        n_tot  = jdiag.get("total_shadow_rows", "N/A")
+        n_mat  = jdiag.get("matched_rows", "N/A")
+        n_unm  = jdiag.get("unmatched_rows", "N/A")
+        n_full = jdiag.get("matched_full_key", "N/A")
+        n_part = jdiag.get("matched_partial_key", "N/A")
+        mr_pct = f"{mr:.1%}" if isinstance(mr, float) else "N/A"
+        lines += [
+            "---",
+            "",
+            "## 2. Join Diagnostics",
+            "",
+            f"| Total shadow rows | Matched | Full key | Partial key | Unmatched | Match rate |",
+            f"|-------------------|---------|----------|-------------|-----------|------------|",
+            f"| {n_tot} | {n_mat} | {n_full} | {n_part} | {n_unm} | {mr_pct} |",
+            "",
+        ]
+        if isinstance(mr, float) and mr < 0.80:
+            lines += [
+                "> **Warning:** match rate below 80%.  Check `unmatched_shadow_rows.csv`.",
+                "> Common causes: horse name formatting mismatch, missing post position,",
+                "> or race results not yet loaded (run `backfill_observations`).",
+                "",
+            ]
+        unmatched_keys = jdiag.get("sample_unmatched_keys", [])
+        if unmatched_keys:
+            lines += [
+                f"**Sample unmatched keys** (race_id|post|horse_norm):",
+                "",
+            ]
+            for k in unmatched_keys:
+                lines.append(f"- `{k}`")
+            lines.append("")
+        section_num = 3
+    else:
+        section_num = 2
+
     # Segment table
     lines += [
         "---",
         "",
-        "## 2. Segment Breakdown",
+        f"## {section_num}. Segment Breakdown",
         "",
     ]
+    section_num += 1
+
     if seg_df.empty:
         lines.append("_No segment data available._")
     else:
         lines += [
-            "| Segment | Races | Starters | H Log Loss | ML Log Loss | LL Delta | H Brier | ML Brier | Flag |",
-            "|---------|-------|----------|------------|-------------|----------|---------|----------|------|",
+            "| Segment | Races | Starters | Winners | H Log Loss | ML Log Loss | LL Delta | H Brier | ML Brier | Flag |",
+            "|---------|-------|----------|---------|------------|-------------|----------|---------|----------|------|",
         ]
+        # Build set of insufficient segment names for easy lookup
+        insuf_names = {r.get("segment") for r in insuf_segs}
         for _, row in seg_df.iterrows():
+            seg_name   = row.get("segment", "—")
+            sparse_tag = " ⚠" if seg_name in insuf_names else ""
             lines.append(
-                f"| {row.get('segment','—')} "
+                f"| {seg_name}{sparse_tag} "
                 f"| {_fmt(row.get('n_races'), '.0f')} "
                 f"| {_fmt(row.get('n_starters'), '.0f')} "
+                f"| {_fmt(row.get('n_winners', None), '.0f')} "
                 f"| {_fmt(row.get('h_log_loss'))} "
                 f"| {_fmt(row.get('ml_log_loss'))} "
                 f"| {_pct_arrow(row.get('ll_delta_pct'))} "
@@ -157,15 +210,39 @@ def generate_report(eval_dir: Path | None = None) -> Path:
 
     lines += [""]
 
+    # Insufficient segments detail
+    if not insuf_df.empty:
+        lines += [
+            "---",
+            "",
+            f"## {section_num}. Insufficient Segments",
+            "",
+            "> These segments have too few races or winners for reliable evaluation.",
+            "> Their metrics are shown above but should not be used as promotion evidence.",
+            "",
+            "| Segment | Races | Winners | Reason |",
+            "|---------|-------|---------|--------|",
+        ]
+        for _, row in insuf_df.iterrows():
+            lines.append(
+                f"| {row.get('segment','—')} "
+                f"| {_fmt(row.get('n_races'), '.0f')} "
+                f"| {_fmt(row.get('n_winners', None), '.0f')} "
+                f"| {row.get('reasons','—')} |"
+            )
+        lines += [""]
+        section_num += 1
+
     # Integrity checks table
     lines += [
         "---",
         "",
-        "## 3. Integrity Checks",
+        f"## {section_num}. Integrity Checks",
         "",
         "| Check | Result | Detail |",
         "|-------|--------|--------|",
     ]
+    section_num += 1
     if int_checks:
         for c in int_checks:
             status = "PASS" if c.get("passed") else "**FAIL**"
@@ -175,26 +252,86 @@ def generate_report(eval_dir: Path | None = None) -> Path:
 
     lines += [""]
 
-    # Promotion decision
-    decision_icon = {"PASS": "✅ PASS", "HOLD": "🔶 HOLD", "FAIL": "❌ FAIL"}.get(decision, decision)
+    # Calibration table + interpretation
     lines += [
         "---",
         "",
-        "## 4. Promotion Decision",
+        f"## {section_num}. Calibration",
+        "",
+        "> **Reading the calibration table:**",
+        "> Each row is a probability bin.  A well-calibrated model has",
+        "> `mean_predicted ≈ actual_win_rate` (on the diagonal).",
+        "> - **Above diagonal** (actual > predicted): model is *underconfident* —",
+        ">   it assigns lower probabilities than the horses actually win at.",
+        "> - **Below diagonal** (actual < predicted): model is *overconfident* —",
+        ">   it assigns higher probabilities than the horses actually win at.",
+        "> - ⚠ marks bins with fewer than 20 samples — treat those rows with caution.",
+        "",
+    ]
+    section_num += 1
+
+    if calib_df.empty:
+        lines.append("_No calibration data available._")
+    else:
+        lines += [
+            "| Model | Bin | n | Mean Predicted | Actual Win Rate | Sparse? |",
+            "|-------|-----|---|----------------|-----------------|---------|",
+        ]
+        for _, row in calib_df.iterrows():
+            sparse_flag = "⚠" if row.get("flag_sparse", False) else ""
+            bin_label   = f"{_fmt(row.get('bin_low'), '.2f')}–{_fmt(row.get('bin_high'), '.2f')}"
+            lines.append(
+                f"| {row.get('model','—')} "
+                f"| {bin_label} "
+                f"| {_fmt(row.get('n'), '.0f')} "
+                f"| {_fmt(row.get('mean_predicted'))} "
+                f"| {_fmt(row.get('actual_win_rate'))} "
+                f"| {sparse_flag} |"
+            )
+
+    lines += [""]
+
+    # Promotion decision
+    decision_icon = {
+        "PASS":              "✅ PASS",
+        "HOLD":              "🔶 HOLD",
+        "FAIL":              "❌ FAIL",
+        "INSUFFICIENT_DATA": "🔵 INSUFFICIENT DATA",
+    }.get(decision, decision)
+
+    lines += [
+        "---",
+        "",
+        f"## {section_num}. Promotion Decision",
         "",
         f"### {decision_icon}",
         "",
     ]
+    section_num += 1
+
     for r in reasons:
         lines.append(f"- {r}")
     if not reasons:
         lines.append("_No reasons recorded._")
 
+    # Sample-size thresholds box
+    if thresholds:
+        lines += [
+            "",
+            "> **Sample-size thresholds used:**",
+            f"> - Overall minimum races: {thresholds.get('min_races_overall', '—')}",
+            f"> - Per-segment minimum races: {thresholds.get('min_races_segment', '—')}",
+            f"> - Per-segment minimum winners: {thresholds.get('min_winners_segment', '—')}",
+            f"> - Log loss improvement to PASS: ≥ {thresholds.get('ll_improve_pct', '—')}%",
+            f"> - Brier improvement to PASS: ≥ {thresholds.get('brier_improve_pct', '—')}%",
+            f"> - Segment degradation to FAIL: > {thresholds.get('segment_degrade_pct', '—')}%",
+        ]
+
     lines += [
         "",
         "---",
         "",
-        "## 5. Recommended Next Action",
+        f"## {section_num}. Recommended Next Action",
         "",
         f"**{rec_action.capitalize()}**",
         "",

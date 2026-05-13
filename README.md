@@ -131,6 +131,73 @@ The migration script:
 
 ---
 
+## One-command shadow cycle
+
+Run the full ML shadow evaluation pipeline — schema check, scoring, backfill,
+evaluation, and report — with a single command:
+
+```powershell
+# PowerShell (recommended on Windows)
+.\scripts\run_shadow_cycle.ps1
+
+# Or Python directly
+python -m training.run_shadow_cycle
+```
+
+**Common invocations:**
+
+```powershell
+# Score + full evaluation (default)
+.\scripts\run_shadow_cycle.ps1
+
+# Skip re-scoring; evaluate existing shadow_log.csv
+.\scripts\run_shadow_cycle.ps1 -SkipScore
+
+# Apply horse_norm migration automatically and run everything
+.\scripts\run_shadow_cycle.ps1 -AutoMigrate
+
+# Just re-generate the markdown report (no re-scoring or re-evaluation)
+.\scripts\run_shadow_cycle.ps1 -ReportOnly
+
+# Score a specific race card
+.\scripts\run_shadow_cycle.ps1 -CardId 7
+```
+
+**What it does, in order:**
+
+| Step | Description | Skip flag |
+|------|-------------|-----------|
+| Schema check | Validates `race_cards` + `starter_observations` columns | `--skip-migration` |
+| Migration check | Detects missing `horse_norm` column; optionally applies it | `--auto-migrate` |
+| Shadow scoring | Runs `scripts/score.py` with `DERBYEDGE_ML_MODE=shadow` | `--skip-score` |
+| Backfill join | `backfill_shadow_eval` — joins shadow log with outcomes | — |
+| Evaluation | `promote_check` — writes `eval_run_*/` artifacts | — |
+| Report | `generate_promotion_report` — writes `output/ml_promotion_report.md` | — |
+| Summary | Compact terminal output of decision + match rate + next action | — |
+
+**Safety:**
+- The command always enforces `DERBYEDGE_ML_MODE=shadow`.  If `live` is set in
+  the environment, the script aborts rather than accidentally re-scoring in live mode.
+- Pass `--skip-score` to evaluate existing data without touching serving mode.
+
+### Workflow hints (Claude Code hook)
+
+When working in Claude Code, a `Stop` hook in `.claude/settings.json` runs
+`scripts/hooks/shadow_workflow_hint.py` at the end of every Claude turn.  The
+script checks the pipeline state and prints the next suggested command when
+something actionable is waiting:
+
+| State detected | Suggested command |
+|----------------|-------------------|
+| shadow_log newer than shadow_eval | `python -m training.backfill_shadow_eval` |
+| shadow_eval newer than last eval run | `python -m training.promote_check` |
+| Decision = PASS | `$env:DERBYEDGE_ML_MODE='live'; python scripts/score.py` |
+| Decision = HOLD or INSUFFICIENT_DATA | Score more races in shadow mode |
+
+The hook is silent when the pipeline is fully up to date.
+
+---
+
 ## ML Serving Modes and Promotion Workflow
 
 DerbyEdge supports three serving modes controlled by a single environment variable:
@@ -155,11 +222,17 @@ heuristic regardless of mode.
 ### Commands
 
 ```bash
+# 0. One-time: apply horse_norm migration to existing database
+python -m training.migrate_horse_norm
+
 # 1. Score in shadow mode (ML logged, heuristic served)
 $env:DERBYEDGE_ML_MODE="shadow"; python scripts/score.py
 
 # 2. Backfill evaluation dataset (join shadow log with outcomes)
 python -m training.backfill_shadow_eval
+# Writes: output/shadow_eval.csv
+#         output/join_diagnostics.json
+#         output/unmatched_shadow_rows.csv
 
 # 3. Run promotion check (evaluate ML vs heuristic, write report)
 python -m training.promote_check
@@ -172,6 +245,33 @@ python -m training.generate_promotion_report
 $env:DERBYEDGE_ML_MODE="live"; python scripts/score.py
 ```
 
+### Join strategy
+
+The backfill step joins `output/shadow_log.csv` (ML predictions) with
+`starter_observations` (race outcomes) using a normalised horse name key.
+
+**Normalisation rules** applied to every horse name before matching:
+1. Lowercase and trim
+2. Replace `&` with `and`
+3. Remove: apostrophes `'`, periods `.`, commas `,`, hyphens `-`, parentheses `()`
+4. Collapse repeated whitespace to a single space
+
+**Key priority order:**
+1. `race_id + post + horse_norm` — primary (exact post + normalised name)
+2. `race_id + horse_norm` — fallback (used only if post is unavailable in either source)
+
+**Join diagnostics** (`output/join_diagnostics.json`) report the match rate after
+both passes.  If match rate is below 80%, check `output/unmatched_shadow_rows.csv`.
+
+**What to inspect first when match rate is low:**
+- Open `unmatched_shadow_rows.csv` — the `_key_full` column shows exactly which
+  keys failed.  Compare with the horse names in `starter_observations`.
+- Common causes: apostrophes/accents in names (`O'Brien` vs `OBrien`), post
+  position missing in one source, or race results not yet loaded
+  (run `python -m training.backfill_observations`).
+- The normalisation step handles most punctuation differences automatically;
+  remaining mismatches are usually a data-entry inconsistency in the source.
+
 ### Promotion artifacts
 
 Each `python -m training.promote_check` run writes to `output/eval_run_TIMESTAMP/`:
@@ -179,24 +279,44 @@ Each `python -m training.promote_check` run writes to `output/eval_run_TIMESTAMP
 | File | Contents |
 |------|----------|
 | `metrics_summary.json` | Overall heuristic vs ML metrics |
-| `segment_metrics.csv` | Per-segment log loss, Brier, hit rates |
+| `segment_metrics.csv` | Per-segment log loss, Brier, hit rates, winner counts |
+| `insufficient_segments.csv` | Segments below minimum sample-size thresholds |
 | `calibration_table.csv` | Probability bin reliability (both models) |
-| `promotion_decision.json` | PASS / HOLD / FAIL + exact reasons |
+| `promotion_decision.json` | PASS / HOLD / FAIL / INSUFFICIENT_DATA + exact reasons |
+| `join_diagnostics.json` | Match rate from most recent backfill run |
+| `unmatched_shadow_rows.csv` | Shadow rows with no outcome match |
 
 ### How to read the promotion decision
 
-- **PASS** — ML log loss improved ≥ 3% overall AND Brier improved ≥ 2% overall
-  with no segment degrading by > 1%. Set `DERBYEDGE_ML_MODE=live`.
-- **HOLD** — Improvements exist but thresholds not yet met, or insufficient data.
+- **PASS** — ML log loss improved ≥ 3% overall AND Brier improved ≥ 2% overall,
+  no segment degraded by > 1%, and all integrity checks passed.
+  Set `DERBYEDGE_ML_MODE=live`.
+- **HOLD** — Overall data is sufficient but improvement thresholds not yet met,
+  or individual segments are below the minimum sample size.
   Stay in shadow mode and collect more races.
 - **FAIL** — A segment degraded, integrity checks failed, or ML outputs are
   missing. Roll back: investigate, retrain, re-evaluate.
+- **INSUFFICIENT_DATA** — Fewer than 30 labeled races overall.  No meaningful
+  promotion decision can be made.  Continue scoring in shadow mode.
+
+### Promotion sample-size thresholds
+
+| Threshold | Value | Effect if not met |
+|-----------|-------|-------------------|
+| Overall minimum races | 30 | Decision = INSUFFICIENT_DATA |
+| Per-segment minimum races | 10 | Segment flagged as insufficient (HOLD note) |
+| Per-segment minimum winners | 10 | Segment flagged as insufficient (HOLD note) |
+
+Insufficient segments are listed in `insufficient_segments.csv` and noted in
+the `promotion_decision.json` reasons.  An insufficient segment never blocks a
+PASS if the overall data is strong — it only contributes to HOLD reasons.
 
 ### Shadow log
 
 `output/shadow_log.csv` accumulates one row per starter per scored race when
-mode is `shadow` or `live`. Fields include heuristic/ML/served probabilities,
-ranks, model version, and metadata for every horse.
+mode is `shadow` or `live`. Fields include `horse_norm` (normalised name used
+for join keys), heuristic/ML/served probabilities, ranks, model version, and
+metadata for every horse.
 
 ---
 

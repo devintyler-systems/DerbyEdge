@@ -2,15 +2,27 @@
 training/evaluate_shadow_vs_baseline.py
 
 Evaluate ML win probabilities vs heuristic baseline from shadow-log data.
-Produces a promotion recommendation: PASS | HOLD | FAIL.
+Produces a promotion recommendation: PASS | HOLD | FAIL | INSUFFICIENT_DATA.
 
 Promotion thresholds
 --------------------
-  PASS  if ML log loss improves >= 3% overall
-        AND ML Brier improves >= 2% overall
-  FAIL  if any segment degrades ML log loss by > 1% vs heuristic
-        OR any integrity check fails
-  HOLD  otherwise
+  INSUFFICIENT_DATA  overall races < 30  (collect more data)
+  PASS               ML log loss improves >= 3% overall
+                     AND ML Brier improves >= 2% overall
+                     AND no integrity check fails
+                     AND no segment degrades LL by > 1%
+  FAIL               any segment degrades ML log loss by > 1% vs heuristic
+                     OR any integrity check fails
+  HOLD               overall data sufficient but thresholds not yet met,
+                     or individual segments are thin
+
+Segment sufficiency rules (applied before PASS/FAIL/HOLD)
+----------------------------------------------------------
+  A segment is "insufficient" if:
+    • n_races < 10  (too few labeled races), OR
+    • n_winners < 10 (too few actual winners — calibration unreliable)
+  Insufficient segments → segment is flagged, decision can be HOLD.
+  Overall insufficient  → decision = INSUFFICIENT_DATA (no further check).
 
 Usage
 -----
@@ -24,6 +36,7 @@ import argparse
 import datetime
 import json
 import logging
+import shutil
 import sys
 from pathlib import Path
 from typing import Optional
@@ -45,6 +58,14 @@ _log = logging.getLogger(__name__)
 _LL_IMPROVE_PCT_THRESHOLD    = 3.0   # PASS requires >= 3% overall LL improvement
 _BRIER_IMPROVE_PCT_THRESHOLD = 2.0   # PASS requires >= 2% overall Brier improvement
 _SEGMENT_DEGRADE_THRESHOLD   = 1.0   # FAIL if any segment degrades LL by > 1%
+
+# Data sufficiency thresholds
+_MIN_RACES_OVERALL   = 30  # overall races needed before any PASS/HOLD/FAIL decision
+_MIN_RACES_SEGMENT   = 10  # races per segment to consider it evaluable
+_MIN_WINNERS_SEGMENT = 10  # winner rows per segment (calibration reliability)
+
+# Calibration bins with too few samples are flagged as unreliable
+_CALIB_MIN_BIN_N = 20
 
 
 # ---------------------------------------------------------------------------
@@ -118,6 +139,7 @@ def _compute_metrics(df: pd.DataFrame, prob_col: str) -> Optional[dict]:
     return {
         "n_races":         int(valid["race_id"].nunique()),
         "n_starters":      int(len(valid)),
+        "n_winners":       int(valid["win_flag"].sum()),
         "log_loss":        round(_log_loss_safe(y_true, y_pred), 5),
         "brier":           round(_brier(y_true, y_pred), 5),
         "top1_hit_rate":   round(_top1_hit_rate(valid, prob_col), 4),
@@ -126,19 +148,23 @@ def _compute_metrics(df: pd.DataFrame, prob_col: str) -> Optional[dict]:
     }
 
 
-def _calibration_bins(y_true: np.ndarray, y_pred: np.ndarray, n_bins: int = 10) -> list[dict]:
+def _calibration_bins(
+    y_true: np.ndarray, y_pred: np.ndarray, n_bins: int = 10
+) -> list[dict]:
     bins = np.linspace(0, 1, n_bins + 1)
     rows = []
     for lo, hi in zip(bins[:-1], bins[1:]):
         mask = (y_pred >= lo) & (y_pred < hi)
         if mask.sum() == 0:
             continue
+        n = int(mask.sum())
         rows.append({
             "bin_low":         round(float(lo), 2),
             "bin_high":        round(float(hi), 2),
-            "n":               int(mask.sum()),
+            "n":               n,
             "mean_predicted":  round(float(y_pred[mask].mean()), 4),
             "actual_win_rate": round(float(y_true[mask].mean()), 4),
+            "flag_sparse":     n < _CALIB_MIN_BIN_N,
         })
     return rows
 
@@ -202,7 +228,7 @@ def run_integrity_checks(shadow_log_path: Path) -> list[dict]:
     })
 
     # 3. No NaN or Inf
-    prob_arr = df[prob_col].values.astype(float)
+    prob_arr   = df[prob_col].values.astype(float)
     bad_finite = (~np.isfinite(np.nan_to_num(prob_arr, nan=np.nan))).sum()
     results.append({
         "check":  "no_nan_inf",
@@ -211,8 +237,8 @@ def run_integrity_checks(shadow_log_path: Path) -> list[dict]:
     })
 
     # 4. Rank consistent with probabilities
-    rank_ok    = True
-    bad_races  = []
+    rank_ok   = True
+    bad_races = []
     for rid, grp in df.groupby("race_id"):
         computed = grp[prob_col].rank(ascending=False, method="first").astype(int)
         stored   = grp["served_rank"].astype(int)
@@ -257,6 +283,39 @@ def run_integrity_checks(shadow_log_path: Path) -> list[dict]:
 
 
 # ---------------------------------------------------------------------------
+# Segment sufficiency check
+# ---------------------------------------------------------------------------
+
+def _check_segment_sufficiency(segment_rows: list[dict]) -> list[dict]:
+    """Return a list of insufficient-segment records.
+
+    A segment is insufficient if it has fewer than _MIN_RACES_SEGMENT races
+    or fewer than _MIN_WINNERS_SEGMENT winners.
+    """
+    insufficient = []
+    for row in segment_rows:
+        reasons = []
+        n_races   = row.get("n_races", 0) or 0
+        n_winners = row.get("n_winners", 0) or 0
+        if n_races < _MIN_RACES_SEGMENT:
+            reasons.append(
+                f"only {n_races} races (need >= {_MIN_RACES_SEGMENT})"
+            )
+        if n_winners < _MIN_WINNERS_SEGMENT:
+            reasons.append(
+                f"only {n_winners} winners (need >= {_MIN_WINNERS_SEGMENT})"
+            )
+        if reasons:
+            insufficient.append({
+                "segment":   row["segment"],
+                "n_races":   n_races,
+                "n_winners": n_winners,
+                "reasons":   "; ".join(reasons),
+            })
+    return insufficient
+
+
+# ---------------------------------------------------------------------------
 # Promotion logic
 # ---------------------------------------------------------------------------
 
@@ -265,6 +324,7 @@ def _promotion_decision(
     overall_ml: dict,
     segment_rows: list[dict],
     integrity_checks: list[dict],
+    insufficient_segments: list[dict],
 ) -> dict:
     """Return promotion decision dict with decision and reasons list."""
     reasons_pass = []
@@ -286,18 +346,31 @@ def _promotion_decision(
             "brier_improvement_pct": None,
         }
 
+    n_races_overall = overall_ml.get("n_races", 0)
+
+    # Overall data sufficiency — must pass before any other decision
+    if n_races_overall < _MIN_RACES_OVERALL:
+        return {
+            "decision": "INSUFFICIENT_DATA",
+            "reasons": [
+                f"Only {n_races_overall} races with outcomes (need >= {_MIN_RACES_OVERALL} for a valid promotion decision)"
+            ],
+            "ll_improvement_pct":    None,
+            "brier_improvement_pct": None,
+        }
+
     ll_h  = overall_h.get("log_loss")
     ll_ml = overall_ml.get("log_loss")
     br_h  = overall_h.get("brier")
     br_ml = overall_ml.get("brier")
 
-    ll_imp  = _pct_improvement(ll_h,  ll_ml)  if ll_h  and ll_ml  else None
-    brier_imp = _pct_improvement(br_h, br_ml) if br_h  and br_ml  else None
+    ll_imp    = _pct_improvement(ll_h,  ll_ml)  if ll_h  and ll_ml  else None
+    brier_imp = _pct_improvement(br_h,  br_ml)  if br_h  and br_ml  else None
 
-    # Insufficient data guard
-    if overall_ml.get("n_races", 0) < 10:
+    # Insufficient segments → note in hold reasons (never blocks FAIL)
+    for insuf in insufficient_segments:
         reasons_hold.append(
-            f"Insufficient evaluation data: only {overall_ml.get('n_races', 0)} races with outcomes (need >= 10)"
+            f"Segment '{insuf['segment']}' is insufficient: {insuf['reasons']}"
         )
 
     # Segment degradation check
@@ -306,13 +379,16 @@ def _promotion_decision(
         delta = row.get("ll_delta_pct")
         if delta is not None and delta < -_SEGMENT_DEGRADE_THRESHOLD:
             reasons_fail.append(
-                f"Segment '{row['segment']}' log loss degraded by {abs(delta):.1f}% (> {_SEGMENT_DEGRADE_THRESHOLD}% threshold)"
+                f"Segment '{row['segment']}' log loss degraded by {abs(delta):.1f}%"
+                f" (> {_SEGMENT_DEGRADE_THRESHOLD}% threshold)"
             )
             seg_fail = True
 
     # Pass criteria
     if ll_imp is not None and ll_imp >= _LL_IMPROVE_PCT_THRESHOLD:
-        reasons_pass.append(f"Log loss improved {ll_imp:.1f}% overall (>= {_LL_IMPROVE_PCT_THRESHOLD}% threshold)")
+        reasons_pass.append(
+            f"Log loss improved {ll_imp:.1f}% overall (>= {_LL_IMPROVE_PCT_THRESHOLD}% threshold)"
+        )
     else:
         reasons_hold.append(
             f"Log loss improvement {ll_imp:.1f}% is below {_LL_IMPROVE_PCT_THRESHOLD}% threshold"
@@ -320,7 +396,9 @@ def _promotion_decision(
         )
 
     if brier_imp is not None and brier_imp >= _BRIER_IMPROVE_PCT_THRESHOLD:
-        reasons_pass.append(f"Brier score improved {brier_imp:.1f}% overall (>= {_BRIER_IMPROVE_PCT_THRESHOLD}% threshold)")
+        reasons_pass.append(
+            f"Brier score improved {brier_imp:.1f}% overall (>= {_BRIER_IMPROVE_PCT_THRESHOLD}% threshold)"
+        )
     else:
         reasons_hold.append(
             f"Brier improvement {brier_imp:.1f}% is below {_BRIER_IMPROVE_PCT_THRESHOLD}% threshold"
@@ -329,13 +407,13 @@ def _promotion_decision(
 
     # Final decision
     if reasons_fail or not integrity_ok or seg_fail:
-        decision = "FAIL"
+        decision    = "FAIL"
         all_reasons = reasons_fail
     elif len(reasons_pass) >= 2 and not reasons_hold:
-        decision = "PASS"
+        decision    = "PASS"
         all_reasons = reasons_pass
     else:
-        decision = "HOLD"
+        decision    = "HOLD"
         all_reasons = reasons_hold + (reasons_pass if reasons_pass else [])
 
     return {
@@ -403,6 +481,7 @@ def run_evaluation(
                 "segment":           seg,
                 "n_races":           sh["n_races"],
                 "n_starters":        sh["n_starters"],
+                "n_winners":         sh.get("n_winners", 0),
                 "h_log_loss":        sh.get("log_loss"),
                 "ml_log_loss":       sm.get("log_loss") if sm else None,
                 "ll_delta_pct":      ll_delta,
@@ -412,9 +491,12 @@ def run_evaluation(
                 "ml_top1_hit_rate":  sm.get("top1_hit_rate") if sm else None,
             })
 
+    # ── Segment sufficiency ──────────────────────────────────────────────────
+    insufficient_segments = _check_segment_sufficiency(segment_rows)
+
     # ── Calibration bins ────────────────────────────────────────────────────
     calib_rows = []
-    y_true = labeled["win_flag"].astype(int).values
+    y_true_all = labeled["win_flag"].astype(int).values
     for col, label in (("heuristic_win_prob", "heuristic"), ("ml_win_prob", "ml")):
         if col not in labeled.columns:
             continue
@@ -437,6 +519,7 @@ def run_evaluation(
         overall_ml=m_ml,
         segment_rows=segment_rows,
         integrity_checks=integrity,
+        insufficient_segments=insufficient_segments,
     )
 
     # ── Write artifacts ──────────────────────────────────────────────────────
@@ -458,35 +541,53 @@ def run_evaluation(
     )
 
     # segment_metrics.csv
-    if segment_rows:
-        pd.DataFrame(segment_rows).to_csv(out_dir / "segment_metrics.csv", index=False)
-    else:
-        pd.DataFrame().to_csv(out_dir / "segment_metrics.csv", index=False)
+    pd.DataFrame(segment_rows if segment_rows else []).to_csv(
+        out_dir / "segment_metrics.csv", index=False
+    )
+
+    # insufficient_segments.csv
+    pd.DataFrame(insufficient_segments if insufficient_segments else []).to_csv(
+        out_dir / "insufficient_segments.csv", index=False
+    )
 
     # calibration_table.csv
-    if calib_rows:
-        pd.DataFrame(calib_rows).to_csv(out_dir / "calibration_table.csv", index=False)
-    else:
-        pd.DataFrame().to_csv(out_dir / "calibration_table.csv", index=False)
+    pd.DataFrame(calib_rows if calib_rows else []).to_csv(
+        out_dir / "calibration_table.csv", index=False
+    )
 
     # integrity_checks.json (embedded in promotion_decision.json too)
     integrity_passed = all(c["passed"] for c in integrity)
 
     # promotion_decision.json
     promotion = {
-        "decision":              decision_dict["decision"],
-        "reasons":               decision_dict["reasons"],
-        "ll_improvement_pct":    decision_dict.get("ll_improvement_pct"),
-        "brier_improvement_pct": decision_dict.get("brier_improvement_pct"),
-        "integrity_checks_passed": integrity_passed,
-        "integrity_checks":      integrity,
-        "evaluated_at":          datetime.datetime.utcnow().isoformat() + "Z",
-        "eval_file":             str(eval_path),
-        "recommended_action":    _recommended_action(decision_dict["decision"]),
+        "decision":                 decision_dict["decision"],
+        "reasons":                  decision_dict["reasons"],
+        "ll_improvement_pct":       decision_dict.get("ll_improvement_pct"),
+        "brier_improvement_pct":    decision_dict.get("brier_improvement_pct"),
+        "integrity_checks_passed":  integrity_passed,
+        "integrity_checks":         integrity,
+        "insufficient_segments":    insufficient_segments,
+        "evaluated_at":             datetime.datetime.utcnow().isoformat() + "Z",
+        "eval_file":                str(eval_path),
+        "recommended_action":       _recommended_action(decision_dict["decision"]),
+        "thresholds": {
+            "min_races_overall":   _MIN_RACES_OVERALL,
+            "min_races_segment":   _MIN_RACES_SEGMENT,
+            "min_winners_segment": _MIN_WINNERS_SEGMENT,
+            "ll_improve_pct":      _LL_IMPROVE_PCT_THRESHOLD,
+            "brier_improve_pct":   _BRIER_IMPROVE_PCT_THRESHOLD,
+            "segment_degrade_pct": _SEGMENT_DEGRADE_THRESHOLD,
+        },
     }
     (out_dir / "promotion_decision.json").write_text(
         json.dumps(promotion, indent=2, default=str), encoding="utf-8"
     )
+
+    # Copy join_diagnostics and unmatched rows from output/ if they exist
+    for fname in ("join_diagnostics.json", "unmatched_shadow_rows.csv"):
+        src = _OUTPUT / fname
+        if src.exists():
+            shutil.copy2(src, out_dir / fname)
 
     _log.info("Artifacts written to %s", out_dir)
     _log.info("Decision: %s", decision_dict["decision"])
@@ -498,9 +599,12 @@ def run_evaluation(
 
 def _recommended_action(decision: str) -> str:
     return {
-        "PASS": "promote to live — set DERBYEDGE_ML_MODE=live",
-        "HOLD": "remain in shadow — continue collecting data",
-        "FAIL": "roll back and retrain — investigate degraded segments",
+        "PASS":             "promote to live — set DERBYEDGE_ML_MODE=live",
+        "HOLD":             "remain in shadow — continue collecting data",
+        "FAIL":             "roll back and retrain — investigate degraded segments",
+        "INSUFFICIENT_DATA": (
+            f"remain in shadow — need >= {_MIN_RACES_OVERALL} labeled races overall"
+        ),
     }.get(decision, "unknown")
 
 
@@ -554,11 +658,22 @@ def main() -> None:
         mv = m.get(k, "—") if m else "—"
         print(f"  {k:<20}  {str(hv):>12}  {str(mv):>12}")
     print()
+
+    insuf = promotion.get("insufficient_segments", [])
+    if insuf:
+        print("Insufficient segments (thin data — treat their metrics with caution):")
+        for s in insuf:
+            print(f"  • {s['segment']}: {s['reasons']}")
+        print()
+
     print(f"Artifacts written to: {out_dir}")
     print(f"  • metrics_summary.json")
     print(f"  • segment_metrics.csv")
+    print(f"  • insufficient_segments.csv")
     print(f"  • calibration_table.csv")
     print(f"  • promotion_decision.json")
+    print(f"  • join_diagnostics.json        (if backfill_shadow_eval was run)")
+    print(f"  • unmatched_shadow_rows.csv    (if backfill_shadow_eval was run)")
 
 
 if __name__ == "__main__":

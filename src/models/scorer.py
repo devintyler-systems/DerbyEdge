@@ -26,6 +26,8 @@ import uuid
 from pathlib import Path
 from typing import Optional
 
+from src.utils.horse_norm import normalize_horse_name as _norm_horse
+
 import numpy as np
 import pandas as pd
 
@@ -245,6 +247,7 @@ def _emit_shadow_log(
             "track":               race_meta.get("track", ""),
             "race_no":             race_meta.get("race_no", ""),
             "horse":               erow["horse_name"],
+            "horse_norm":          _norm_horse(erow["horse_name"]),
             "post":                int(erow["post_position"]),
             "field_size":          n,
             "segment":             segment,
@@ -272,6 +275,75 @@ def _emit_shadow_log(
         df_new.to_csv(log_path, mode="w", header=True, index=False)
 
     _slog.info("_emit_shadow_log: %d rows appended  mode=%s  card_id=%s", n, mode, card_id)
+
+
+# ---------------------------------------------------------------------------
+# Schema introspection
+# ---------------------------------------------------------------------------
+
+def _get_table_columns(conn: sqlite3.Connection, table: str) -> set[str]:
+    """Return the set of column names present in *table* via PRAGMA table_info."""
+    return {row[1] for row in conn.execute(f"PRAGMA table_info({table})").fetchall()}
+
+
+def _fetch_race_meta(
+    conn: sqlite3.Connection,
+    card_id: int,
+    *,
+    fallback_surface: str = "",
+    fallback_dist: "float | None" = None,
+) -> dict:
+    """Fetch race-card metadata for shadow-log emission.
+
+    Builds the SELECT list from whichever race_cards columns actually exist so
+    the query never references an absent column.  Missing fields are filled from
+    already-computed fallback values or empty-string defaults.
+
+    Column name mapping (priority order):
+        race_date         → rc2.race_date   else rc2.card_date   else ""
+        race_no           → rc2.race_no     else rc2.race_number  else ""
+        distance_furlongs → rc2.distance_furlongs (generated col) else fallback_dist
+        surface           → rc2.surface     else fallback_surface
+    """
+    cols = _get_table_columns(conn, "race_cards")
+
+    date_col = (
+        "race_date"   if "race_date"   in cols else
+        "card_date"   if "card_date"   in cols else None
+    )
+    rno_col = (
+        "race_no"     if "race_no"     in cols else
+        "race_number" if "race_number" in cols else None
+    )
+    dist_col    = "distance_furlongs" if "distance_furlongs" in cols else None
+    surface_col = "surface"           if "surface"           in cols else None
+
+    parts = ["t.abbrev AS track"]
+    if date_col:
+        parts.append(f"rc2.{date_col} AS race_date")
+    if rno_col:
+        parts.append(f"CAST(rc2.{rno_col} AS TEXT) AS race_no")
+    if dist_col:
+        parts.append(f"rc2.{dist_col} AS distance_furlongs")
+    if surface_col:
+        parts.append(f"rc2.{surface_col} AS surface")
+
+    row = conn.execute(
+        f"SELECT {', '.join(parts)}"
+        " FROM race_cards rc2"
+        " LEFT JOIN tracks t ON rc2.track_id = t.track_id"
+        " WHERE rc2.card_id = ?",
+        (card_id,),
+    ).fetchone()
+
+    d = dict(row) if row else {}
+    return {
+        "race_date":         str(d.get("race_date") or ""),
+        "track":             str(d.get("track")     or ""),
+        "race_no":           str(d.get("race_no")   or ""),
+        "distance_furlongs": float(d["distance_furlongs"]) if "distance_furlongs" in d else fallback_dist,
+        "surface":           str(d.get("surface")   or fallback_surface),
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -842,21 +914,15 @@ def score_race(card_id: Optional[int] = None) -> pd.DataFrame:
     dist_furlongs = float(rc["distance_furlongs"]) if rc else 10.0
     race_type_key = f"{surface}_{'sprint' if dist_furlongs < 8.5 else 'route'}"
 
-    # Cache race metadata for shadow log (must read while conn is open)
-    _rc_meta = conn.execute(
-        """SELECT rc2.race_date,
-                  t.abbrev AS track,
-                  COALESCE(CAST(rc2.race_no AS TEXT), '') AS race_no
-           FROM race_cards rc2
-           LEFT JOIN tracks t ON rc2.track_id = t.track_id
-           WHERE rc2.card_id = ?""",
-        (card_id,),
-    ).fetchone()
-    _race_meta = {
-        "race_date": str(_rc_meta["race_date"]) if _rc_meta else "",
-        "track":     str(_rc_meta["track"])     if _rc_meta else "",
-        "race_no":   str(_rc_meta["race_no"])   if _rc_meta else "",
-    }
+    # Cache race metadata for shadow log (must read while conn is open).
+    # Uses _fetch_race_meta so the query adapts to whichever column names
+    # exist on this DB — older schemas use card_date/race_number rather than
+    # race_date/race_no, and distance_furlongs may be absent as a generated col.
+    _race_meta = _fetch_race_meta(
+        conn, card_id,
+        fallback_surface=surface,
+        fallback_dist=dist_furlongs,
+    )
 
     # ── Derby override detection ───────────────────────────────────────────
     derby_active = is_derby_context(conn, card_id)

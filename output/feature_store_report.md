@@ -1,8 +1,8 @@
 # DerbyEdge Feature Store Report
 
-**Generated**: 2026-05-10T01:10:21Z  
+**Generated**: 2026-05-12T23:45:36Z  
 **Race**     : 2026 Kentucky Derby (G1) — Churchill Downs  
-**Entries**  : 10
+**Entries**  : 8
 
 ## Feature Count
 
@@ -25,42 +25,42 @@
 
 | Feature | Tier | Null count | Null % |
 |---------|------|-----------|--------|
-| `speed_last` | IMPLEMENTED | 10 | 100% |
-| `speed_best` | IMPLEMENTED | 10 | 100% |
-| `speed_avg` | IMPLEMENTED | 10 | 100% |
-| `beyer_last` | IMPLEMENTED | 10 | 100% |
-| `speed_best_3` | DEGRADED | 10 | 100% |
-| `pace_early_mean_3` | PLACEHOLDER | 10 | 100% |
-| `pace_mid_mean_3` | PLACEHOLDER | 10 | 100% |
-| `finish_energy_proxy` | DEGRADED | 10 | 100% |
-| `form_cycle_idx` | DEGRADED | 10 | 100% |
-| `layoff_days` | IMPLEMENTED | 10 | 100% |
-| `career_win_pct` | IMPLEMENTED | 10 | 100% |
-| `career_itm_pct` | IMPLEMENTED | 10 | 100% |
-| `field_strength_last` | PLACEHOLDER | 10 | 100% |
-| `horses_beaten_pct_last` | DEGRADED | 10 | 100% |
-| `field_size_exp` | DEGRADED | 10 | 100% |
-| `works_30d` | IMPLEMENTED | 10 | 100% |
-| `bullet_30d` | PLACEHOLDER | 10 | 100% |
-| `days_since_last_work` | PLACEHOLDER | 10 | 100% |
-| `work_readiness_score` | DEGRADED | 10 | 100% |
-| `trainer_intent_proxy` | DEGRADED | 10 | 100% |
-| `trainer_jockey_itm_cond` | PLACEHOLDER | 10 | 100% |
-| `jockey_route_cond` | PLACEHOLDER | 10 | 100% |
-| `trainer_derby_cond` | PLACEHOLDER | 10 | 100% |
-| `surface_fit` | DEGRADED | 10 | 100% |
-| `distance_fit` | DEGRADED | 10 | 100% |
-| `route_progression` | DEGRADED | 10 | 100% |
-| `post_win_bias` | PLACEHOLDER | 10 | 100% |
-| `gate_reliability` | DEGRADED | 10 | 100% |
-| `trouble_recovery_proxy` | PLACEHOLDER | 10 | 100% |
-| `traffic_resilience_proxy` | DEGRADED | 10 | 100% |
-| `early_intent` | IMPLEMENTED | 10 | 100% |
-| `run_style_bucket` | IMPLEMENTED | 10 | 100% |
-| `publicness_score` | DEGRADED | 10 | 100% |
-| `classic_distance_projection` | DEGRADED | 10 | 100% |
-| `churchill_readiness` | PLACEHOLDER | 10 | 100% |
-| `jan_apr_improvement_curve` | PLACEHOLDER | 10 | 100% |
+| `speed_last` | IMPLEMENTED | 8 | 100% |
+| `speed_best` | IMPLEMENTED | 8 | 100% |
+| `speed_avg` | IMPLEMENTED | 8 | 100% |
+| `beyer_last` | IMPLEMENTED | 8 | 100% |
+| `speed_best_3` | DEGRADED | 8 | 100% |
+| `pace_early_mean_3` | PLACEHOLDER | 8 | 100% |
+| `pace_mid_mean_3` | PLACEHOLDER | 8 | 100% |
+| `finish_energy_proxy` | DEGRADED | 8 | 100% |
+| `form_cycle_idx` | DEGRADED | 8 | 100% |
+| `career_win_pct` | IMPLEMENTED | 8 | 100% |
+| `career_itm_pct` | IMPLEMENTED | 8 | 100% |
+| `field_strength_last` | PLACEHOLDER | 8 | 100% |
+| `field_size_exp` | DEGRADED | 8 | 100% |
+| `works_30d` | IMPLEMENTED | 8 | 100% |
+| `bullet_30d` | PLACEHOLDER | 8 | 100% |
+| `days_since_last_work` | PLACEHOLDER | 8 | 100% |
+| `work_readiness_score` | DEGRADED | 8 | 100% |
+| `trainer_intent_proxy` | DEGRADED | 8 | 100% |
+| `trainer_jockey_itm_cond` | PLACEHOLDER | 8 | 100% |
+| `jockey_route_cond` | PLACEHOLDER | 8 | 100% |
+| `trainer_derby_cond` | PLACEHOLDER | 8 | 100% |
+| `post_win_bias` | PLACEHOLDER | 8 | 100% |
+| `gate_reliability` | DEGRADED | 8 | 100% |
+| `trouble_recovery_proxy` | PLACEHOLDER | 8 | 100% |
+| `traffic_resilience_proxy` | DEGRADED | 8 | 100% |
+| `early_intent` | IMPLEMENTED | 8 | 100% |
+| `run_style_bucket` | IMPLEMENTED | 8 | 100% |
+| `publicness_score` | DEGRADED | 8 | 100% |
+| `classic_distance_projection` | DEGRADED | 8 | 100% |
+| `churchill_readiness` | PLACEHOLDER | 8 | 100% |
+| `jan_apr_improvement_curve` | PLACEHOLDER | 8 | 100% |
+| `layoff_days` | IMPLEMENTED | 7 | 88% |
+| `horses_beaten_pct_last` | DEGRADED | 7 | 88% |
+| `surface_fit` | DEGRADED | 7 | 88% |
+| `distance_fit` | DEGRADED | 7 | 88% |
+| `route_progression` | DEGRADED | 7 | 88% |
 | `class_delta` | DEGRADED | 0 | 0% |
 | `pedigree_route_proxy` | DEGRADED | 0 | 0% |
 | `pace_pressure` | IMPLEMENTED | 0 | 0% |
@@ -127,15 +127,15 @@ real historical data is imported into `horse_starts`, `workouts`,
 | 7 | `pace_mid_mean_3` | 100% | PLACEHOLDER |
 | 8 | `finish_energy_proxy` | 100% | DEGRADED |
 | 9 | `form_cycle_idx` | 100% | DEGRADED |
-| 10 | `layoff_days` | 100% | IMPLEMENTED |
+| 10 | `career_win_pct` | 100% | IMPLEMENTED |
 
 ## Sample Output (first 5 entries by post position)
 
 ```
-   horse_name  post_position speed_last speed_best_3 distance_fit classic_distance_projection  derby_override_score  market_implied_prob  morning_line_rank
- Gran Andrews              1       None         None         None                        None                 0.685             0.071429                  7
-   Ascendance              2       None         None         None                        None                 0.685             0.083333                  6
-General Issue              3       None         None         None                        None                 0.685             0.222222                  1
-     Sisyphus              4       None         None         None                        None                 0.685             0.153846                  4
-     Spurs Up              5       None         None         None                        None                 0.685             0.181818                  2
+     horse_name  post_position speed_last speed_best_3 distance_fit classic_distance_projection  derby_override_score  market_implied_prob  morning_line_rank
+      Cavendish              1       None         None         None                        None                 0.685             0.181818                  2
+       Khozando              2       None         None         None                        None                 0.685             0.250000                  1
+           Tate              3       None         None         None                        None                 0.685             0.125000                  5
+Man On The Moon              4       None         None         None                        None                 0.685             0.071429                  7
+  Rose'S Pepino              5       None         None         None                        None                 0.685             0.142857                  4
 ```

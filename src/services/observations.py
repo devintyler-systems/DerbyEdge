@@ -24,6 +24,8 @@ from __future__ import annotations
 import logging
 import sqlite3
 
+from src.utils.horse_norm import normalize_horse_name as _norm_horse
+
 _log = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
@@ -87,7 +89,7 @@ _INSERT = """
 INSERT OR REPLACE INTO starter_observations (
     race_id, race_date, track, race_no,
     surface, distance_furlongs, distance_bucket, field_size,
-    horse, post, trainer, jockey,
+    horse, horse_norm, post, trainer, jockey,
     ml_odds, pred_win_prob, pred_fair_odds, pred_rank,
     edge, tag, pace_fit, form_score, sudist_fit, chaos_pct, tier,
     scratched, finish_pos, win_flag, off_odds,
@@ -95,7 +97,7 @@ INSERT OR REPLACE INTO starter_observations (
 ) VALUES (
     :race_id, :race_date, :track, :race_no,
     :surface, :distance_furlongs, :distance_bucket, :field_size,
-    :horse, :post, :trainer, :jockey,
+    :horse, :horse_norm, :post, :trainer, :jockey,
     :ml_odds, :pred_win_prob, :pred_fair_odds, :pred_rank,
     :edge, :tag, :pace_fit, :form_score, :sudist_fit, :chaos_pct, :tier,
     :scratched, :finish_pos, :win_flag, :off_odds,
@@ -123,7 +125,9 @@ def append_observations(conn: sqlite3.Connection, card_id: int) -> int:
 
     n = 0
     for row in rows:
-        conn.execute(_INSERT, dict(row))
+        d = dict(row)
+        d["horse_norm"] = _norm_horse(d.get("horse") or "")
+        conn.execute(_INSERT, d)
         n += 1
     conn.commit()
     _log.info("append_observations: wrote %d rows for card_id=%s", n, card_id)

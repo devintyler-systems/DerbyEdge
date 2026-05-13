@@ -1,6 +1,6 @@
 # DerbyEdge Model Evaluation — dirt_route
 
-**Generated** : 2026-05-10T01:10:21Z  
+**Generated** : 2026-05-13T05:01:05Z  
 **Model name** : `dirt_route_v1` (ID=30)  
 **Version**    : `1.0.0-seed-only`  
 **Model type** : seed_only_baseline  
@@ -12,7 +12,7 @@
 | Criterion | Status |
 |-----------|--------|
 | Training rows | 0 (need >= 50 for XGBoost) |
-| Calibration | temperature-scaled softmax (T=20.0) |
+| Calibration | temperature-scaled softmax (T=6.16) |
 | Calibration target | overround-adjusted morning line |
 | Bet threshold | edge >= +0.025 |
 | Underlay threshold | edge < -0.015 |
@@ -23,13 +23,13 @@
 | Metric | Value | Interpretation |
 |--------|-------|----------------|
 | `sum_win_prob` | 1.000000 | Should be 1.000000 |
-| `kendall_tau_vs_ml` | 1.0000 | Rank correlation with market |
-| `kl_div_vs_ml` | 0.0330 | KL(model \|\| market) |
-| `mean_edge_abs` | 0.0189 | Mean abs model-market divergence |
-| `max_positive_edge` | 0.0342 | Best value candidate |
-| `max_negative_edge` | -0.0287 | Worst underlay |
+| `kendall_tau_vs_ml` | 0.5905 | Rank correlation with market |
+| `kl_div_vs_ml` | 0.1957 | KL(model \|\| market) |
+| `mean_edge_abs` | 0.0268 | Mean abs model-market divergence |
+| `max_positive_edge` | 0.0323 | Best value candidate |
+| `max_negative_edge` | -0.0862 | Worst underlay |
 | `bet_count` | 0 | Horses with edge >= +0.025 |
-| `underlay_count` | 4 | Horses with edge < -0.015 |
+| `underlay_count` | 3 | Horses with edge < -0.015 |
 
 ## Post-Race Metrics (N/A — Race Not Run)
 
@@ -77,19 +77,19 @@
 
 | Rank | Horse | Win% | Fair Odds | Edge | Tag |
 |------|-------|------|-----------|------|-----|
-| 1 | General Issue | 16.8% | 4.9-1 | -0.029 | underlay |
-| 2 | Spurs Up | 13.6% | 6.3-1 | -0.025 | underlay |
-| 3 | Head Lad | 12.6% | 6.9-1 | -0.022 | underlay |
-| 4 | Sisyphus | 11.8% | 7.5-1 | -0.019 | underlay |
-| 5 | English Painter | 8.9% | 10.3-1 | +0.000 | neutral |
+| 1 | Renegade | 18.4% | 4.4-1 | -0.004 | neutral |
+| 2 | Further Ado | 15.1% | 5.6-1 | +0.017 | neutral |
+| 3 | Commandment | 7.1% | 13.2-1 | -0.064 | underlay |
+| 4 | So Happy | 5.5% | 17.3-1 | -0.004 | neutral |
+| 5 | Danon Bourbon | 5.3% | 17.8-1 | +0.009 | neutral |
 
 ## Top 3 by Value Score
 
 | Horse | ML Odds | Win% | Edge | Tag |
 |-------|---------|------|------|-----|
-| Blameitonthefun | 31-1 | 6.2% | +0.034 | neutral |
-| Iceteca | 21-1 | 6.7% | +0.026 | neutral |
-| Gran Andrews | 13-1 | 7.7% | +0.013 | neutral |
+| Intrepido | 50-1 | 5.1% | +0.032 | neutral |
+| Six Speed | 50-1 | 5.1% | +0.032 | neutral |
+| Albus | 30-1 | 5.2% | +0.021 | neutral |
 
 ## Limitations
 
