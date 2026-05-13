@@ -131,6 +131,49 @@ The migration script:
 
 ---
 
+## First ML shadow run
+
+If you are setting up the shadow evaluation pipeline for the first time, or after
+populating a fresh database, run these four steps in order:
+
+```powershell
+# 1. Populate starter_observations from historical scores + results (one-time, idempotent)
+python -m training.backfill_observations
+
+# 2. Train win-probability model artifacts from those observations
+python -m training.train_win_model
+
+# 3. Score the next race in shadow mode (ML logged, heuristic still served)
+.\scripts\run_shadow_cycle.ps1
+
+# 4. After race results are ingested, evaluate shadow predictions vs. outcomes
+.\scripts\run_shadow_cycle.ps1 -SkipScore
+```
+
+**Why this order matters:**
+
+| Step | Requires | Produces |
+|------|----------|----------|
+| `backfill_observations` | `entry_scores` + `race_results` in DB | `starter_observations` rows |
+| `train_win_model` | `starter_observations` rows | `models/artifacts/*.pkl` |
+| `run_shadow_cycle` (score) | `models/artifacts/*.pkl` | `output/shadow_log.csv` with `ml_win_prob` |
+| `run_shadow_cycle -SkipScore` | ingested results + `shadow_log.csv` | promotion decision |
+
+Skipping step 2 does not crash the scorer, but `ml_win_prob` will be `null` in the
+shadow log and the evaluation will report **"No ML metrics available"**.  Use
+`-RequireMlArtifact` to hard-fail before scoring if no artifact is present:
+
+```powershell
+.\scripts\run_shadow_cycle.ps1 -RequireMlArtifact
+```
+
+> **Tip:** `train_win_model` needs at minimum ~10 labeled races per segment.  With
+> fewer races it falls back to a pooled model.  Run
+> `python -m training.backfill_observations --dry-run` to preview how many
+> observation rows are available before training.
+
+---
+
 ## One-command shadow cycle
 
 Run the full ML shadow evaluation pipeline — schema check, scoring, backfill,

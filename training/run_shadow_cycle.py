@@ -120,7 +120,6 @@ def _check_schema(auto_migrate: bool, skip_migration: bool) -> bool:
     # observations.py will write horse_norm automatically on first insert.
     cur  = conn.execute("PRAGMA table_info(starter_observations)")
     cols = {row[1] for row in cur.fetchall()}
-    conn.close()
 
     table_exists    = bool(cols)
     needs_migration = table_exists and "horse_norm" not in cols
@@ -132,6 +131,7 @@ def _check_schema(auto_migrate: bool, skip_migration: bool) -> bool:
             rc = _run_python("training.migrate_horse_norm")
             if rc != 0:
                 _err("Migration failed (exit code %d)" % rc)
+                conn.close()
                 return False
             _ok("Migration complete")
         else:
@@ -141,6 +141,7 @@ def _check_schema(auto_migrate: bool, skip_migration: bool) -> bool:
             print()
             print("  Or pass --auto-migrate to run it automatically,")
             print("  or --skip-migration to skip the check (not recommended).")
+            conn.close()
             return False
 
     elif needs_migration and skip_migration:
@@ -151,6 +152,26 @@ def _check_schema(auto_migrate: bool, skip_migration: bool) -> bool:
     elif not needs_migration:
         _ok("horse_norm column present")
 
+    # Warn (but don't block) if the table exists and is empty.
+    if table_exists:
+        obs_count = conn.execute(
+            "SELECT COUNT(*) FROM starter_observations"
+        ).fetchone()[0]
+        if obs_count == 0:
+            _warn(
+                "starter_observations is empty — shadow_eval will have no outcome columns"
+            )
+            print()
+            print(
+                "  Populate it from historical scores + results (one-time, idempotent):"
+            )
+            print("    python -m training.backfill_observations")
+            print(
+                "  Add --verbose for per-race progress, --dry-run to preview row count."
+            )
+            print()
+
+    conn.close()
     return True
 
 
@@ -158,7 +179,7 @@ def _check_schema(auto_migrate: bool, skip_migration: bool) -> bool:
 # Step 2 — Shadow scoring
 # ---------------------------------------------------------------------------
 
-def _run_scoring(card_id: int | None) -> bool:
+def _run_scoring(card_id: int | None, require_ml_artifact: bool = False) -> bool:
     """Score in shadow mode.  Refuses if env is already live."""
     current_mode = os.environ.get("DERBYEDGE_ML_MODE", "off").lower()
     if current_mode == "live":
@@ -168,6 +189,26 @@ def _run_scoring(card_id: int | None) -> bool:
             "  Either unset the variable or pass --skip-score."
         )
         return False
+
+    # ── ML artifact check ─────────────────────────────────────────────────
+    from training.artifact_check import any_artifact_available, artifact_status_lines
+    if not any_artifact_available():
+        _warn("No trained ML artifact found in models/artifacts/")
+        for line in artifact_status_lines():
+            print(line)
+        print()
+        print(
+            "  Shadow mode is active, but no trained ML artifact was found.\n"
+            "  Scoring will proceed with heuristic-only outputs; ml_win_prob\n"
+            "  will be absent from the shadow log and evaluation."
+        )
+        print()
+        print("  Train a model first:")
+        print("    python -m training.train_win_model")
+        print()
+        if require_ml_artifact:
+            _err("Aborting: --require-ml-artifact is set and no artifact exists.")
+            return False
 
     env_override = {"DERBYEDGE_ML_MODE": "shadow"}
     extra: list[str] = []
@@ -320,6 +361,30 @@ def _print_summary() -> None:
             status = "MISSING"
         print(f"    {name:<{label_w}}  {status}")
 
+    # Warn if the shadow log contains no ML-loaded rows — evaluation is heuristic-only.
+    shadow_log_path = _OUTPUT / "shadow_log.csv"
+    if shadow_log_path.exists():
+        try:
+            import csv as _csv
+            with shadow_log_path.open(newline="", encoding="utf-8") as _f:
+                _flags = [
+                    int(row.get("ml_loaded_flag", 0))
+                    for row in _csv.DictReader(_f)
+                ]
+            if _flags and max(_flags) == 0:
+                print()
+                print(
+                    "  NOTE  ml_loaded_flag=0 for all shadow rows — the scorer ran"
+                    " without a\n"
+                    "        trained artifact.  ML evaluation metrics will be absent"
+                    " until you\n"
+                    "        train and re-score:"
+                )
+                print("          python -m training.train_win_model")
+                print("          .\\scripts\\run_shadow_cycle.ps1")
+        except Exception:
+            pass
+
     # Final action hint outside the box
     eval_dir = _latest_eval_dir()
     if eval_dir:
@@ -353,15 +418,17 @@ def main() -> int:
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=__doc__,
     )
-    ap.add_argument("--skip-score",      action="store_true",
+    ap.add_argument("--skip-score",           action="store_true",
                     help="Skip shadow scoring (use existing shadow_log.csv)")
-    ap.add_argument("--skip-migration",  action="store_true",
+    ap.add_argument("--skip-migration",       action="store_true",
                     help="Skip the horse_norm migration check")
-    ap.add_argument("--auto-migrate",    action="store_true",
+    ap.add_argument("--auto-migrate",         action="store_true",
                     help="Run migrate_horse_norm automatically if needed")
-    ap.add_argument("--report-only",     action="store_true",
+    ap.add_argument("--report-only",          action="store_true",
                     help="Only regenerate the markdown report from last eval run")
-    ap.add_argument("--card-id",         type=int, default=None,
+    ap.add_argument("--require-ml-artifact",  action="store_true",
+                    help="Abort before scoring if no trained ML artifact is found")
+    ap.add_argument("--card-id",              type=int, default=None,
                     help="Card ID to pass to score.py")
     args = ap.parse_args()
 
@@ -388,7 +455,7 @@ def main() -> int:
     # ── Step 2: Shadow scoring ─────────────────────────────────────────────
     if not args.skip_score:
         _header("Shadow scoring  (DERBYEDGE_ML_MODE=shadow)")
-        if not _run_scoring(args.card_id):
+        if not _run_scoring(args.card_id, require_ml_artifact=args.require_ml_artifact):
             return 1
     else:
         _header("Shadow scoring  [SKIPPED]")

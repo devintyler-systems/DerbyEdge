@@ -24,14 +24,21 @@
 .PARAMETER CardId
     Card ID to pass to score.py (default: Derby card).
 
+.PARAMETER RequireMlArtifact
+    Abort before scoring if no trained ML artifact is found in models/artifacts/.
+    Use this to prevent accidentally generating a heuristic-only shadow log.
+
 .EXAMPLE
     .\scripts\run_shadow_cycle.ps1
 
 .EXAMPLE
-    .\scripts\run_shadow_cycle.ps1 --skip-score
+    .\scripts\run_shadow_cycle.ps1 -SkipScore
 
 .EXAMPLE
-    .\scripts\run_shadow_cycle.ps1 --auto-migrate --card-id 7
+    .\scripts\run_shadow_cycle.ps1 -AutoMigrate -CardId 7
+
+.EXAMPLE
+    .\scripts\run_shadow_cycle.ps1 -RequireMlArtifact
 #>
 
 param(
@@ -39,6 +46,7 @@ param(
     [switch]$SkipMigration,
     [switch]$AutoMigrate,
     [switch]$ReportOnly,
+    [switch]$RequireMlArtifact,
     [int]$CardId = 0
 )
 
@@ -63,11 +71,12 @@ $env:PYTHONUTF8 = "1"
 # Build argument list for the Python runner
 $pyArgs = @()
 
-if ($SkipScore)     { $pyArgs += "--skip-score" }
-if ($SkipMigration) { $pyArgs += "--skip-migration" }
-if ($AutoMigrate)   { $pyArgs += "--auto-migrate" }
-if ($ReportOnly)    { $pyArgs += "--report-only" }
-if ($CardId -gt 0)  { $pyArgs += "--card-id"; $pyArgs += "$CardId" }
+if ($SkipScore)          { $pyArgs += "--skip-score" }
+if ($SkipMigration)      { $pyArgs += "--skip-migration" }
+if ($AutoMigrate)        { $pyArgs += "--auto-migrate" }
+if ($ReportOnly)         { $pyArgs += "--report-only" }
+if ($RequireMlArtifact)  { $pyArgs += "--require-ml-artifact" }
+if ($CardId -gt 0)       { $pyArgs += "--card-id"; $pyArgs += "$CardId" }
 
 python -m training.run_shadow_cycle @pyArgs
 exit $LASTEXITCODE
