@@ -131,11 +131,59 @@ def entry_scores_cols(conn: sqlite3.Connection) -> set[str]:
 # Internal migration (called by init_db; also consolidated into ensure_* above)
 # ---------------------------------------------------------------------------
 
+def ensure_starter_observations(conn: sqlite3.Connection) -> None:
+    """Idempotent: ensure starter_observations table and its indexes exist."""
+    conn.executescript("""
+        CREATE TABLE IF NOT EXISTS starter_observations (
+            obs_id                 INTEGER PRIMARY KEY AUTOINCREMENT,
+            race_id                INTEGER NOT NULL,
+            race_date              TEXT    NOT NULL,
+            track                  TEXT    NOT NULL,
+            race_no                INTEGER NOT NULL,
+            surface                TEXT,
+            distance_furlongs      REAL,
+            distance_bucket        TEXT,
+            field_size             INTEGER,
+            horse                  TEXT    NOT NULL,
+            post                   INTEGER,
+            trainer                TEXT,
+            jockey                 TEXT,
+            ml_odds                REAL,
+            pred_win_prob          REAL,
+            pred_fair_odds         REAL,
+            pred_rank              INTEGER,
+            edge                   REAL,
+            tag                    TEXT,
+            pace_fit               REAL,
+            form_score             REAL,
+            sudist_fit             REAL,
+            chaos_pct              REAL,
+            tier                   TEXT,
+            scratched              INTEGER NOT NULL DEFAULT 0,
+            finish_pos             INTEGER,
+            win_flag               INTEGER,
+            off_odds               REAL,
+            model_version          TEXT,
+            source_prediction_file TEXT,
+            source_result_file     TEXT,
+            created_at             TEXT NOT NULL
+                       DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+            UNIQUE(race_id, post)
+        );
+        CREATE INDEX IF NOT EXISTS idx_obs_race_date
+            ON starter_observations(race_date);
+        CREATE INDEX IF NOT EXISTS idx_obs_track_date
+            ON starter_observations(track, race_date);
+    """)
+    conn.commit()
+
+
 def _migrate_db() -> None:
     """Apply all additive column migrations.  Safe to re-run (idempotent)."""
     conn = sqlite3.connect(DB_PATH)
     ensure_score_runs_columns(conn)
     ensure_entry_scores_columns(conn)
+    ensure_starter_observations(conn)
     conn.close()
 
 

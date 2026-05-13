@@ -399,6 +399,55 @@ CREATE TABLE IF NOT EXISTS feature_store (
 );
 
 -- ============================================================
+-- 15. STARTER_OBSERVATIONS
+--     One row per starter per race, joining pre-race model outputs
+--     with post-race labels.  Written automatically after each
+--     result ingest.  Leakage boundary: finish_pos / win_flag /
+--     off_odds are the only post-race columns; everything else is
+--     known before post time.
+-- ============================================================
+CREATE TABLE IF NOT EXISTS starter_observations (
+    obs_id                 INTEGER PRIMARY KEY AUTOINCREMENT,
+    -- Race context
+    race_id                INTEGER NOT NULL,    -- = card_id
+    race_date              TEXT    NOT NULL,    -- YYYY-MM-DD
+    track                  TEXT    NOT NULL,    -- track abbrev
+    race_no                INTEGER NOT NULL,
+    surface                TEXT,
+    distance_furlongs      REAL,
+    distance_bucket        TEXT,               -- sprint | route
+    field_size             INTEGER,
+    -- Starter (pre-race identity)
+    horse                  TEXT    NOT NULL,
+    post                   INTEGER,
+    trainer                TEXT,
+    jockey                 TEXT,
+    -- Pre-race model outputs
+    ml_odds                REAL,               -- morning line decimal odds
+    pred_win_prob          REAL,               -- heuristic win probability [0,1]
+    pred_fair_odds         REAL,               -- 1/pred_win_prob - 1
+    pred_rank              INTEGER,            -- model rank within field
+    edge                   REAL,               -- pred_win_prob - market_implied_prob
+    tag                    TEXT,               -- bet | neutral | underlay | no_data
+    pace_fit               REAL,
+    form_score             REAL,
+    sudist_fit             REAL,
+    chaos_pct              REAL,
+    tier                   TEXT,               -- chaos tier label
+    scratched              INTEGER NOT NULL DEFAULT 0,
+    -- Post-race labels (leakage boundary; written on result ingestion)
+    finish_pos             INTEGER,
+    win_flag               INTEGER,            -- 1 if official winner, else 0
+    off_odds               REAL,               -- official odds decimal
+    -- Provenance
+    model_version          TEXT,
+    source_prediction_file TEXT,
+    source_result_file     TEXT,
+    created_at             TEXT    NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+    UNIQUE(race_id, post)
+);
+
+-- ============================================================
 -- INDEXES
 -- ============================================================
 -- race_cards
@@ -433,6 +482,10 @@ CREATE INDEX IF NOT EXISTS idx_sr_card         ON score_runs(card_id);
 -- feature_store
 CREATE INDEX IF NOT EXISTS idx_fs_card         ON feature_store(card_id);
 CREATE INDEX IF NOT EXISTS idx_fs_entry        ON feature_store(entry_id);
+
+-- starter_observations
+CREATE INDEX IF NOT EXISTS idx_obs_race_date   ON starter_observations(race_date);
+CREATE INDEX IF NOT EXISTS idx_obs_track_date  ON starter_observations(track, race_date);
 
 -- ============================================================
 -- VIEWS

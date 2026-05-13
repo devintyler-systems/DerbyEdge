@@ -64,6 +64,7 @@ from src.services.results_intake import (
     parse_results_csv,
     preview_results_match,
 )
+from src.services.observations import append_observations as _append_observations
 from src.services.screenshot_ingest import ingest_sportsbook_screenshot
 from src.services.race_admin import (
     ensure_is_hidden_column,
@@ -3268,7 +3269,15 @@ with tab7:
 
         if _pdf7_file is not None:
             with st.spinner("Extracting results from PDF…"):
-                _pr7 = parse_results_pdf(_pdf7_file.getvalue())
+                _pr7 = parse_results_pdf(
+                    _pdf7_file.getvalue(),
+                    active_race={
+                        "track_code":  race_info.get("track_abbrev"),
+                        "race_date":   race_info.get("card_date"),
+                        "race_number": race_info.get("race_number"),
+                        "track_name":  race_info.get("track_name"),
+                    },
+                )
 
             if not _pr7["ok"]:
                 st.markdown(
@@ -3415,6 +3424,8 @@ with tab7:
                             })
                         _conn7i = get_connection()
                         _ing7 = ingest_results(_conn7i, _pdf7_rows)
+                        for _cid7 in _ing7.get("card_ids", []):
+                            _append_observations(_conn7i, _cid7)
                         _conn7i.close()
                         st.success(
                             f"Inserted {_ing7['n_inserted']} rows · "
@@ -3606,6 +3617,8 @@ with tab7:
                     ):
                         _conn7i = get_connection()
                         _ingest7 = ingest_results(_conn7i, _res_parsed)
+                        for _cid7 in _ingest7.get("card_ids", []):
+                            _append_observations(_conn7i, _cid7)
                         _conn7i.close()
                         st.success(
                             f"Inserted {_ingest7['n_inserted']} rows · "

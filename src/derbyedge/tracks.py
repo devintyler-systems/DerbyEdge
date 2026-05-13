@@ -21,6 +21,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from difflib import get_close_matches
 import re
+import unicodedata
 from typing import Optional
 
 
@@ -29,6 +30,20 @@ def normalize_track_name(name: str) -> str:
     s = name.strip().lower()
     s = s.replace("&", " and ")
     s = re.sub(r"[^a-z0-9\s]", " ", s)
+    return re.sub(r"\s+", " ", s).strip()
+
+
+def normalize_track_text(text: str) -> str:
+    """Uppercase, strip OCR/punctuation noise, collapse whitespace.
+
+    Designed for matching against noisy PDF header text where artifacts like
+    "LOUISIANA? DOWNS" should resolve to "LOUISIANA DOWNS".  Unlike
+    normalize_track_name(), this produces an UPPERCASE canonical form used
+    exclusively by the PDF-header alias scan (TRACK_CODES_UPPER).
+    """
+    s = unicodedata.normalize("NFKD", text)
+    s = s.upper()
+    s = re.sub(r"[^A-Z0-9\s]", " ", s)
     return re.sub(r"\s+", " ", s).strip()
 
 
@@ -67,6 +82,11 @@ _TRACKS: tuple[_TrackRecord, ...] = (
     _TrackRecord("FL",  "Finger Lakes",          ("Finger Lakes",)),
     _TrackRecord("PID", "Presque Isle Downs",    ("Presque Isle Downs", "Presque Isle")),
     _TrackRecord("EVD", "Evangeline Downs",      ("Evangeline Downs", "Evangeline")),
+    _TrackRecord("LAD", "Louisiana Downs", (
+        "Louisiana Downs",
+        "Louisiana Downs Racetrack",
+        "Louisiana Downs Bossier City",
+    )),
     _TrackRecord("IND", "Horseshoe Indianapolis", (
         "Horseshoe Indianapolis",
         "Indiana Grand",
@@ -96,6 +116,15 @@ for _rec in _TRACKS:
 # Every normalized alias becomes a key; short aliases (e.g. "santa anita",
 # "indiana grand") act as natural substrings of PDF header text.
 TRACK_CODES: dict[str, str] = dict(_ALIAS_TO_CODE)
+
+# Uppercase variant for OCR-noise-tolerant PDF header matching.
+# Keys are normalize_track_text(alias) — uppercase, all punctuation stripped.
+# Used by _extract_track() in pdf_ingest.py as the primary (first-pass) scan.
+TRACK_CODES_UPPER: dict[str, str] = {}
+for _rec in _TRACKS:
+    TRACK_CODES_UPPER[normalize_track_text(_rec.name)] = _rec.code
+    for _alias in _rec.aliases:
+        TRACK_CODES_UPPER[normalize_track_text(_alias)] = _rec.code
 
 
 def resolve_track(

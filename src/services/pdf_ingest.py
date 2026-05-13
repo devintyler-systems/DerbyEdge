@@ -42,7 +42,12 @@ _log = logging.getLogger(__name__)
 # Canonical registry lives in src/derbyedge/tracks.py.
 # TRACK_CODES is a flat {normalized_alias: code} dict used by the
 # substring-scan extractors below; resolve_track() handles full resolution.
-from src.derbyedge.tracks import TRACK_CODES as _TRACK_CODES, resolve_track as _resolve_track
+from src.derbyedge.tracks import (
+    TRACK_CODES as _TRACK_CODES,
+    TRACK_CODES_UPPER as _TRACK_CODES_UPPER,
+    normalize_track_text as _normalize_track_text,
+    resolve_track as _resolve_track,
+)
 
 _MONTH_MAP: dict[str, int] = {
     "january":1,  "february":2,  "march":3,    "april":4,
@@ -186,20 +191,56 @@ def _extract_race_number(text: str) -> int | None:
 
 
 def _extract_track(text: str) -> tuple[str | None, str | None]:
-    """Returns (track_code, track_name). Searches the full text."""
+    """Returns (track_code, track_name). Searches the full text.
+
+    Pass 1 — uppercase-normalized scan on the header (first 10 lines).
+      Strips OCR noise such as "LOUISIANA? DOWNS" → "LOUISIANA DOWNS" before
+      matching, so punctuation artifacts between words no longer block resolution.
+
+    Pass 2 — existing lowercase substring scan on full text (unchanged behaviour).
+
+    Pass 3/4 — regex fallbacks for bare codes and track-name patterns.
+    """
+    header_lines = text.splitlines()[:10]
+    raw_header_log = " | ".join(l.strip() for l in header_lines[:5] if l.strip())
+    norm_header = _normalize_track_text("\n".join(header_lines))
+
+    _log.debug("_extract_track: raw_header=%r", raw_header_log)
+    _log.debug("_extract_track: norm_header=%r", norm_header)
+
+    # Pass 1: noise-tolerant uppercase alias match on header
+    for alias_norm, code in _TRACK_CODES_UPPER.items():
+        if alias_norm in norm_header:
+            _log.debug(
+                "_extract_track: normalized_alias_match alias=%r → %r", alias_norm, code
+            )
+            return code, alias_norm.title()
+
+    # Pass 2: existing lowercase substring scan on full text
     text_lower = text.lower()
     for name, code in _TRACK_CODES.items():
         if name in text_lower:
+            _log.debug(
+                "_extract_track: lowercase_substring_match alias=%r → %r", name, code
+            )
             return code, name.title()
+
+    # Pass 3: bare code before a race/race-number line
     m = re.search(r'^([A-Z]{2,4})\s*[-–·|]\s*(?:Race|R\s*\d)', text, re.M)
     if m:
+        _log.debug("_extract_track: code_pattern_match code=%r", m.group(1))
         return m.group(1), None
+
+    # Pass 4: track-name keyword pattern
     m = re.search(
         r'([A-Z][A-Za-z\s]+(?:Race\s*Course|Raceway|Park|Downs|Racetrack))',
         text
     )
     if m:
+        _log.debug("_extract_track: name_pattern_match name=%r", m.group(1).strip())
         return None, m.group(1).strip()
+
+    _log.debug("_extract_track: no_match")
     return None, None
 
 
@@ -1451,8 +1492,17 @@ def parse_race_pdf(pdf_bytes: bytes) -> dict[str, Any]:
     }
 
 
-def parse_results_pdf(pdf_bytes: bytes) -> dict[str, Any]:
+def parse_results_pdf(
+    pdf_bytes: bytes,
+    active_race: dict | None = None,
+) -> dict[str, Any]:
     """Parse an Equibase official chart PDF (post-race results).
+
+    active_race (optional): context from the currently selected race in the UI.
+        If track extraction fails but race_date + race_number match the active
+        race unambiguously, its track_code is used as a fallback.
+        Expected keys: "track_code", "race_date", "race_number" (int or str),
+                       "track_name" (optional).
 
     Returns:
         ok, error, warnings,
@@ -1522,6 +1572,31 @@ def parse_results_pdf(pdf_bytes: bytes) -> dict[str, Any]:
     race_date     = _extract_date(text)
     race_number   = _extract_race_number(text)
     track_code, track_name = _extract_track(text)
+
+    # ── Active-race fallback ──────────────────────────────────────────────────
+    # If the PDF header is too noisy to resolve a track code, but the parsed
+    # race_date + race_number match the currently selected race unambiguously,
+    # borrow the track code from that context instead of leaving it null.
+    _track_fallback_used = False
+    if not track_code and active_race:
+        _ar_tc = active_race.get("track_code")
+        _ar_dt = active_race.get("race_date")
+        _ar_rn = active_race.get("race_number")
+        if (
+            _ar_tc
+            and _ar_dt and race_date and _ar_dt == race_date
+            and _ar_rn is not None and race_number is not None
+            and int(_ar_rn) == race_number
+        ):
+            _log.info(
+                "parse_results_pdf: track fallback → %r "
+                "(date=%r race=%s matched active race)",
+                _ar_tc, race_date, race_number,
+            )
+            track_code = _ar_tc
+            track_name = active_race.get("track_name") or track_name
+            _track_fallback_used = True
+
     distance_text = _extract_distance(text)
     surface       = _extract_surface(text)
     race_type     = _extract_race_type(text)
@@ -1550,6 +1625,12 @@ def parse_results_pdf(pdf_bytes: bytes) -> dict[str, Any]:
         warnings.append("Could not extract race number")
     if not track_code:
         warnings.append("Could not extract track code")
+    elif _track_fallback_used:
+        warnings.append(
+            f"Track code could not be extracted from PDF header; used active race "
+            f"fallback ({track_code}, date={race_date}, race={race_number}). "
+            "Verify this PDF belongs to that race before importing."
+        )
 
     # ── 1/ST BET / Equibase chart: detected by standard results-chart header ──
     is_equibase_chart = bool(re.search(r'Last\s+Raced\s+Pgm\s+Horse\s+Name', text))
@@ -1584,11 +1665,14 @@ def parse_results_pdf(pdf_bytes: bytes) -> dict[str, Any]:
         warnings.append(_fail_reason)
         _log.warning("parse_results_pdf: %s", _fail_reason)
         _diag = {
-            "detected_format":    detected_format,
-            "parsed_track":       track_code,
-            "parsed_date":        race_date,
-            "parsed_race_number": race_number,
-            "n_finishers":        0,
+            "detected_format":     detected_format,
+            "parsed_track":        track_code,
+            "parsed_date":         race_date,
+            "parsed_race_number":  race_number,
+            "n_finishers":         0,
+            "track_extraction_path": (
+                "active_race_fallback" if _track_fallback_used else "extracted"
+            ),
             "parse_failure_reason": _fail_reason,
         }
         return {
@@ -1609,11 +1693,14 @@ def parse_results_pdf(pdf_bytes: bytes) -> dict[str, Any]:
     _res = _resolve_track(track_name=track_name, track_code=track_code)
 
     _diag = {
-        "detected_format":    detected_format,
-        "parsed_track":       track_code,
-        "parsed_date":        race_date,
-        "parsed_race_number": race_number,
-        "n_finishers":        len(finishers),
+        "detected_format":     detected_format,
+        "parsed_track":        track_code,
+        "parsed_date":         race_date,
+        "parsed_race_number":  race_number,
+        "n_finishers":         len(finishers),
+        "track_extraction_path": (
+            "active_race_fallback" if _track_fallback_used else "extracted"
+        ),
         "parse_failure_reason": None,
     }
 

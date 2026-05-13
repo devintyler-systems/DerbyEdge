@@ -20,6 +20,7 @@ Missing-data flags are per-horse text labels (CRITICAL_MISSING + dist_fit_single
 """
 
 import datetime
+import os
 import sqlite3
 import uuid
 from pathlib import Path
@@ -77,6 +78,102 @@ _FEATURE_TIER = {
 
 
 _DERBY_DEFAULT_CHAOS_INDEX = 0.85   # default for scorer; UI slider default matches
+
+# ── ML win-model feature flag ─────────────────────────────────────────────────
+# Set DERBYEDGE_ML_WIN_MODEL=1 to replace the heuristic win probabilities with
+# the trained GBM model from models/artifacts/.  When the artifact is absent
+# or the model is not yet trained the scorer falls back to the heuristic.
+# The Derby override always uses the heuristic regardless of this flag.
+_USE_ML_WIN_MODEL = os.getenv("DERBYEDGE_ML_WIN_MODEL", "0") == "1"
+
+try:
+    from training.win_model_loader import (
+        load_best_model as _load_best_model,
+        score_dataframe as _ml_score_dataframe,
+    )
+    _ML_LOADER_AVAILABLE = True
+except ImportError:
+    _ML_LOADER_AVAILABLE = False
+
+
+def _load_ml_win_probs(
+    feat_df: pd.DataFrame,
+    entries_df: pd.DataFrame,
+    heuristic_probs: np.ndarray,
+    market_probs: np.ndarray,
+    race_type_key: str,
+    dist_furlongs: float,
+    surface: str,
+) -> Optional[np.ndarray]:
+    """Return ML-model win probabilities (normalized, same shape as heuristic_probs).
+
+    Builds an inference DataFrame from scorer's live feat_df/entries_df and the
+    already-computed heuristic probabilities (used as pred_win_prob feature).
+    Returns None when no artifact is available or scoring fails — the caller
+    falls back to the heuristic silently.
+    """
+    if not _ML_LOADER_AVAILABLE:
+        return None
+
+    import logging
+    _mlog = logging.getLogger(__name__)
+
+    try:
+        model, cal, feat_cols = _load_best_model(race_type_key)
+        if model is None:
+            _mlog.debug("_load_ml_win_probs: no artifact for segment %s", race_type_key)
+            return None
+
+        # Temporary rank from heuristic — used as pred_rank feature.
+        temp_rank = (
+            pd.Series(heuristic_probs)
+            .rank(ascending=False, method="first")
+            .astype(int)
+            .values
+        )
+
+        # Merge morning_line_odds from entries onto feat_df by entry_id.
+        ent_sub = (
+            entries_df[["entry_id", "morning_line_odds"]]
+            .copy()
+            .assign(entry_id=entries_df["entry_id"].astype(int))
+        )
+        merged = (
+            feat_df.copy()
+            .assign(entry_id=feat_df["entry_id"].astype(int))
+            .merge(ent_sub, on="entry_id", how="left")
+            .reset_index(drop=True)
+        )
+
+        n = len(merged)
+        inf_df = pd.DataFrame({
+            "post":              pd.to_numeric(merged["post_position"], errors="coerce"),
+            "ml_odds":           pd.to_numeric(merged["morning_line_odds"], errors="coerce"),
+            "pred_win_prob":     heuristic_probs,
+            "pred_rank":         temp_rank,
+            "edge":              heuristic_probs - market_probs,
+            "pace_fit":          pd.to_numeric(merged.get("pace_fit_score"),  errors="coerce"),
+            "form_score":        pd.to_numeric(merged.get("form_cycle_idx"),  errors="coerce"),
+            "sudist_fit":        pd.to_numeric(merged.get("distance_fit"),    errors="coerce"),
+            "chaos_pct":         np.full(n, np.nan),
+            "field_size":        float(n),
+            "distance_furlongs": dist_furlongs,
+            "distance_bucket":   "sprint" if dist_furlongs < 8.5 else "route",
+            "surface":           surface,
+        })
+
+        scored   = _ml_score_dataframe(inf_df, model, cal, feat_cols)
+        ml_probs = scored["model_win_prob"].to_numpy(dtype=float)
+
+        if not np.isfinite(ml_probs).all() or ml_probs.sum() <= 0:
+            _mlog.warning("_load_ml_win_probs: non-finite output — falling back to heuristic")
+            return None
+
+        return ml_probs / ml_probs.sum()
+
+    except Exception as exc:
+        _mlog.warning("_load_ml_win_probs: scoring failed — %s", exc)
+        return None
 
 
 # ---------------------------------------------------------------------------
@@ -687,6 +784,18 @@ def score_race(card_id: Optional[int] = None) -> pd.DataFrame:
         market_probs = np.full(_n_entries, 1.0 / _n_entries)
     else:
         market_probs = ml_implied / ml_sum
+
+    # ── ML win-model injection (feature flag) ─────────────────────────────
+    if not derby_active and _USE_ML_WIN_MODEL:
+        _ml_probs = _load_ml_win_probs(
+            feat_df, entries_df, win_probs, market_probs,
+            race_type_key, dist_furlongs, surface,
+        )
+        if _ml_probs is not None:
+            win_probs = _ml_probs
+            print(f"  [scorer]   ML win model active — segment={race_type_key}")
+        else:
+            print("  [scorer]   ML win model requested but unavailable — using heuristic")
 
     # ── Derived scoring ────────────────────────────────────────────────────
     fair_odds          = np.round(1.0 / np.maximum(win_probs, 1e-9) - 1.0, 2)

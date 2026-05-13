@@ -14,10 +14,12 @@ Covers:
 from __future__ import annotations
 
 import sqlite3
+from unittest.mock import patch
 import pytest
 
 from tests.conftest import insert_minimal_race
-from src.derbyedge.tracks import normalize_track_name, resolve_track
+from src.derbyedge.tracks import normalize_track_name, normalize_track_text, resolve_track
+from src.services.pdf_ingest import _extract_track, parse_results_pdf
 from src.services.results_intake import (
     ensure_race_review_view,
     evaluate_score_run,
@@ -650,3 +652,165 @@ class TestPTFAndWinnerOdds:
         assert row["post_time_favorite_name"] == "Alpha"
         assert row["post_time_favorite_won"] == 0
         assert row["winner_name"] == "Echo"
+
+
+# ── Suite 8: LAD track resolution ────────────────────────────────────────────
+
+class TestLADTrackResolution:
+    """Louisiana Downs (LAD) alias variants must all resolve to code 'LAD'."""
+
+    def test_lad_primary_code(self):
+        res = resolve_track(track_code="LAD")
+        assert res["track_code"] == "LAD"
+        assert res["resolution_source"] == "parsed_code"
+        assert "Louisiana Downs" in res["track_name_canonical"]
+
+    def test_lad_canonical_name(self):
+        res = resolve_track(track_name="Louisiana Downs")
+        assert res["track_code"] == "LAD"
+        assert res["resolution_source"] == "alias_exact"
+
+    def test_lad_racetrack_alias(self):
+        res = resolve_track(track_name="Louisiana Downs Racetrack")
+        assert res["track_code"] == "LAD"
+
+    def test_lad_bossier_city_alias(self):
+        res = resolve_track(track_name="Louisiana Downs Bossier City")
+        assert res["track_code"] == "LAD"
+
+    def test_existing_evd_unbroken(self):
+        """Evangeline Downs (EVD) must not be displaced after LAD was added."""
+        res = resolve_track(track_code="EVD")
+        assert res["track_code"] == "EVD"
+        assert res["resolution_source"] == "parsed_code"
+
+
+# ── Suite 9: normalize_track_text ────────────────────────────────────────────
+
+class TestNormalizeTrackText:
+    """normalize_track_text must strip OCR noise and produce UPPERCASE output."""
+
+    def test_clean_mixed_case(self):
+        assert normalize_track_text("Louisiana Downs") == "LOUISIANA DOWNS"
+
+    def test_already_upper(self):
+        assert normalize_track_text("LOUISIANA DOWNS") == "LOUISIANA DOWNS"
+
+    def test_ocr_question_mark(self):
+        assert normalize_track_text("LOUISIANA? DOWNS") == "LOUISIANA DOWNS"
+
+    def test_extra_spaces(self):
+        assert normalize_track_text("Louisiana   Downs") == "LOUISIANA DOWNS"
+
+    def test_mixed_noise_with_date(self):
+        result = normalize_track_text("LOUISIANA? DOWNS - May 12, 2026 - Race 5")
+        assert result.startswith("LOUISIANA DOWNS")
+
+    def test_unicode_ligature_stripped(self):
+        # Non-ASCII punctuation must be removed, not left in output
+        result = normalize_track_text("Louisiana’s Downs")
+        assert "'" not in result
+        assert "’" not in result
+
+
+# ── Suite 10: _extract_track OCR noise tolerance ─────────────────────────────
+
+class TestExtractTrackNoise:
+    """_extract_track must resolve LAD variants including OCR-noisy headers."""
+
+    def test_clean_canonical(self):
+        code, _ = _extract_track("Louisiana Downs - May 12, 2026 - Race 5\n")
+        assert code == "LAD"
+
+    def test_all_caps(self):
+        code, _ = _extract_track("LOUISIANA DOWNS - May 12, 2026 - Race 5\n")
+        assert code == "LAD"
+
+    def test_ocr_question_mark_between_words(self):
+        code, _ = _extract_track("LOUISIANA? DOWNS - May 12, 2026 - Race 5\n")
+        assert code == "LAD", (
+            "OCR artifact '?' between words must not block track resolution"
+        )
+
+    def test_extra_spaces_between_words(self):
+        code, _ = _extract_track("Louisiana   Downs - May 12, 2026 - Race 5\n")
+        assert code == "LAD"
+
+    def test_unrelated_track_not_matched(self):
+        code, _ = _extract_track("Some Unknown Venue - May 12, 2026 - Race 5\n")
+        assert code is None
+
+
+# ── Suite 11: parse_results_pdf active-race fallback ─────────────────────────
+
+# Minimal fake results-chart text: noisy track header so _extract_track returns
+# None, but contains a parseable date, race number, and two finisher rows.
+_FAKE_NOISY_CHART = (
+    "UNKNWN?? VENUE - May 12, 2026 - Race 5\n"
+    "1  FAST HORSE      2.10\n"
+    "2  SLOW HORSE      4.50\n"
+)
+
+_FAKE_LAD_CHART = (
+    "LOUISIANA? DOWNS - May 12, 2026 - Race 5\n"
+    "1  FAST HORSE      2.10\n"
+    "2  SLOW HORSE      4.50\n"
+)
+
+
+class TestResultsPdfActiveFallback:
+    """parse_results_pdf active_race fallback: fills track_code when PDF header
+    extraction fails but the parsed date+race match the active race exactly."""
+
+    def _call(self, text: str, active_race=None):
+        with patch("src.services.pdf_ingest._extract_text", return_value=text):
+            return parse_results_pdf(b"fake-pdf", active_race=active_race)
+
+    def test_lad_resolved_via_normalized_alias(self):
+        """'LOUISIANA? DOWNS' should resolve to LAD via the normalized scan
+        without needing the active-race fallback."""
+        result = self._call(_FAKE_LAD_CHART)
+        assert result["track_code"] == "LAD"
+        # "active race fallback" warning must NOT appear; the no-finishers error
+        # message also contains the word "fallback" so we check the specific phrase.
+        assert not any("active race" in w.lower() for w in result["warnings"])
+
+    def test_fallback_fills_track_code_on_noisy_header(self):
+        result = self._call(
+            _FAKE_NOISY_CHART,
+            active_race={"track_code": "LAD", "race_date": "2026-05-12", "race_number": 5},
+        )
+        assert result["track_code"] == "LAD"
+        assert any("active race" in w.lower() for w in result["warnings"])
+
+    def test_fallback_not_used_when_date_mismatches(self):
+        result = self._call(
+            _FAKE_NOISY_CHART,
+            active_race={"track_code": "LAD", "race_date": "2026-05-11", "race_number": 5},
+        )
+        assert result["track_code"] is None
+        assert any("Could not extract track code" in w for w in result["warnings"])
+
+    def test_fallback_not_used_when_race_number_mismatches(self):
+        result = self._call(
+            _FAKE_NOISY_CHART,
+            active_race={"track_code": "LAD", "race_date": "2026-05-12", "race_number": 9},
+        )
+        assert result["track_code"] is None
+
+    def test_fallback_not_used_when_active_race_is_none(self):
+        result = self._call(_FAKE_NOISY_CHART, active_race=None)
+        assert result["track_code"] is None
+
+    def test_diagnostics_include_extraction_path(self):
+        result = self._call(
+            _FAKE_NOISY_CHART,
+            active_race={"track_code": "LAD", "race_date": "2026-05-12", "race_number": 5},
+        )
+        diag = result.get("parse_diagnostics") or {}
+        assert diag.get("track_extraction_path") == "active_race_fallback"
+
+    def test_diagnostics_extracted_path_when_no_fallback(self):
+        result = self._call(_FAKE_LAD_CHART)
+        diag = result.get("parse_diagnostics") or {}
+        assert diag.get("track_extraction_path") == "extracted"

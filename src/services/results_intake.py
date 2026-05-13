@@ -649,6 +649,9 @@ def ingest_results(
         "n_duplicate":       n_duplicate,
         "n_scratch_flag":    n_scratch_flag,
         "warnings":          warnings,
+        # card_ids that received at least one result row — used by the
+        # observations pipeline to append labeled training rows.
+        "card_ids":          sorted(processed_card_ids),
     }
 
 
