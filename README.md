@@ -131,6 +131,75 @@ The migration script:
 
 ---
 
+## ML Serving Modes and Promotion Workflow
+
+DerbyEdge supports three serving modes controlled by a single environment variable:
+
+```
+DERBYEDGE_ML_MODE=off     # default — heuristic only, ML never runs
+DERBYEDGE_ML_MODE=shadow  # ML scored + logged; heuristic still served
+DERBYEDGE_ML_MODE=live    # ML served; heuristic fallback on failure
+```
+
+The Derby override (Churchill Downs dirt route 18+ runners) always uses the
+heuristic regardless of mode.
+
+### What each mode means
+
+| Mode | ML runs? | What is served | Shadow log written? |
+|------|----------|----------------|---------------------|
+| `off` | No | Heuristic | No |
+| `shadow` | Yes | Heuristic | Yes |
+| `live` | Yes | ML (heuristic fallback) | Yes |
+
+### Commands
+
+```bash
+# 1. Score in shadow mode (ML logged, heuristic served)
+$env:DERBYEDGE_ML_MODE="shadow"; python scripts/score.py
+
+# 2. Backfill evaluation dataset (join shadow log with outcomes)
+python -m training.backfill_shadow_eval
+
+# 3. Run promotion check (evaluate ML vs heuristic, write report)
+python -m training.promote_check
+
+# 4. Generate operator promotion report
+python -m training.generate_promotion_report
+# Report written to: output/ml_promotion_report.md
+
+# 5. Promote to live after PASS decision
+$env:DERBYEDGE_ML_MODE="live"; python scripts/score.py
+```
+
+### Promotion artifacts
+
+Each `python -m training.promote_check` run writes to `output/eval_run_TIMESTAMP/`:
+
+| File | Contents |
+|------|----------|
+| `metrics_summary.json` | Overall heuristic vs ML metrics |
+| `segment_metrics.csv` | Per-segment log loss, Brier, hit rates |
+| `calibration_table.csv` | Probability bin reliability (both models) |
+| `promotion_decision.json` | PASS / HOLD / FAIL + exact reasons |
+
+### How to read the promotion decision
+
+- **PASS** — ML log loss improved ≥ 3% overall AND Brier improved ≥ 2% overall
+  with no segment degrading by > 1%. Set `DERBYEDGE_ML_MODE=live`.
+- **HOLD** — Improvements exist but thresholds not yet met, or insufficient data.
+  Stay in shadow mode and collect more races.
+- **FAIL** — A segment degraded, integrity checks failed, or ML outputs are
+  missing. Roll back: investigate, retrain, re-evaluate.
+
+### Shadow log
+
+`output/shadow_log.csv` accumulates one row per starter per scored race when
+mode is `shadow` or `live`. Fields include heuristic/ML/served probabilities,
+ranks, model version, and metadata for every horse.
+
+---
+
 ## Disclaimer
 
 For entertainment and educational purposes only.

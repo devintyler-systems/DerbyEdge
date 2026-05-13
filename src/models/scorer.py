@@ -79,13 +79,6 @@ _FEATURE_TIER = {
 
 _DERBY_DEFAULT_CHAOS_INDEX = 0.85   # default for scorer; UI slider default matches
 
-# ── ML win-model feature flag ─────────────────────────────────────────────────
-# Set DERBYEDGE_ML_WIN_MODEL=1 to replace the heuristic win probabilities with
-# the trained GBM model from models/artifacts/.  When the artifact is absent
-# or the model is not yet trained the scorer falls back to the heuristic.
-# The Derby override always uses the heuristic regardless of this flag.
-_USE_ML_WIN_MODEL = os.getenv("DERBYEDGE_ML_WIN_MODEL", "0") == "1"
-
 try:
     from training.win_model_loader import (
         load_best_model as _load_best_model,
@@ -94,6 +87,16 @@ try:
     _ML_LOADER_AVAILABLE = True
 except ImportError:
     _ML_LOADER_AVAILABLE = False
+
+
+def _resolve_serving_mode() -> str:
+    """Return canonical serving mode from DERBYEDGE_ML_MODE env var.
+
+    Values: 'off' (default) | 'shadow' | 'live'
+    Any unrecognized value defaults to 'off'.
+    """
+    mode = os.getenv("DERBYEDGE_ML_MODE", "off").lower().strip()
+    return mode if mode in ("off", "shadow", "live") else "off"
 
 
 def _load_ml_win_probs(
@@ -174,6 +177,101 @@ def _load_ml_win_probs(
     except Exception as exc:
         _mlog.warning("_load_ml_win_probs: scoring failed — %s", exc)
         return None
+
+
+def _decide_served_probs(
+    mode: str,
+    derby_override: bool,
+    heuristic_probs: np.ndarray,
+    ml_probs,
+) -> tuple[np.ndarray, bool]:
+    """Return (served_probs, ml_loaded_flag).
+
+    Derby override always returns heuristic regardless of mode.
+    off    → heuristic served; ML never run.
+    shadow → ML scored and logged, but heuristic is served.
+    live   → ML served if loaded; heuristic fallback on ML failure.
+    """
+    ml_loaded = ml_probs is not None
+    if derby_override or mode == "off":
+        return heuristic_probs.copy(), ml_loaded
+    if mode == "shadow":
+        return heuristic_probs.copy(), ml_loaded
+    return (ml_probs.copy() if ml_loaded else heuristic_probs.copy()), ml_loaded
+
+
+def _emit_shadow_log(
+    card_id: int,
+    race_meta: dict,
+    entries_df: pd.DataFrame,
+    heuristic_probs: np.ndarray,
+    ml_probs,
+    served_probs: np.ndarray,
+    ml_loaded_flag: bool,
+    mode: str,
+    model_version: str,
+    dist_furlongs: float,
+    surface: str,
+    derby_override: bool,
+    segment: str,
+    scored_at: str,
+) -> None:
+    """Append one row per starter to output/shadow_log.csv."""
+    import logging as _logging
+    _slog = _logging.getLogger(__name__)
+    n = len(entries_df)
+    if n == 0:
+        return
+
+    def _rank_arr(probs):
+        if probs is None:
+            return [None] * n
+        return (
+            pd.Series(probs)
+            .rank(ascending=False, method="first")
+            .astype(int)
+            .tolist()
+        )
+
+    h_ranks = _rank_arr(heuristic_probs)
+    m_ranks = _rank_arr(ml_probs)
+    s_ranks = _rank_arr(served_probs)
+
+    rows = []
+    for i, (_, erow) in enumerate(entries_df.iterrows()):
+        rows.append({
+            "race_id":             card_id,
+            "race_date":           race_meta.get("race_date", ""),
+            "track":               race_meta.get("track", ""),
+            "race_no":             race_meta.get("race_no", ""),
+            "horse":               erow["horse_name"],
+            "post":                int(erow["post_position"]),
+            "field_size":          n,
+            "segment":             segment,
+            "heuristic_win_prob":  round(float(heuristic_probs[i]), 6),
+            "ml_win_prob":         round(float(ml_probs[i]), 6) if ml_probs is not None else None,
+            "served_win_prob":     round(float(served_probs[i]), 6),
+            "heuristic_rank":      h_ranks[i],
+            "ml_rank":             m_ranks[i],
+            "served_rank":         s_ranks[i],
+            "ml_loaded_flag":      int(ml_loaded_flag),
+            "serving_mode":        mode,
+            "model_version":       model_version,
+            "distance_furlongs":   dist_furlongs,
+            "surface":             surface,
+            "derby_override_flag": int(derby_override),
+            "scored_at":           scored_at,
+        })
+
+    log_path = OUTPUT_DIR / "shadow_log.csv"
+    df_new = pd.DataFrame(rows)
+    if log_path.exists():
+        df_new.to_csv(log_path, mode="a", header=False, index=False)
+    else:
+        OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+        df_new.to_csv(log_path, mode="w", header=True, index=False)
+
+    _slog.info("_emit_shadow_log: %d rows appended  mode=%s  card_id=%s", n, mode, card_id)
 
 
 # ---------------------------------------------------------------------------
@@ -744,6 +842,22 @@ def score_race(card_id: Optional[int] = None) -> pd.DataFrame:
     dist_furlongs = float(rc["distance_furlongs"]) if rc else 10.0
     race_type_key = f"{surface}_{'sprint' if dist_furlongs < 8.5 else 'route'}"
 
+    # Cache race metadata for shadow log (must read while conn is open)
+    _rc_meta = conn.execute(
+        """SELECT rc2.race_date,
+                  t.abbrev AS track,
+                  COALESCE(CAST(rc2.race_no AS TEXT), '') AS race_no
+           FROM race_cards rc2
+           LEFT JOIN tracks t ON rc2.track_id = t.track_id
+           WHERE rc2.card_id = ?""",
+        (card_id,),
+    ).fetchone()
+    _race_meta = {
+        "race_date": str(_rc_meta["race_date"]) if _rc_meta else "",
+        "track":     str(_rc_meta["track"])     if _rc_meta else "",
+        "race_no":   str(_rc_meta["race_no"])   if _rc_meta else "",
+    }
+
     # ── Derby override detection ───────────────────────────────────────────
     derby_active = is_derby_context(conn, card_id)
     print(f"  [scorer]   card_id={card_id}  race_type={race_type_key}  "
@@ -785,17 +899,24 @@ def score_race(card_id: Optional[int] = None) -> pd.DataFrame:
     else:
         market_probs = ml_implied / ml_sum
 
-    # ── ML win-model injection (feature flag) ─────────────────────────────
-    if not derby_active and _USE_ML_WIN_MODEL:
-        _ml_probs = _load_ml_win_probs(
+    # ── ML serving pipeline ───────────────────────────────────────────────
+    _serving_mode    = _resolve_serving_mode()
+    _heuristic_probs = win_probs.copy()
+    _ml_win_probs    = None
+
+    if not derby_active and _serving_mode in ("shadow", "live"):
+        _ml_win_probs = _load_ml_win_probs(
             feat_df, entries_df, win_probs, market_probs,
             race_type_key, dist_furlongs, surface,
         )
-        if _ml_probs is not None:
-            win_probs = _ml_probs
-            print(f"  [scorer]   ML win model active — segment={race_type_key}")
-        else:
-            print("  [scorer]   ML win model requested but unavailable — using heuristic")
+
+    win_probs, _ml_loaded = _decide_served_probs(
+        _serving_mode, derby_active, _heuristic_probs, _ml_win_probs
+    )
+    print(
+        f"  [scorer]   mode={_serving_mode}  ml_loaded={_ml_loaded}  "
+        f"derby_override={derby_active}"
+    )
 
     # ── Derived scoring ────────────────────────────────────────────────────
     fair_odds          = np.round(1.0 / np.maximum(win_probs, 1e-9) - 1.0, 2)
@@ -998,6 +1119,25 @@ def score_race(card_id: Optional[int] = None) -> pd.DataFrame:
     print(f"  [scorer]   run_id={run_id}  sum_win_prob={metrics['sum_win_prob']:.6f}  "
           f"bets={metrics['bet_count']}  blocked={blocked_n}  "
           f"underlays={metrics['underlay_count']}  low_conf={low_conf_n}")
+
+    # ── Shadow log ─────────────────────────────────────────────────────────
+    if _serving_mode in ("shadow", "live"):
+        _emit_shadow_log(
+            card_id=card_id,
+            race_meta=_race_meta,
+            entries_df=entries_df,
+            heuristic_probs=_heuristic_probs,
+            ml_probs=_ml_win_probs,
+            served_probs=win_probs,
+            ml_loaded_flag=_ml_loaded,
+            mode=_serving_mode,
+            model_version=artifact.version,
+            dist_furlongs=dist_furlongs,
+            surface=surface,
+            derby_override=derby_active,
+            segment=race_type_key,
+            scored_at=score_ts,
+        )
 
     return board
 
