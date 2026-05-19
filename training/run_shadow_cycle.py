@@ -263,6 +263,22 @@ def _run_report() -> bool:
 
 
 # ---------------------------------------------------------------------------
+# Step 6 — Feature null-rate audit
+# ---------------------------------------------------------------------------
+
+def _run_feature_audit(card_id: int | None) -> bool:
+    """Compute feature null rates from feature_store and write feature_null_audit.csv."""
+    try:
+        from training.feature_audit import run_null_audit
+        run_null_audit(card_id)
+        _ok("Feature null audit written — output/feature_null_audit.csv")
+        return True
+    except Exception as exc:
+        _warn(f"Feature null audit skipped: {exc}")
+        return True   # non-fatal
+
+
+# ---------------------------------------------------------------------------
 # Terminal summary
 # ---------------------------------------------------------------------------
 
@@ -348,6 +364,7 @@ def _print_summary() -> None:
         ("metrics_summary.json",      eval_dir_for_paths / "metrics_summary.json" if eval_dir_for_paths else None),
         ("segment_metrics.csv",       eval_dir_for_paths / "segment_metrics.csv"  if eval_dir_for_paths else None),
         ("ml_promotion_report.md",    _OUTPUT / "ml_promotion_report.md"),
+        ("feature_null_audit.csv",    _OUTPUT / "feature_null_audit.csv"),
     ]
     print()
     print("  Artifacts:")
@@ -438,6 +455,8 @@ def main() -> int:
 
     # ── report-only fast path ─────────────────────────────────────────────
     if args.report_only:
+        _header("Feature null-rate audit")
+        _run_feature_audit(args.card_id)
         _header("Generating report")
         if not _run_report():
             return 1
@@ -475,7 +494,11 @@ def main() -> int:
     if not _run_evaluation():
         return 1
 
-    # ── Step 5: Generate report ───────────────────────────────────────────
+    # ── Step 5: Feature null-rate audit (must precede report) ────────────
+    _header("Feature null-rate audit")
+    _run_feature_audit(args.card_id)
+
+    # ── Step 6: Generate report ───────────────────────────────────────────
     _header("Generate report")
     if not _run_report():
         return 1

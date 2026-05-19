@@ -291,6 +291,47 @@ def generate_report(eval_dir: Path | None = None) -> Path:
 
     lines += [""]
 
+    # Feature Coverage
+    null_audit_path = _OUTPUT / "feature_null_audit.csv"
+    fimp_path       = _OUTPUT / "feature_importance_report.csv"
+    null_df  = pd.read_csv(null_audit_path) if null_audit_path.exists() else pd.DataFrame()
+    fimp_df  = pd.read_csv(fimp_path)       if fimp_path.exists()       else pd.DataFrame()
+
+    if not null_df.empty:
+        lines += [
+            "---",
+            "",
+            f"## {section_num}. Feature Coverage",
+            "",
+            "| Feature | Tier | Null Rate | Importance Rank | Flags |",
+            "|---------|------|-----------|-----------------|-------|",
+        ]
+        section_num += 1
+
+        rank_map: dict[str, int] = {}
+        if not fimp_df.empty and "feature_name" in fimp_df.columns and "importance_rank" in fimp_df.columns:
+            rank_map = dict(zip(fimp_df["feature_name"], fimp_df["importance_rank"].astype(int)))
+
+        t1_features = {"speed_fig_adj", "layoff_bucket_encoded", "class_delta_v2",
+                       "horses_beaten_pct_actual", "pace_pressure_tier",
+                       "collapse_risk_v2", "morning_line_delta"}
+
+        for _, row in null_df.iterrows():
+            feat      = row.get("feature", "—")
+            tier      = row.get("tier", "UNKNOWN")
+            null_rate = float(row.get("null_rate", 0.0))
+            rank      = rank_map.get(str(feat))
+            rank_str  = str(rank) if rank is not None else "—"
+            flags: list[str] = []
+            if null_rate > 0.50:
+                flags.append("⚠️ DATA GAP")
+            if feat in t1_features and rank is not None and rank > 15:
+                flags.append("⚠️ LOW SIGNAL")
+            lines.append(
+                f"| {feat} | {tier} | {null_rate:.1%} | {rank_str} | {' '.join(flags)} |"
+            )
+        lines += [""]
+
     # Promotion decision
     decision_icon = {
         "PASS":              "✅ PASS",

@@ -47,6 +47,10 @@ SIRE_ROUTE_SCORE: dict[str, float] = {
 }
 _DEFAULT_SIRE_ROUTE = 0.72   # field mean when sire not in table
 
+# Tier 1: empirical win-rate by layoff bucket (days since last race).
+# Buckets: 0=0-13d  1=14-27d  2=28-55d  3=56-119d  4=120+d
+_LAYOFF_WIN_RATE: dict[int, float] = {0: 0.18, 1: 0.21, 2: 0.23, 3: 0.17, 4: 0.12}
+
 # Pace style -> early-fraction commitment score (0 = pure closer, 1 = pure front)
 PACE_EARLY: dict[str, float] = {
     "front": 1.00, "presser": 0.70, "stalker": 0.40, "closer": 0.10
@@ -126,6 +130,19 @@ def _entry_features(row: pd.Series, field_df: pd.DataFrame) -> dict:
         except (TypeError, ValueError):
             layoff_days = None
 
+    # T1: layoff_bucket_encoded — map rest period to empirical win-rate shape
+    if layoff_days is not None:
+        _lbucket = pd.cut(
+            [layoff_days], bins=[-1, 13, 27, 55, 119, 9999], labels=[0, 1, 2, 3, 4]
+        )[0]
+        layoff_bucket_encoded: Optional[float] = (
+            _LAYOFF_WIN_RATE.get(int(_lbucket), 0.20)
+            if _lbucket is not None and not pd.isna(_lbucket)
+            else 0.20
+        )
+    else:
+        layoff_bucket_encoded = None
+
     cs = float(row.get("career_starts") or 0)
     cw = float(row.get("career_wins")   or 0)
     cp = float(row.get("career_places") or 0)
@@ -142,6 +159,7 @@ def _entry_features(row: pd.Series, field_df: pd.DataFrame) -> dict:
 
     # ── Class / field strength ─────────────────────────────────────────────
     career_earnings = float(row.get("career_earnings") or 0)
+    class_level     = round(np.log(career_earnings + 1), 4)   # T1: log-earnings proxy
     field_earn      = field_df["career_earnings"].dropna().astype(float)
     if len(field_earn) > 1 and field_earn.std() > 0:
         class_delta = round(
@@ -160,6 +178,15 @@ def _entry_features(row: pd.Series, field_df: pd.DataFrame) -> dict:
         )
     else:
         horses_beaten_pct_last = None
+
+    # T1: horses_beaten_pct_actual — uses real field_size_last when available
+    field_size_last = row.get("field_size_last")
+    if field_size_last is not None and last_finish is not None:
+        _fsz = int(field_size_last)
+        _hbp = (float(_fsz) - float(last_finish)) / max(_fsz - 1, 1)
+        horses_beaten_pct_actual = round(_clamp(_hbp, 0.0, 1.0), 4)
+    else:
+        horses_beaten_pct_actual = horses_beaten_pct_last   # fall back to degraded
 
     # DEGRADED: career starts proxy for large-field experience
     field_size_exp = round(_norm(cs, 1.0, 15.0), 4) if cs > 0 else None
@@ -274,11 +301,14 @@ def _entry_features(row: pd.Series, field_df: pd.DataFrame) -> dict:
         "finish_energy_proxy":         finish_energy_proxy,
         "form_cycle_idx":              form_cycle_idx,
         "layoff_days":                 layoff_days,
+        "layoff_bucket_encoded":       layoff_bucket_encoded,      # T1
         "career_win_pct":              career_win_pct,
         "career_itm_pct":              career_itm_pct,
         "class_delta":                 class_delta,
+        "class_level":                 class_level,                # T1 proxy
         "field_strength_last":         field_strength_last,
         "horses_beaten_pct_last":      horses_beaten_pct_last,
+        "horses_beaten_pct_actual":    horses_beaten_pct_actual,   # T1
         "field_size_exp":              field_size_exp,
         "works_30d":                   works_30d,
         "bullet_30d":                  bullet_30d,
@@ -298,10 +328,15 @@ def _entry_features(row: pd.Series, field_df: pd.DataFrame) -> dict:
         "traffic_resilience_proxy":    traffic_resilience_proxy,
         "early_intent":                early_intent,
         "run_style_bucket":            run_style_bucket,
+        "speed_fig_adj":               None,   # filled in second pass
+        "class_delta_v2":              None,   # filled in second pass
         "pace_pressure":               None,   # filled in second pass
+        "pace_pressure_tier":          None,   # filled in second pass
         "lone_speed_edge":             None,   # filled in second pass
         "collapse_risk":               None,   # filled in second pass
+        "collapse_risk_v2":            None,   # filled in second pass
         "pace_fit_score":              None,   # filled in second pass
+        "morning_line_delta":          None,   # filled in second pass
         "market_implied_prob":         market_implied_prob,
         "morning_line_rank":           None,   # filled in second pass
         "publicness_score":            publicness_score,
@@ -326,6 +361,14 @@ def _fill_race_level_features(df: pd.DataFrame) -> pd.DataFrame:
         .astype(int)
     )
 
+    # T1: speed_fig_adj — z-score of speed_last within field, clipped ±3
+    _sl = pd.to_numeric(df["speed_last"], errors="coerce")
+    if not _sl.isna().all():
+        _sl_std = max(float(_sl.std()), 1.0)
+        df["speed_fig_adj"] = ((_sl - float(_sl.mean())) / _sl_std).clip(-3, 3).round(4)
+    else:
+        df["speed_fig_adj"] = 0.0
+
     # pace shape counts
     front_count   = int((df["run_style_bucket"] == "front").sum())
     presser_count = int((df["run_style_bucket"] == "presser").sum())
@@ -334,6 +377,20 @@ def _fill_race_level_features(df: pd.DataFrame) -> pd.DataFrame:
 
     df["pace_pressure"] = pace_pressure
     df["collapse_risk"] = pace_pressure   # semantic alias
+
+    # T1: pace_pressure_tier and collapse_risk_v2
+    front_pct   = front_count / max(total, 1)
+    presser_pct = presser_count / max(total, 1)
+    if front_count == 1 and presser_pct < 0.15:
+        _tier = 0   # lone speed
+    elif front_pct < 0.15 and presser_pct < 0.20:
+        _tier = 1   # soft
+    elif front_pct <= 0.30:
+        _tier = 2   # moderate
+    else:
+        _tier = 3   # contested
+    df["pace_pressure_tier"] = _tier
+    df["collapse_risk_v2"]   = round(front_pct * 1.0 + presser_pct * 0.5, 4)
 
     df["lone_speed_edge"] = df["run_style_bucket"].apply(
         lambda s: 1 if s == "front" and front_count == 1 else 0
@@ -416,6 +473,15 @@ def _fill_race_level_features(df: pd.DataFrame) -> pd.DataFrame:
         pd.to_numeric(df.apply(_derby_override, axis=1), errors="coerce")
         .fillna(0.0)
     )
+
+    # T1: class_delta_v2 — z-score of log-earnings within field
+    if "class_level" in df.columns:
+        _le     = pd.to_numeric(df["class_level"], errors="coerce")
+        _le_std = max(float(_le.std()), 0.01)
+        df["class_delta_v2"] = ((_le - float(_le.mean())) / _le_std).round(4)
+
+    # T1: morning_line_delta — deviation of market_implied_prob from uniform prior
+    df["morning_line_delta"] = (df["market_implied_prob"] - 1.0 / len(df)).round(6)
 
     return df
 

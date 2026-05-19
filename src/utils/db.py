@@ -178,12 +178,116 @@ def ensure_starter_observations(conn: sqlite3.Connection) -> None:
     conn.commit()
 
 
+def ensure_horse_starts_columns(conn: sqlite3.Connection) -> None:
+    """Idempotent: add field_size_last to horse_starts if absent."""
+    cols = _table_cols(conn, "horse_starts")
+    if _add_col_if_missing(conn, "horse_starts", "field_size_last", "INTEGER", cols):
+        conn.commit()
+
+
+def ensure_feature_store_columns(conn: sqlite3.Connection) -> None:
+    """Idempotent: add Tier 1 feature columns to feature_store if absent."""
+    cols = _table_cols(conn, "feature_store")
+    t1_cols: list[tuple[str, str]] = [
+        ("speed_fig_adj",            "REAL"),
+        ("layoff_bucket_encoded",    "REAL"),
+        ("class_level",              "REAL"),
+        ("class_delta_v2",           "REAL"),
+        ("horses_beaten_pct_actual", "REAL"),
+        ("pace_pressure_tier",       "INTEGER"),
+        ("collapse_risk_v2",         "REAL"),
+        ("morning_line_delta",       "REAL"),
+    ]
+    changed = False
+    for col_name, col_type in t1_cols:
+        if _add_col_if_missing(conn, "feature_store", col_name, col_type, cols):
+            changed = True
+    if changed:
+        conn.commit()
+
+
+def ensure_v_entries_live(conn: sqlite3.Connection) -> None:
+    """Idempotent: recreate v_entries_live with field_size_last if the column is absent."""
+    cols = {row[1] for row in conn.execute("PRAGMA table_info(v_entries_live)").fetchall()}
+    if "field_size_last" in cols:
+        return
+    conn.execute("DROP VIEW IF EXISTS v_entries_live")
+    conn.executescript("""
+        CREATE VIEW IF NOT EXISTS v_entries_live AS
+        SELECT
+            e.entry_id,
+            e.card_id,
+            rc.card_date,
+            rc.stakes_name,
+            rc.distance_furlongs,
+            rc.surface,
+            CASE WHEN rc.distance_furlongs < 8.5 THEN 'sprint' ELSE 'route' END
+                AS dist_category,
+            h.horse_id,
+            h.name          AS horse_name,
+            h.sire,
+            h.dam,
+            e.post_position,
+            e.weight,
+            e.morning_line_odds,
+            e.morning_line_prob,
+            ptr.person_id   AS trainer_id,
+            ptr.full_name   AS trainer,
+            pjk.person_id   AS jockey_id,
+            pjk.full_name   AS jockey,
+            pow.person_id   AS owner_id,
+            pow.full_name   AS owner,
+            e.career_starts,
+            e.career_wins,
+            e.career_places,
+            e.career_shows,
+            e.career_earnings,
+            e.last_race_days,
+            e.last_race_finish,
+            e.best_speed_fig,
+            e.last_speed_fig,
+            e.avg_speed_fig,
+            e.beyer_fig,
+            e.dirt_starts,
+            e.dirt_wins,
+            e.dist_starts,
+            e.dist_wins,
+            e.wet_starts,
+            e.wet_wins,
+            e.workouts_30,
+            e.gate_class,
+            e.stamina_index,
+            e.pace_style,
+            hs_last.field_size_last
+        FROM  entries    e
+        JOIN  race_cards rc  ON e.card_id    = rc.card_id
+        JOIN  horses     h   ON e.horse_id   = h.horse_id
+        LEFT JOIN people ptr ON e.trainer_id = ptr.person_id
+        LEFT JOIN people pjk ON e.jockey_id  = pjk.person_id
+        LEFT JOIN people pow ON e.owner_id   = pow.person_id
+        LEFT JOIN (
+            SELECT hs.horse_id, hs.field_size_last
+            FROM   horse_starts hs
+            WHERE  hs.start_id = (
+                SELECT MAX(hs2.start_id)
+                FROM   horse_starts hs2
+                WHERE  hs2.horse_id = hs.horse_id
+            )
+        ) hs_last ON hs_last.horse_id = h.horse_id
+        WHERE e.scratch_flag = 0;
+    """)
+    conn.commit()
+
+
 def _migrate_db() -> None:
     """Apply all additive column migrations.  Safe to re-run (idempotent)."""
     conn = sqlite3.connect(DB_PATH)
     ensure_score_runs_columns(conn)
     ensure_entry_scores_columns(conn)
     ensure_starter_observations(conn)
+    ensure_horse_starts_columns(conn)
+    ensure_feature_store_columns(conn)
+    ensure_v_entries_live(conn)
     conn.close()
 
 

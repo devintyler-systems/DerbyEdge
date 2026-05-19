@@ -139,6 +139,7 @@ CREATE TABLE IF NOT EXISTS horse_starts (
     speed_figure       INTEGER,
     beyer_figure       INTEGER,
     earned_purse       INTEGER,
+    field_size_last    INTEGER,   -- number of starters in this race (written by ingest)
     created_at         TEXT    NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
 );
 
@@ -395,6 +396,15 @@ CREATE TABLE IF NOT EXISTS feature_store (
     churchill_readiness         REAL,   -- PLACEHOLDER: needs Churchill historical data
     jan_apr_improvement_curve   REAL,   -- PLACEHOLDER: needs sequential speed figs
     derby_override_score        REAL,   -- DEGRADED: weighted composite of available proxies
+    -- Tier 1 features (added 2026-05)
+    speed_fig_adj               REAL,   -- T1: z-score of speed_last within field
+    layoff_bucket_encoded       REAL,   -- T1: empirical win-rate by rest period bucket
+    class_level                 REAL,   -- T1: log(career_earnings+1) proxy
+    class_delta_v2              REAL,   -- T1: z-score of class_level within field
+    horses_beaten_pct_actual    REAL,   -- T1: uses field_size_last when available
+    pace_pressure_tier          INTEGER,-- T1: 0=lone_speed 1=soft 2=moderate 3=contested
+    collapse_risk_v2            REAL,   -- T1: front_pct + 0.5*presser_pct
+    morning_line_delta          REAL,   -- T1: market_implied_prob minus 1/field_size
     UNIQUE(card_id, entry_id)
 );
 
@@ -523,6 +533,7 @@ JOIN tracks t ON rc.track_id = t.track_id;
 -- v_entries_live: non-scratched entries with full connection info.
 -- Seed-compat aggregate columns (career_starts, etc.) come from
 -- entries; they are NULL when this entry has no seed row.
+-- field_size_last: from the horse's most recent horse_starts row (NULL for seed-only).
 CREATE VIEW IF NOT EXISTS v_entries_live AS
 SELECT
     e.entry_id,
@@ -568,13 +579,23 @@ SELECT
     e.workouts_30,
     e.gate_class,
     e.stamina_index,
-    e.pace_style
+    e.pace_style,
+    hs_last.field_size_last
 FROM  entries    e
 JOIN  race_cards rc  ON e.card_id    = rc.card_id
 JOIN  horses     h   ON e.horse_id   = h.horse_id
 LEFT JOIN people ptr ON e.trainer_id = ptr.person_id
 LEFT JOIN people pjk ON e.jockey_id  = pjk.person_id
 LEFT JOIN people pow ON e.owner_id   = pow.person_id
+LEFT JOIN (
+    SELECT hs.horse_id, hs.field_size_last
+    FROM   horse_starts hs
+    WHERE  hs.start_id = (
+        SELECT MAX(hs2.start_id)
+        FROM   horse_starts hs2
+        WHERE  hs2.horse_id = hs.horse_id
+    )
+) hs_last ON hs_last.horse_id = h.horse_id
 WHERE e.scratch_flag = 0;
 
 
