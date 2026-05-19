@@ -784,3 +784,138 @@ JOIN  people      ptr ON e.trainer_id = ptr.person_id
 JOIN  people      pjk ON e.jockey_id  = pjk.person_id
 WHERE julianday('now') - julianday(rc.card_date) <= 180
 GROUP BY e.trainer_id, e.jockey_id;
+
+
+-- ============================================================
+-- 16. RACE_EVAL_LOG
+--     Race-level evaluation log imported from top-pick outcome
+--     CSV files.  One row per race per import batch.
+--     Not used for model training — operator/reporting layer only.
+-- ============================================================
+CREATE TABLE IF NOT EXISTS race_eval_log (
+    eval_id           INTEGER PRIMARY KEY AUTOINCREMENT,
+    source_file       TEXT    NOT NULL,
+    source_row_num    INTEGER NOT NULL,
+    import_batch_ts   TEXT    NOT NULL,
+    race_id           INTEGER,                    -- card_id when matched
+    race_date         TEXT    NOT NULL,
+    track_code        TEXT    NOT NULL,
+    race_number       INTEGER NOT NULL,
+    surface           TEXT,
+    distance_text     TEXT,
+    distance_f        REAL,
+    field_size        INTEGER,
+
+    orig_tp_raw       TEXT,
+    orig_tp_name      TEXT,
+    orig_tp_norm      TEXT,
+    orig_tp_scratched INTEGER NOT NULL DEFAULT 0,
+
+    eff_tp_raw        TEXT,
+    eff_tp_name       TEXT,
+    eff_tp_norm       TEXT,
+    eff_tp_finish_text TEXT,
+    eff_tp_finish_pos INTEGER,
+    eff_tp_won        INTEGER NOT NULL DEFAULT 0,
+
+    winner_raw        TEXT,
+    winner_name       TEXT,
+    winner_norm       TEXT,
+
+    chaos_raw         TEXT,
+    chaos_active      INTEGER NOT NULL DEFAULT 0,
+    tier_name         TEXT,
+
+    match_status      TEXT    NOT NULL DEFAULT 'UNMATCHED',
+    match_notes       TEXT,
+    created_ts        TEXT    NOT NULL DEFAULT (datetime('now')),
+
+    UNIQUE(source_file, source_row_num)
+);
+
+CREATE INDEX IF NOT EXISTS idx_race_eval_log_race_key
+    ON race_eval_log(race_date, track_code, race_number);
+CREATE INDEX IF NOT EXISTS idx_race_eval_log_race_id
+    ON race_eval_log(race_id);
+CREATE INDEX IF NOT EXISTS idx_race_eval_log_tier
+    ON race_eval_log(tier_name);
+CREATE INDEX IF NOT EXISTS idx_race_eval_log_surface
+    ON race_eval_log(surface);
+
+
+-- ============================================================
+-- VIEWS — race eval log reporting
+-- ============================================================
+
+-- v_race_eval_tool: flat view for TOOL/reporting queries.
+-- Returns every row in race_eval_log without joins to internal tables
+-- so it is safe to query even before any race cards are imported.
+CREATE VIEW IF NOT EXISTS v_race_eval_tool AS
+SELECT
+    rel.eval_id,
+    rel.source_file,
+    rel.import_batch_ts,
+    rel.race_id,
+    rel.race_date,
+    rel.track_code,
+    rel.race_number,
+    rel.surface,
+    rel.distance_text,
+    rel.distance_f,
+    rel.field_size,
+    rel.orig_tp_name,
+    rel.orig_tp_scratched,
+    rel.eff_tp_name,
+    rel.eff_tp_finish_text,
+    rel.eff_tp_finish_pos,
+    rel.eff_tp_won,
+    rel.winner_name,
+    rel.chaos_active,
+    rel.tier_name,
+    rel.match_status,
+    rel.match_notes
+FROM race_eval_log rel;
+
+
+-- v_race_eval_tool_enriched: joins race_eval_log to race_cards + tracks
+-- for rows where race_id was resolved.  Unmatched rows still appear
+-- (LEFT JOIN) with NULL enrichment columns.
+CREATE VIEW IF NOT EXISTS v_race_eval_tool_enriched AS
+SELECT
+    rel.eval_id,
+    rel.source_file,
+    rel.import_batch_ts,
+    rel.race_id,
+    rel.race_date,
+    rel.track_code,
+    rel.race_number,
+    rel.surface,
+    rel.distance_text,
+    rel.distance_f,
+    rel.field_size,
+    rel.orig_tp_name,
+    rel.orig_tp_scratched,
+    rel.eff_tp_name,
+    rel.eff_tp_finish_text,
+    rel.eff_tp_finish_pos,
+    rel.eff_tp_won,
+    rel.winner_name,
+    rel.chaos_active,
+    rel.tier_name,
+    rel.match_status,
+    rel.match_notes,
+    -- Enrichment from internal race_cards + tracks (NULL when unmatched)
+    t.name                 AS track_name_canonical,
+    rc.stakes_name,
+    rc.purse,
+    rc.race_class,
+    rc.distance_furlongs   AS rc_distance_furlongs,
+    rc.surface             AS rc_surface,
+    CASE
+        WHEN rc.distance_furlongs IS NOT NULL
+        THEN CASE WHEN rc.distance_furlongs < 8.5 THEN 'sprint' ELSE 'route' END
+        ELSE NULL
+    END                    AS dist_category
+FROM race_eval_log rel
+LEFT JOIN race_cards rc ON rc.card_id  = rel.race_id
+LEFT JOIN tracks     t  ON t.track_id  = rc.track_id;

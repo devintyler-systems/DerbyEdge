@@ -363,6 +363,52 @@ metadata for every horse.
 
 ---
 
+## Race-level eval log import
+
+The `race_eval_log` table stores per-race top-pick outcome records imported
+from eval CSV files (e.g. `38Races_Final_Results_5-12-26.csv`).  It captures
+the original top pick, any scratch substitution, effective top pick, finish
+position, win/loss, actual winner, chaos flag, and data tier for each race.
+
+This is an **operator/reporting layer** — it does not feed starter-level ML
+training labels.  Query `v_race_eval_tool` (flat view) or
+`v_race_eval_tool_enriched` (joined to `race_cards` + `tracks`) for analysis.
+
+```powershell
+# Import (idempotent — safe to re-run)
+.\scripts\import_race_eval_log.ps1 -CsvPath "C:\path\38Races_Final_Results_5-12-26.csv"
+
+# Re-import a corrected version of the same file (replaces prior rows)
+.\scripts\import_race_eval_log.ps1 -CsvPath "C:\path\38Races_Final_Results_5-12-26.csv" -ReplaceSource
+
+# Fail if any row can't be matched to an internal race card
+.\scripts\import_race_eval_log.ps1 -CsvPath "C:\path\38Races_Final_Results_5-12-26.csv" -StrictMatch
+```
+
+**CSV column mapping:**
+
+| CSV column | DB column(s) | Notes |
+|------------|--------------|-------|
+| Date | `race_date` | ISO-8601 |
+| Track | `track_code` | Uppercased |
+| R# | `race_number` | |
+| Srf | `surface` | |
+| Dist | `distance_text` / `distance_f` | e.g. "7.0f" → 7.0 |
+| Field | `field_size` | |
+| Orig TP | `orig_tp_raw/name/norm` | |
+| SCR | `orig_tp_scratched` | ✓ → 1 |
+| Eff TP | `eff_tp_raw/name/norm` | ⚠ stripped from name |
+| TP Fin | `eff_tp_finish_text/pos` | "SCR" stored as NULL pos |
+| TP Won | `eff_tp_won` | ✓ → 1 |
+| Winner | `winner_raw/name/norm` | |
+| Chaos | `chaos_raw` / `chaos_active` | blank → 0 |
+| Tier | `tier_name` | |
+
+Rows are matched to `race_cards` by `race_date + track_code + race_number`.
+Unmatched rows are kept with `match_status='UNMATCHED'` so no data is lost.
+
+---
+
 ## Disclaimer
 
 For entertainment and educational purposes only.

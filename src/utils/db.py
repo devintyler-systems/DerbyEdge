@@ -279,6 +279,87 @@ def ensure_v_entries_live(conn: sqlite3.Connection) -> None:
     conn.commit()
 
 
+def ensure_race_eval_log(conn: sqlite3.Connection) -> None:
+    """Idempotent: ensure race_eval_log table, indexes, and reporting views exist."""
+    conn.executescript("""
+        CREATE TABLE IF NOT EXISTS race_eval_log (
+            eval_id           INTEGER PRIMARY KEY AUTOINCREMENT,
+            source_file       TEXT    NOT NULL,
+            source_row_num    INTEGER NOT NULL,
+            import_batch_ts   TEXT    NOT NULL,
+            race_id           INTEGER,
+            race_date         TEXT    NOT NULL,
+            track_code        TEXT    NOT NULL,
+            race_number       INTEGER NOT NULL,
+            surface           TEXT,
+            distance_text     TEXT,
+            distance_f        REAL,
+            field_size        INTEGER,
+            orig_tp_raw       TEXT,
+            orig_tp_name      TEXT,
+            orig_tp_norm      TEXT,
+            orig_tp_scratched INTEGER NOT NULL DEFAULT 0,
+            eff_tp_raw        TEXT,
+            eff_tp_name       TEXT,
+            eff_tp_norm       TEXT,
+            eff_tp_finish_text TEXT,
+            eff_tp_finish_pos INTEGER,
+            eff_tp_won        INTEGER NOT NULL DEFAULT 0,
+            winner_raw        TEXT,
+            winner_name       TEXT,
+            winner_norm       TEXT,
+            chaos_raw         TEXT,
+            chaos_active      INTEGER NOT NULL DEFAULT 0,
+            tier_name         TEXT,
+            match_status      TEXT    NOT NULL DEFAULT 'UNMATCHED',
+            match_notes       TEXT,
+            created_ts        TEXT    NOT NULL DEFAULT (datetime('now')),
+            UNIQUE(source_file, source_row_num)
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_race_eval_log_race_key
+            ON race_eval_log(race_date, track_code, race_number);
+        CREATE INDEX IF NOT EXISTS idx_race_eval_log_race_id
+            ON race_eval_log(race_id);
+        CREATE INDEX IF NOT EXISTS idx_race_eval_log_tier
+            ON race_eval_log(tier_name);
+        CREATE INDEX IF NOT EXISTS idx_race_eval_log_surface
+            ON race_eval_log(surface);
+
+        CREATE VIEW IF NOT EXISTS v_race_eval_tool AS
+        SELECT
+            rel.eval_id, rel.source_file, rel.import_batch_ts,
+            rel.race_id, rel.race_date, rel.track_code, rel.race_number,
+            rel.surface, rel.distance_text, rel.distance_f, rel.field_size,
+            rel.orig_tp_name, rel.orig_tp_scratched,
+            rel.eff_tp_name, rel.eff_tp_finish_text, rel.eff_tp_finish_pos,
+            rel.eff_tp_won, rel.winner_name, rel.chaos_active,
+            rel.tier_name, rel.match_status, rel.match_notes
+        FROM race_eval_log rel;
+
+        CREATE VIEW IF NOT EXISTS v_race_eval_tool_enriched AS
+        SELECT
+            rel.eval_id, rel.source_file, rel.import_batch_ts,
+            rel.race_id, rel.race_date, rel.track_code, rel.race_number,
+            rel.surface, rel.distance_text, rel.distance_f, rel.field_size,
+            rel.orig_tp_name, rel.orig_tp_scratched,
+            rel.eff_tp_name, rel.eff_tp_finish_text, rel.eff_tp_finish_pos,
+            rel.eff_tp_won, rel.winner_name, rel.chaos_active,
+            rel.tier_name, rel.match_status, rel.match_notes,
+            t.name  AS track_name_canonical,
+            rc.stakes_name, rc.purse, rc.race_class,
+            rc.distance_furlongs AS rc_distance_furlongs,
+            rc.surface           AS rc_surface,
+            CASE WHEN rc.distance_furlongs IS NOT NULL
+                 THEN CASE WHEN rc.distance_furlongs < 8.5 THEN 'sprint' ELSE 'route' END
+                 ELSE NULL END   AS dist_category
+        FROM race_eval_log rel
+        LEFT JOIN race_cards rc ON rc.card_id = rel.race_id
+        LEFT JOIN tracks     t  ON t.track_id = rc.track_id;
+    """)
+    conn.commit()
+
+
 def _migrate_db() -> None:
     """Apply all additive column migrations.  Safe to re-run (idempotent)."""
     conn = sqlite3.connect(DB_PATH)
@@ -288,6 +369,7 @@ def _migrate_db() -> None:
     ensure_horse_starts_columns(conn)
     ensure_feature_store_columns(conn)
     ensure_v_entries_live(conn)
+    ensure_race_eval_log(conn)
     conn.close()
 
 
