@@ -434,6 +434,33 @@ surface, distance category, and field size.  All data is read from
 
 ---
 
+## Policy defaults
+
+Policy defaults are lightweight segment-based operational rules that choose the
+default **tier** and **chaos** behavior for each race by surface, distance
+category, and field-size bucket.  They are config-driven and fully reversible;
+changing or removing a rule takes effect on the next scorer run.
+
+**Policy defaults do not change model training directly.**  They provide
+operational routing and observability only.
+
+Config lives in: `src/models/policy.py`
+
+The policy decision is recorded in every scored output (board DataFrame,
+`score_runs` DB row, `entry_scores` DB rows, shadow log) as:
+
+| Column | Meaning |
+|--------|---------|
+| `policy_surface` | Normalized surface code (D / T) |
+| `policy_dist_category` | sprint or route |
+| `policy_field_size_bucket` | Field size bucket label |
+| `policy_tier_selected` | Tier chosen by policy |
+| `policy_tier_reason` | Why that tier was chosen |
+| `policy_chaos_selected` | Chaos default (0 = off) |
+| `policy_chaos_reason` | Why that chaos default was chosen |
+
+---
+
 ## Disclaimer
 
 For entertainment and educational purposes only.

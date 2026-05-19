@@ -86,6 +86,21 @@ def _flags(tier_rows: list[dict], seg_rows: list[dict]) -> list[str]:
     return bullets if bullets else ["- No notable flags at current sample size."]
 
 
+def _policy_section() -> list[str]:
+    return [
+        "## Current policy defaults",
+        "",
+        "- Default tier: enriched_proxy",
+        "- Tier override active: D / sprint / Small (<=6) -> enriched_proxy",
+        "- Tier override active: D / sprint / Medium (7-9) -> enriched_proxy",
+        "- Tier override active: D / sprint / Large (10-12) -> enriched_proxy",
+        "- Default chaos: Off",
+        "- Chaos override active: D / sprint / Small (<=6) -> Off",
+        "- Turf remains on default behavior until larger sample arrives.",
+        "",
+    ]
+
+
 def main():
     tier_rows = _read_csv(TIER_CSV)
     seg_rows  = _read_csv(SEGMENT_CSV)
@@ -103,6 +118,8 @@ def main():
     lines += ["## Flags", ""]
     lines += _flags(tier_rows, seg_rows)
     lines += [""]
+
+    lines += _policy_section()
 
     os.makedirs(os.path.dirname(SUMMARY_MD), exist_ok=True)
     with open(SUMMARY_MD, "w", encoding="utf-8") as f:

@@ -53,6 +53,13 @@ from src.utils.db import (
     get_derby_card_id,
     ensure_entry_scores_columns,
 )
+from src.models.policy import (
+    bucket_field_size,
+    choose_tier,
+    default_chaos as policy_default_chaos,
+    normalize_surface as _policy_norm_surface,
+    normalize_dist_category as _policy_norm_dist,
+)
 
 ROOT       = Path(__file__).resolve().parents[2]
 OUTPUT_DIR = ROOT / "output"
@@ -217,6 +224,13 @@ def _emit_shadow_log(
     derby_override: bool,
     segment: str,
     scored_at: str,
+    policy_surface: str = "",
+    policy_dist_category: str = "",
+    policy_field_size_bucket: str = "",
+    policy_tier_selected: str = "",
+    policy_tier_reason: str = "",
+    policy_chaos_selected: int = 0,
+    policy_chaos_reason: str = "",
 ) -> None:
     """Append one row per starter to output/shadow_log.csv."""
     import logging as _logging
@@ -262,8 +276,15 @@ def _emit_shadow_log(
             "model_version":       model_version,
             "distance_furlongs":   dist_furlongs,
             "surface":             surface,
-            "derby_override_flag": int(derby_override),
-            "scored_at":           scored_at,
+            "derby_override_flag":        int(derby_override),
+            "scored_at":                  scored_at,
+            "policy_surface":             policy_surface,
+            "policy_dist_category":       policy_dist_category,
+            "policy_field_size_bucket":   policy_field_size_bucket,
+            "policy_tier_selected":       policy_tier_selected,
+            "policy_tier_reason":         policy_tier_reason,
+            "policy_chaos_selected":      policy_chaos_selected,
+            "policy_chaos_reason":        policy_chaos_reason,
         })
 
     log_path = OUTPUT_DIR / "shadow_log.csv"
@@ -366,6 +387,29 @@ def _ensure_chaos_columns(conn: sqlite3.Connection) -> None:
     conn.commit()
 
 
+def _ensure_policy_columns(conn: sqlite3.Connection) -> None:
+    for table, col in [
+        ("score_runs",   "policy_surface"),
+        ("score_runs",   "policy_dist_category"),
+        ("score_runs",   "policy_field_size_bucket"),
+        ("score_runs",   "policy_tier_selected"),
+        ("score_runs",   "policy_tier_reason"),
+        ("score_runs",   "policy_chaos_selected"),
+        ("score_runs",   "policy_chaos_reason"),
+        ("entry_scores", "policy_surface"),
+        ("entry_scores", "policy_dist_category"),
+        ("entry_scores", "policy_field_size_bucket"),
+        ("entry_scores", "policy_tier_selected"),
+        ("entry_scores", "policy_tier_reason"),
+        ("entry_scores", "policy_chaos_selected"),
+        ("entry_scores", "policy_chaos_reason"),
+    ]:
+        defn = "INTEGER" if col == "policy_chaos_selected" else "TEXT"
+        try:
+            conn.execute(f"ALTER TABLE {table} ADD COLUMN {col} {defn}")
+        except Exception:
+            pass
+    conn.commit()
 
 
 # ---------------------------------------------------------------------------
@@ -914,6 +958,16 @@ def score_race(card_id: Optional[int] = None) -> pd.DataFrame:
     dist_furlongs = float(rc["distance_furlongs"]) if rc else 10.0
     race_type_key = f"{surface}_{'sprint' if dist_furlongs < 8.5 else 'route'}"
 
+    # ── Policy layer ──────────────────────────────────────────────────────
+    _policy_dist_cat        = "sprint" if dist_furlongs < 8.5 else "route"
+    _policy_field_size      = len(entries_df)
+    _policy_surf_norm       = _policy_norm_surface(surface)
+    policy_field_bucket     = bucket_field_size(_policy_field_size)
+    policy_tier, policy_tier_reason   = choose_tier(surface, _policy_dist_cat, _policy_field_size)
+    policy_chaos_default, policy_chaos_reason = policy_default_chaos(
+        surface, _policy_dist_cat, _policy_field_size
+    )
+
     # Cache race metadata for shadow log (must read while conn is open).
     # Uses _fetch_race_meta so the query adapts to whichever column names
     # exist on this DB — older schemas use card_date/race_number rather than
@@ -1058,6 +1112,7 @@ def score_race(card_id: Optional[int] = None) -> pd.DataFrame:
 
     # ── DB writes ──────────────────────────────────────────────────────────
     _ensure_chaos_columns(conn)
+    _ensure_policy_columns(conn)
     ensure_entry_scores_columns(conn)
     run_id = str(uuid.uuid4())[:8]
 
@@ -1074,10 +1129,16 @@ def score_race(card_id: Optional[int] = None) -> pd.DataFrame:
     conn.execute(
         "INSERT INTO score_runs "
         "(run_id, card_id, model_id, model_type, derby_override_active, quality_tier, "
-        " chaos_active, chaos_intensity, field_entropy_score) "
-        "VALUES (?,?,?,?,?,?,?,?,?)",
+        " chaos_active, chaos_intensity, field_entropy_score,"
+        " policy_surface, policy_dist_category, policy_field_size_bucket,"
+        " policy_tier_selected, policy_tier_reason,"
+        " policy_chaos_selected, policy_chaos_reason) "
+        "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
         (run_id, card_id, model_id, artifact.model_type, int(derby_active), quality_tier,
-         int(chaos_applied), round(chaos_intensity, 4), round(field_entropy, 4)),
+         int(chaos_applied), round(chaos_intensity, 4), round(field_entropy, 4),
+         _policy_surf_norm, _policy_dist_cat, policy_field_bucket,
+         policy_tier, policy_tier_reason,
+         int(policy_chaos_default), policy_chaos_reason),
     )
 
     # Purge stale runs for this card (keep only latest)
@@ -1108,8 +1169,11 @@ def score_race(card_id: Optional[int] = None) -> pd.DataFrame:
                 confidence_flag, missing_data_flag, low_conf_bet_block, rank,
                 trainer_name, jockey_name,
                 chaos_score, chaos_boost, chaos_tier, chaos_eligible,
-                confidence_score, confidence_bucket, confidence_reasons
-            ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                confidence_score, confidence_bucket, confidence_reasons,
+                policy_surface, policy_dist_category, policy_field_size_bucket,
+                policy_tier_selected, policy_tier_reason,
+                policy_chaos_selected, policy_chaos_reason
+            ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
             """,
             (
                 run_id, eid, erow["horse_name"], int(erow["post_position"]),
@@ -1136,6 +1200,9 @@ def score_race(card_id: Optional[int] = None) -> pd.DataFrame:
                 conf_score,
                 conf_bucket,
                 conf_reasons,
+                _policy_surf_norm, _policy_dist_cat, policy_field_bucket,
+                policy_tier, policy_tier_reason,
+                int(policy_chaos_default), policy_chaos_reason,
             ),
         )
 
@@ -1165,6 +1232,15 @@ def score_race(card_id: Optional[int] = None) -> pd.DataFrame:
         board["chaos_tier"]     = chaos_tiers
         board["chaos_eligible"] = chaos_eligs
     board["rank"]               = rank_arr
+
+    # ── Policy observability columns (race-level, repeated per row) ────────
+    board["policy_surface"]           = _policy_surf_norm
+    board["policy_dist_category"]     = _policy_dist_cat
+    board["policy_field_size_bucket"] = policy_field_bucket
+    board["policy_tier_selected"]     = policy_tier
+    board["policy_tier_reason"]       = policy_tier_reason
+    board["policy_chaos_selected"]    = int(policy_chaos_default)
+    board["policy_chaos_reason"]      = policy_chaos_reason
 
     # Merge confidence columns
     conf_merge = conf_df[[
@@ -1203,6 +1279,13 @@ def score_race(card_id: Optional[int] = None) -> pd.DataFrame:
             derby_override=derby_active,
             segment=race_type_key,
             scored_at=score_ts,
+            policy_surface=_policy_surf_norm,
+            policy_dist_category=_policy_dist_cat,
+            policy_field_size_bucket=policy_field_bucket,
+            policy_tier_selected=policy_tier,
+            policy_tier_reason=policy_tier_reason,
+            policy_chaos_selected=int(policy_chaos_default),
+            policy_chaos_reason=policy_chaos_reason,
         )
 
     return board
