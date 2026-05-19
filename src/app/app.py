@@ -3277,6 +3277,7 @@ with tab7:
                         "race_number": race_info.get("race_number"),
                         "track_name":  race_info.get("track_name"),
                     },
+                    filename=_pdf7_file.name,
                 )
 
             if not _pr7["ok"]:
@@ -3381,7 +3382,7 @@ with tab7:
                     ):
                         # Build rows in the format ingest_results() expects
                         _pdf7_rows = []
-                        _r7_tc  = _pr7.get("track_code") or ""
+                        _r7_tc  = _pr7.get("track_code_resolved") or _pr7.get("track_code") or ""
                         _r7_dt  = _pr7.get("race_date") or ""
                         _r7_rn  = int(_pr7["race_number"])
                         for _r7r in _pr7.get("runners") or []:

@@ -190,14 +190,35 @@ def _extract_race_number(text: str) -> int | None:
     return None
 
 
+def _extract_track_from_filename(filename: str | None) -> str | None:
+    """Extract track code from an Equibase results filename like MNR051226USA6.pdf.
+
+    Equibase results charts follow the pattern {TRACK}{MMDDYY}USA{RACE}.pdf.
+    Returns the bare track code string (e.g. "MNR"), or None if the filename
+    does not match the expected pattern.
+    """
+    if not filename:
+        return None
+    import os
+    basename = os.path.basename(filename).upper()
+    m = re.match(r'^([A-Z]{2,4})\d{6}USA\d{1,2}\.PDF$', basename)
+    if m:
+        code = m.group(1)
+        _log.debug("_extract_track_from_filename: %r → %r", filename, code)
+        return code
+    return None
+
+
 def _extract_track(text: str) -> tuple[str | None, str | None]:
-    """Returns (track_code, track_name). Searches the full text.
+    """Returns (track_code, track_name). Searches the header text.
 
     Pass 1 — uppercase-normalized scan on the header (first 10 lines).
       Strips OCR noise such as "LOUISIANA? DOWNS" → "LOUISIANA DOWNS" before
       matching, so punctuation artifacts between words no longer block resolution.
 
-    Pass 2 — existing lowercase substring scan on full text (unchanged behaviour).
+    Pass 2 — lowercase substring scan on header text only (NOT full text).
+      Restricting to the header prevents short aliases (e.g., "pra" for PRM)
+      from false-matching jockey or trainer names in the race chart body.
 
     Pass 3/4 — regex fallbacks for bare codes and track-name patterns.
     """
@@ -208,20 +229,30 @@ def _extract_track(text: str) -> tuple[str | None, str | None]:
     _log.debug("_extract_track: raw_header=%r", raw_header_log)
     _log.debug("_extract_track: norm_header=%r", norm_header)
 
-    # Pass 1: noise-tolerant uppercase alias match on header
+    # Pass 1: noise-tolerant uppercase alias match on header.
+    # Skip aliases shorter than 4 characters — they risk false-matching word
+    # fragments (e.g., "PRA" → "PRADO").  Short codes are caught by Pass 3.
     for alias_norm, code in _TRACK_CODES_UPPER.items():
+        if len(alias_norm) < 4:
+            continue
         if alias_norm in norm_header:
             _log.debug(
                 "_extract_track: normalized_alias_match alias=%r → %r", alias_norm, code
             )
             return code, alias_norm.title()
 
-    # Pass 2: existing lowercase substring scan on full text
-    text_lower = text.lower()
+    # Pass 2: lowercase substring scan on header text only.
+    # Aliases shorter than 4 characters (e.g., "pra" — the 3-char legacy alias for
+    # PRM) are skipped: they are too short to be reliable substrings and would
+    # false-match jockey/trainer names.  Short aliases are still reachable via Pass 1
+    # (TRACK_CODES_UPPER uppercase header scan) and Pass 3 (bare-code regex).
+    header_lower = "\n".join(header_lines).lower()
     for name, code in _TRACK_CODES.items():
-        if name in text_lower:
+        if len(name) < 4:
+            continue
+        if name in header_lower:
             _log.debug(
-                "_extract_track: lowercase_substring_match alias=%r → %r", name, code
+                "_extract_track: lowercase_header_match alias=%r → %r", name, code
             )
             return code, name.title()
 
@@ -1495,6 +1526,7 @@ def parse_race_pdf(pdf_bytes: bytes) -> dict[str, Any]:
 def parse_results_pdf(
     pdf_bytes: bytes,
     active_race: dict | None = None,
+    filename: str | None = None,
 ) -> dict[str, Any]:
     """Parse an Equibase official chart PDF (post-race results).
 
@@ -1503,6 +1535,11 @@ def parse_results_pdf(
         race unambiguously, its track_code is used as a fallback.
         Expected keys: "track_code", "race_date", "race_number" (int or str),
                        "track_name" (optional).
+
+    filename (optional): original upload filename (e.g. "MNR051226USA6.pdf").
+        Equibase results filenames encode the track code explicitly; when
+        present this is used as the highest-priority source (Pass 0) so the
+        correct track is identified before any text extraction is attempted.
 
     Returns:
         ok, error, warnings,
@@ -1517,7 +1554,7 @@ def parse_results_pdf(
         track_resolution_source
         parse_diagnostics     — {detected_format, parsed_track, parsed_date,
                                    parsed_race_number, n_finishers,
-                                   parse_failure_reason}
+                                   track_extraction_path, parse_failure_reason}
 
     Returns ok=False with a clear operator-facing error when:
       • PDF text cannot be extracted
@@ -1571,7 +1608,24 @@ def parse_results_pdf(
 
     race_date     = _extract_date(text)
     race_number   = _extract_race_number(text)
-    track_code, track_name = _extract_track(text)
+
+    # ── Pass 0: filename-based track extraction (highest priority) ────────────
+    # Equibase results filenames encode the track code explicitly, e.g.
+    # "MNR051226USA6.pdf" → MNR.  Use this before any text scan so that a
+    # mis-parsed header (or a false alias match in the body) cannot override
+    # the explicit file-level identity.
+    _track_extraction_path = "extracted"
+    _filename_track = _extract_track_from_filename(filename)
+    if _filename_track:
+        track_code = _filename_track
+        track_name = None  # _resolve_track fills canonical name later
+        _track_extraction_path = "filename"
+        _log.info(
+            "parse_results_pdf: Pass 0 filename=%r → track_code=%r",
+            filename, track_code,
+        )
+    else:
+        track_code, track_name = _extract_track(text)
 
     # ── Active-race fallback ──────────────────────────────────────────────────
     # If the PDF header is too noisy to resolve a track code, but the parsed
@@ -1596,6 +1650,7 @@ def parse_results_pdf(
             track_code = _ar_tc
             track_name = active_race.get("track_name") or track_name
             _track_fallback_used = True
+            _track_extraction_path = "active_race_fallback"
 
     distance_text = _extract_distance(text)
     surface       = _extract_surface(text)
@@ -1670,9 +1725,7 @@ def parse_results_pdf(
             "parsed_date":         race_date,
             "parsed_race_number":  race_number,
             "n_finishers":         0,
-            "track_extraction_path": (
-                "active_race_fallback" if _track_fallback_used else "extracted"
-            ),
+            "track_extraction_path": _track_extraction_path,
             "parse_failure_reason": _fail_reason,
         }
         return {

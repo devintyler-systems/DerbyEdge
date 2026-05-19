@@ -100,6 +100,13 @@ _TRACKS: tuple[_TrackRecord, ...] = (
         # Legacy / operator alias used before canonical code was registered
         "PRA",
     )),
+    _TrackRecord("MNR", "Mountaineer", (
+        "Mountaineer Casino Racetrack & Resort",
+        "Mountaineer Casino Racetrack and Resort",
+        "Mountaineer Casino Racetrack",
+        "Mountaineer Casino",
+        "Mountaineer",
+    )),
 )
 
 # Internal lookups built at import time

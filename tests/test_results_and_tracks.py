@@ -19,7 +19,7 @@ import pytest
 
 from tests.conftest import insert_minimal_race
 from src.derbyedge.tracks import normalize_track_name, normalize_track_text, resolve_track
-from src.services.pdf_ingest import _extract_track, parse_results_pdf
+from src.services.pdf_ingest import _extract_track, _extract_track_from_filename, parse_results_pdf
 from src.services.results_intake import (
     ensure_race_review_view,
     evaluate_score_run,
@@ -814,3 +814,145 @@ class TestResultsPdfActiveFallback:
         result = self._call(_FAKE_LAD_CHART)
         diag = result.get("parse_diagnostics") or {}
         assert diag.get("track_extraction_path") == "extracted"
+
+
+# ── Suite 12: MNR / Mountaineer resolution ───────────────────────────────────
+
+_FAKE_MNR_CHART = (
+    "MOUNTAINEER CASINO RACETRACK & RESORT - May 12, 2026 - Race 6\n"
+    "1  STORMY NIGHT      3.20\n"
+    "2  RIVER BEND        5.60\n"
+    "3  COAL RUNNER       8.10\n"
+)
+
+# Body text that contains jockey "Prado" but a non-PRM/non-MNR header — used to
+# verify that "pra" (legacy PRM alias) cannot false-match in the chart body.
+_FAKE_PRADO_BODY = (
+    "AQUEDUCT - May 12, 2026 - Race 3\n"
+    "1  IRON WILL       Jockey: Edgar Prado       2.80\n"
+    "2  BLUE STORM      Jockey: Jose Prater       4.50\n"
+)
+
+
+class TestMNRResolution:
+    """MNR (Mountaineer) must resolve correctly; PRM must never false-match."""
+
+    # ── Registry ──────────────────────────────────────────────────────────────
+
+    def test_mnr_code_resolves_in_registry(self):
+        res = resolve_track(track_code="MNR")
+        assert res["track_code"] == "MNR"
+        assert res["resolution_source"] == "parsed_code"
+        assert "Mountaineer" in res["track_name_canonical"]
+
+    def test_mountaineer_full_name_resolves(self):
+        res = resolve_track(track_name="Mountaineer Casino Racetrack & Resort")
+        assert res["track_code"] == "MNR"
+        assert res["resolution_source"] == "alias_exact"
+
+    def test_mountaineer_short_name_resolves(self):
+        res = resolve_track(track_name="Mountaineer")
+        assert res["track_code"] == "MNR"
+
+    def test_prm_still_resolves_correctly(self):
+        """Adding MNR must not break existing PRM resolution."""
+        assert resolve_track(track_code="PRM")["track_code"] == "PRM"
+        assert resolve_track(track_name="Prairie Meadows")["track_code"] == "PRM"
+        assert resolve_track(track_code="PRA")["track_code"] == "PRM"
+
+    def test_mnr_prm_do_not_cross_map(self):
+        """MNR and PRM must resolve to distinct codes and never swap."""
+        assert resolve_track(track_code="MNR")["track_code"] == "MNR"
+        assert resolve_track(track_code="PRM")["track_code"] == "PRM"
+        assert resolve_track(track_name="Mountaineer")["track_code"] != "PRM"
+        assert resolve_track(track_name="Prairie Meadows")["track_code"] != "MNR"
+
+    # ── _extract_track header scan ─────────────────────────────────────────────
+
+    def test_mnr_header_extracted_clean(self):
+        code, _ = _extract_track(
+            "Mountaineer Casino Racetrack & Resort - May 12, 2026 - Race 6\n"
+        )
+        assert code == "MNR"
+
+    def test_mnr_header_all_caps(self):
+        code, _ = _extract_track(
+            "MOUNTAINEER CASINO RACETRACK & RESORT - May 12, 2026 - Race 6\n"
+        )
+        assert code == "MNR"
+
+    def test_pra_no_false_match_in_body(self):
+        """'pra' (PRM legacy alias) must not match 'Prado'/'Prater' in the chart body."""
+        code, _ = _extract_track(_FAKE_PRADO_BODY)
+        # Aqueduct is in the registry; PRM must not be returned.
+        assert code == "AQU"
+
+    def test_pra_does_not_match_prado_jockey_text(self):
+        """Bare body text with 'Prado' but no registered header → no PRM match."""
+        body_only = (
+            "UNKNOWN VENUE - May 12, 2026 - Race 3\n"
+            "1  IRON WILL       Jockey: Edgar Prado       2.80\n"
+        )
+        code, _ = _extract_track(body_only)
+        assert code != "PRM", (
+            "'pra' substring in 'prado' must not resolve to PRM after Pass 2 "
+            "was restricted to header text"
+        )
+
+    # ── Filename extraction ────────────────────────────────────────────────────
+
+    def test_filename_mnr_extracted(self):
+        assert _extract_track_from_filename("MNR051226USA6.pdf") == "MNR"
+
+    def test_filename_case_insensitive(self):
+        assert _extract_track_from_filename("mnr051226usa6.pdf") == "MNR"
+
+    def test_filename_lad_extracted(self):
+        assert _extract_track_from_filename("LAD051226USA5.pdf") == "LAD"
+
+    def test_filename_none_returns_none(self):
+        assert _extract_track_from_filename(None) is None
+
+    def test_filename_non_equibase_pattern_returns_none(self):
+        assert _extract_track_from_filename("results_2026-05-12.pdf") is None
+        assert _extract_track_from_filename("MNR051226.pdf") is None
+
+    # ── parse_results_pdf end-to-end ──────────────────────────────────────────
+
+    def _call(self, text: str, filename: str | None = None, active_race=None):
+        with patch("src.services.pdf_ingest._extract_text", return_value=text):
+            return parse_results_pdf(b"fake-pdf", active_race=active_race, filename=filename)
+
+    def test_parse_mnr_from_header(self):
+        # Fake chart has no Equibase finisher rows so parse returns ok=False,
+        # but track extraction (Pass 1) must still identify MNR.
+        result = self._call(_FAKE_MNR_CHART)
+        assert result["track_code"] == "MNR"
+
+    def test_parse_mnr_filename_overrides_fallback(self):
+        """Filename Pass 0 must win even when active_race says something else."""
+        result = self._call(
+            _FAKE_MNR_CHART,
+            filename="MNR051226USA6.pdf",
+            active_race={
+                "track_code": "PRM", "race_date": "2026-05-12", "race_number": 6,
+            },
+        )
+        assert result["track_code"] == "MNR"
+        diag = result.get("parse_diagnostics") or {}
+        assert diag.get("track_extraction_path") == "filename"
+
+    def test_parse_filename_extraction_path_in_diagnostics(self):
+        result = self._call(_FAKE_MNR_CHART, filename="MNR051226USA6.pdf")
+        diag = result.get("parse_diagnostics") or {}
+        assert diag.get("track_extraction_path") == "filename"
+
+    def test_parse_resolved_code_used_not_raw(self):
+        """Filename Pass 0 sets track_code; on a successful parse both raw and resolved
+        must be MNR (no alias drift).  The fake chart triggers ok=False (no finisher rows
+        in the test fixture), so we verify track_code only — resolution is validated in
+        the resolve_track registry tests above."""
+        result = self._call(_FAKE_MNR_CHART, filename="MNR051226USA6.pdf")
+        assert result["track_code"] == "MNR"
+        diag = result.get("parse_diagnostics") or {}
+        assert diag.get("track_extraction_path") == "filename"
