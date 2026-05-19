@@ -409,6 +409,31 @@ Unmatched rows are kept with `match_status='UNMATCHED'` so no data is lost.
 
 ---
 
+## Race eval segment summary
+
+Summarises race-level top-pick performance from `race_eval_log` by tier,
+surface, distance category, and field size.  All data is read from
+`v_race_eval_tool_enriched` — no DB tables are created or modified.
+
+**Outputs:**
+
+| File | Description |
+|------|-------------|
+| `output/race_eval_by_segment.csv` | Win rate per tier / surface / dist / field-size bucket |
+| `output/race_eval_by_tier.csv` | Win rate rolled up to tier only |
+| `output/race_eval_summary.md` | Compact markdown report with flags |
+
+**Run:**
+
+```powershell
+.\scripts\run_race_eval_summary.ps1
+```
+
+> This is for race-level decision analytics.  It does not affect
+> starter-level model training unless the outputs are explicitly joined later.
+
+---
+
 ## Disclaimer
 
 For entertainment and educational purposes only.
