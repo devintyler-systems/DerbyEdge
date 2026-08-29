@@ -1,0 +1,11 @@
+predicted_rank,horse,post,jockey,trainer,morning_line,model_win_prob_pct,fair_odds,market_implied_prob_pct,edge_pp,bet_tag,pace_note
+1,Renegade,5,T. Gaffalione,T. Pletcher,3,15.4,5.51-1,25.0,-9.6,AVOID - steamed short,"tactical/stalker, controls pace from press position, gate-3 clean trip"
+2,Sea Strike,7,F. Prat,C. Brown,5,13.5,6.39-1,16.7,-3.1,CONTENDER - fair price,"gate speed, drop-in class off allowance win, small sample = variance risk"
+3,Golden Tempo,9,J. Ortiz,C. Devaux,2.5,13.4,6.44-1,28.6,-15.1,AVOID - steamed short,"closer off leaders, needs a target, 84-day layoff is the swing risk"
+4,Leading Change,2,M. Franco,B. Cox,12,10.8,8.22-1,7.7,3.2,VALUE - price overlay,"gate speed, unbeaten 2-for-2 but zero graded stakes traffic experience"
+5,Silent Tactic,10,L. Saez,M. Casse,10,10.4,8.64-1,9.1,1.3,PASS - no edge,"closer/stalker, consistent minor-award finisher, in-and-outer profile"
+6,Emerging Market,1,"R. Santana, Jr.",C. Brown,15,9.2,9.91-1,6.2,2.9,VALUE - price overlay,"stalker, lone graded placing was 2nd behind pace collapse"
+7,The Puma,4,J. Castellano,G. Delgado,8,9.1,10.04-1,11.1,-2.1,PASS - no edge,"stalker, freshened up, no bad recent trip flags"
+8,Napoleon Solo,3,J. Velazquez,C. Summers,8,8.6,10.63-1,11.1,-2.5,PASS - no edge,"erratic gate-to-wire type, wide trips have cost him late"
+9,Baby Vino,8,P. Lopez,L. Schultz,10,5.6,16.98-1,9.1,-3.5,PASS - no edge,"front-runner drop from allowance ranks, needs the lead uncontested"
+10,Ocelli,6,E. Zayas,D. Beckman,20,4.1,23.58-1,4.8,-0.7,PASS - no edge,"chronic non-winner (10 starts, 0 wins), overmatched at this level"
