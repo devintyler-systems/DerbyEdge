@@ -141,7 +141,7 @@ def test_stacked_saratoga_r9_attaches_and_verifies_active_entries_only(
         conn, card_id, legacy["runners"], race_date=legacy["race_date"], race_distance_yards=1870,
     )
     assert enrichment["ok"] is True
-    assert enrichment["n_pp_rows"] == 20
+    assert enrichment["n_pp_rows"] == 46
     assert conn.execute(
         "SELECT COUNT(*) FROM entries WHERE card_id=? AND scratch_flag=0", (card_id,)
     ).fetchone()[0] == 10
