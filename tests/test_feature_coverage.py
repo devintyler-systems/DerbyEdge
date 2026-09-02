@@ -22,7 +22,8 @@ def test_saratoga_coverage_is_source_truthful():
         uploaded_at_utc="2026-09-02T20:24:00Z",
     )
     coverage = audit["feature_coverage"]
-    assert audit["run_mode"] == RunMode.MODEL_READY_LIMITED.value
+    assert audit["run_mode"] == RunMode.PP_PARSED_FEATURES_PENDING.value
+    assert audit["ingest_run_mode"] == RunMode.PP_PARSED_FEATURES_PENDING.value
     assert coverage["recent_form"] == 1.0
     assert coverage["run_style_proxy"] == 0.89
     assert coverage["off_track_evidence"] == 0.44
@@ -54,4 +55,3 @@ def test_constant_nontrivial_features_emit_warning_and_block_forecast():
     mode, reasons = resolve_mode_with_feature_checks(quality, rows)
     assert mode == RunMode.BLOCKED
     assert any("core engineered features are degenerate" in reason for reason in reasons)
-

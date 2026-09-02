@@ -3,7 +3,7 @@ from __future__ import annotations
 import ast
 from pathlib import Path
 
-from src.app.board_state import race_board_contract
+from src.app.board_state import race_board_contract, source_feature_inventory
 from src.ingest.run_state import RunMode, market_baseline_scores
 
 
@@ -41,6 +41,27 @@ def test_no_live_market_means_no_edge_tag_or_stake_controls():
         assert not contract.show_stakes
 
 
+def test_pending_features_cannot_render_stale_model_artifacts():
+    contract = race_board_contract(RunMode.PP_PARSED_FEATURES_PENDING)
+    assert not contract.show_model_probability
+    assert not contract.show_fair_odds
+    assert not contract.scoring_controls_enabled
+    assert contract.chart_series == ()
+
+
+def test_source_coverage_is_inventory_not_an_average():
+    inventory = source_feature_inventory({
+        "recent_form": 1.0,
+        "trip_flags": 0.89,
+        "speed_figures": 0.0,
+    })
+    assert inventory == {
+        "Available": ("Recent Form",),
+        "Partial": ("Trip Flags (89%)",),
+        "Missing": ("Speed Figures",),
+    }
+
+
 def test_no_direct_model_assignment_from_market_fields():
     source = Path("src/ingest/run_state.py").read_text(encoding="utf-8")
     tree = ast.parse(source)
@@ -57,4 +78,3 @@ def test_no_direct_model_assignment_from_market_fields():
         ):
             forbidden.append((target_text, value_text))
     assert forbidden == []
-

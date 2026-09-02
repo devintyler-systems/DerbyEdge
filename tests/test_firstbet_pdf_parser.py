@@ -3,6 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from src.ingest.firstbet_pdf import (
+    bind_run_to_card,
     ingest_firstbet_pdf,
     parse_firstbet_text,
 )
@@ -99,3 +100,17 @@ def test_every_upload_attempt_persists_both_audit_artifacts(tmp_path):
     assert (tmp_path / "bad-upload" / "parsed_pp.json").exists()
     assert (tmp_path / "bad-upload" / "feature_audit.json").exists()
 
+
+def test_card_binding_does_not_mutate_immutable_ingest_audit(tmp_path):
+    result = ingest_firstbet_pdf(
+        b"not-a-pdf",
+        filename="bad.pdf",
+        runs_root=tmp_path,
+        uploaded_at_utc="2026-09-02T20:24:00Z",
+        run_id="immutable-upload",
+    )
+    audit_path = tmp_path / result["run_id"] / "feature_audit.json"
+    before = audit_path.read_bytes()
+    bind_run_to_card(result["run_id"], 8, runs_root=tmp_path)
+    assert audit_path.read_bytes() == before
+    assert (audit_path.parent / "card_binding.json").exists()

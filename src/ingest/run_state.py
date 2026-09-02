@@ -15,6 +15,7 @@ from typing import Any, Iterable, Mapping, Sequence
 class RunMode(StrEnum):
     BLOCKED = "BLOCKED"
     MARKET_BASELINE_ONLY = "MARKET_BASELINE_ONLY"
+    PP_PARSED_FEATURES_PENDING = "PP_PARSED_FEATURES_PENDING"
     MODEL_READY_LIMITED = "MODEL_READY_LIMITED"
     MODEL_READY = "MODEL_READY"
 
@@ -72,7 +73,13 @@ def resolve_run_mode(q: DataQuality) -> tuple[RunMode, list[str]]:
             f"PP coverage is {pp_coverage:.0%}; minimum is 80% of parsed entries."
         ]
 
-    if q.has_live_odds and q.required_model_features_complete:
+    if not q.required_model_features_complete:
+        return RunMode.PP_PARSED_FEATURES_PENDING, [
+            "Past performances were parsed, but the model-required feature schema "
+            "has not passed verification."
+        ]
+
+    if q.has_live_odds:
         return RunMode.MODEL_READY, []
 
     return RunMode.MODEL_READY_LIMITED, [
@@ -161,7 +168,11 @@ def resolve_mode_with_feature_checks(
     key_features = ("pace_fit", "form", "surface_distance_fit")
     warnings = feature_degeneracy_warnings(feature_rows, key_features)
     all_key_features_constant = len(warnings) == len(key_features)
-    if mode in (RunMode.MODEL_READY_LIMITED, RunMode.MODEL_READY) and all_key_features_constant:
+    if mode in (
+        RunMode.PP_PARSED_FEATURES_PENDING,
+        RunMode.MODEL_READY_LIMITED,
+        RunMode.MODEL_READY,
+    ) and all_key_features_constant:
         return RunMode.BLOCKED, reasons + warnings + [
             "All core engineered features are degenerate; forecast scoring is blocked."
         ]
@@ -170,4 +181,3 @@ def resolve_mode_with_feature_checks(
 
 def _dedupe(values: Iterable[str]) -> list[str]:
     return list(dict.fromkeys(value for value in values if value))
-

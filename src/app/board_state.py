@@ -52,6 +52,10 @@ def race_board_contract(mode: RunMode, *, has_live_odds: bool = False) -> RaceBo
             False, True, False, False, False, False, False, False,
             ("Morning-Line Implied Win Probability",),
         )
+    if mode == RunMode.PP_PARSED_FEATURES_PENDING:
+        return RaceBoardContract(
+            False, False, False, False, False, False, False, False, ()
+        )
     if mode == RunMode.MODEL_READY_LIMITED:
         return RaceBoardContract(
             True, True, has_live_odds, True, False, False, False, True,
@@ -62,6 +66,26 @@ def race_board_contract(mode: RunMode, *, has_live_odds: bool = False) -> RaceBo
         has_live_odds, True,
         ("Model Win %", "Live Market %" if has_live_odds else "Morning-Line Implied %"),
     )
+
+
+def source_feature_inventory(
+    coverage: Mapping[str, object] | None,
+) -> dict[str, tuple[str, ...]]:
+    """Classify source fields without inventing an averaged coverage score."""
+    buckets: dict[str, list[str]] = {
+        "Available": [], "Partial": [], "Missing": [],
+    }
+    for name, raw_value in (coverage or {}).items():
+        try:
+            value = float(raw_value)
+        except (TypeError, ValueError):
+            value = 0.0
+        label = str(name).replace("_", " ").title()
+        bucket = "Available" if value >= 1.0 else "Partial" if value > 0.0 else "Missing"
+        if bucket == "Partial":
+            label = f"{label} ({value:.0%})"
+        buckets[bucket].append(label)
+    return {name: tuple(values) for name, values in buckets.items()}
 
 
 def load_run_index_for_card(conn, card_id: int) -> list[dict]:

@@ -102,6 +102,7 @@ from src.app.board_state import (
     load_run_index_for_card,
     select_active_run_id,
     race_board_contract,
+    source_feature_inventory,
 )
 
 # ── Page config ────────────────────────────────────────────────────────────────
@@ -1028,6 +1029,8 @@ with st.sidebar:
             st.caption("⛔ Scoring blocked — inspect the data-quality panel.")
         elif _run_mode == RunMode.MARKET_BASELINE_ONLY:
             st.caption("⚠ Morning-line baseline only — no model forecast.")
+        elif _run_mode == RunMode.PP_PARSED_FEATURES_PENDING:
+            st.caption("PPs parsed — feature verification is still pending.")
         elif _run_mode == RunMode.MODEL_READY_LIMITED:
             st.caption("Limited-source forecast — wagering outputs disabled.")
         else:
@@ -1161,7 +1164,11 @@ active_card_id = st.session_state["active_card_id"]
 board_df, meta = (
     load_board(selected_run_id, active_card_id) if selected_run_id else (None, None)
 )
-if _run_mode in (RunMode.BLOCKED, RunMode.MARKET_BASELINE_ONLY):
+if _run_mode in (
+    RunMode.BLOCKED,
+    RunMode.MARKET_BASELINE_ONLY,
+    RunMode.PP_PARSED_FEATURES_PENDING,
+):
     # A stale historical score run must not leak model artifacts into a mode
     # that explicitly forbids a forecast.
     board_df, meta = None, None
@@ -1235,11 +1242,19 @@ if active_card_id:
             "Displayed values are normalized morning-line implied probabilities. "
             "Fair odds, edge, wager tags, and stake sizing are disabled."
         )
+    elif _run_mode == RunMode.PP_PARSED_FEATURES_PENDING:
+        st.info(
+            "PP PARSED — FEATURES PENDING\n\n"
+            "1/ST past performances were attached, but the current model feature "
+            "frame has not passed schema and non-degeneracy checks. Build features "
+            "before scoring. No model output is available in this state."
+        )
     elif _run_mode == RunMode.MODEL_READY_LIMITED:
         _coverage = _audit.get("feature_coverage") or {}
-        _coverage_pct = (
-            round(100 * sum(float(v) for v in _coverage.values()) / len(_coverage))
-            if _coverage else 0
+        _inventory = source_feature_inventory(_coverage)
+        _inventory_text = " · ".join(
+            f"{_label}: {', '.join(_items) if _items else 'None'}"
+            for _label, _items in _inventory.items()
         )
         st.warning(
             "LIMITED-SOURCE FORECAST\n\n"
@@ -1247,7 +1262,7 @@ if active_card_id:
             "have parsed PP history. The forecast uses 1/ST PDF-derived inputs only. "
             "Unavailable: speed figures, fractional pace, workouts, pedigree, live odds. "
             "Betting outputs remain disabled. "
-            f"Feature coverage: {_coverage_pct}%"
+            f"Source inventory — {_inventory_text}"
         )
     else:
         st.success("MODEL READY — forecast and complete live-market comparison are eligible.")
@@ -2624,6 +2639,8 @@ with tab5:
                 )
             elif _pr5.get("run_mode") == RunMode.MARKET_BASELINE_ONLY.value:
                 st.warning("MARKET BASELINE ONLY — morning lines parsed, no PP history attached.")
+            elif _pr5.get("run_mode") == RunMode.PP_PARSED_FEATURES_PENDING.value:
+                st.info("PPs parsed — create/re-sync the card, then build and verify features.")
             elif _pr5.get("run_mode") == RunMode.MODEL_READY_LIMITED.value:
                 st.warning("LIMITED-SOURCE FORECAST eligible after race-card creation.")
 

@@ -173,6 +173,7 @@ def ingest_firstbet_pdf(
         audit = {
             "run_id": run_id,
             "run_mode": RunMode.BLOCKED.value,
+            "ingest_run_mode": RunMode.BLOCKED.value,
             "source_provider": "1stbet",
             "field_size_declared": None,
             "entries_parsed": 0,
@@ -228,15 +229,24 @@ def bind_run_to_card(
     *,
     runs_root: Path | str = Path("data/runs"),
 ) -> dict[str, Any]:
-    """Attach an immutable upload run to its DB race identity."""
+    """Attach an immutable upload run to its DB race identity.
+
+    The binding is deliberately separate from ``feature_audit.json`` so the
+    ingest-time audit remains byte-for-byte immutable after persistence.
+    """
     audit_path = Path(runs_root) / run_id / "feature_audit.json"
     audit = json.loads(audit_path.read_text(encoding="utf-8"))
-    existing = audit.get("card_id")
+    binding_path = audit_path.with_name("card_binding.json")
+    binding = (
+        json.loads(binding_path.read_text(encoding="utf-8"))
+        if binding_path.exists() else {}
+    )
+    existing = binding.get("card_id")
     if existing is not None and int(existing) != int(card_id):
         raise ValueError(f"Run {run_id} is already bound to card_id={existing}.")
-    audit["card_id"] = int(card_id)
-    audit_path.write_text(json.dumps(audit, indent=2) + "\n", encoding="utf-8")
-    return audit
+    binding = {"run_id": run_id, "card_id": int(card_id)}
+    binding_path.write_text(json.dumps(binding, indent=2) + "\n", encoding="utf-8")
+    return {**audit, "card_id": int(card_id), "_binding_path": str(binding_path)}
 
 
 def load_latest_card_audit(
@@ -249,6 +259,21 @@ def load_latest_card_audit(
     if not root.exists():
         return None
     matches: list[dict[str, Any]] = []
+    for binding_path in root.glob("*/card_binding.json"):
+        try:
+            binding = json.loads(binding_path.read_text(encoding="utf-8"))
+            if int(binding.get("card_id")) != int(card_id):
+                continue
+            path = binding_path.with_name("feature_audit.json")
+            audit = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, TypeError, ValueError, json.JSONDecodeError):
+            continue
+        audit["card_id"] = int(card_id)
+        audit["_audit_path"] = str(path)
+        audit["_binding_path"] = str(binding_path)
+        matches.append(audit)
+    # Read legacy bindings without rewriting their immutable audit. This keeps
+    # existing PR fixtures/runs discoverable while all new bindings are split.
     for path in root.glob("*/feature_audit.json"):
         try:
             audit = json.loads(path.read_text(encoding="utf-8"))
@@ -300,7 +325,6 @@ def to_legacy_race_result(
             "ml": entry.get("morning_line_text"),
             "morning_line": entry.get("morning_line_text"),
             "morning_line_decimal": entry.get("morning_line_decimal"),
-            "morning_line_decimal_includes_stake": True,
             "morning_line_decimal_includes_stake": True,
             "past_performances": entry.get("past_performances") or [],
             "last_5": legacy_starts,
@@ -375,7 +399,7 @@ def build_feature_audit(
     ]
     if coverage["off_track_evidence"] < 1.0:
         warnings.append("Muddy-track evidence is incomplete for some starters.")
-    if mode == RunMode.MODEL_READY_LIMITED:
+    if mode in (RunMode.PP_PARSED_FEATURES_PENDING, RunMode.MODEL_READY_LIMITED):
         warnings.extend(reasons)
 
     diagnostics = dict(entry_diagnostics or {})
@@ -390,12 +414,15 @@ def build_feature_audit(
     return {
         "run_id": None,
         "run_mode": mode.value,
+        "ingest_run_mode": mode.value,
         "source_provider": "1stbet",
         "field_size_declared": race.get("field_size_declared"),
         "entries_parsed": parsed,
         "entries_with_pp_history": entries_with_pp,
         "total_pp_starts_parsed": total_pp,
         "starter_match_rate": round(match_rate, 4),
+        "race_metadata_complete": metadata_complete,
+        "has_morning_lines": quality.has_morning_lines,
         "feature_coverage": coverage,
         "blocking_errors": reasons if mode == RunMode.BLOCKED else [],
         "warnings": list(dict.fromkeys(warnings)),

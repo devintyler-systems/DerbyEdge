@@ -50,7 +50,12 @@ def test_starter_match_and_pp_coverage_thresholds_block():
 
 
 def test_only_full_features_plus_live_odds_reaches_model_ready():
-    assert resolve_run_mode(_quality(has_live_odds=True))[0] == RunMode.MODEL_READY_LIMITED
+    assert resolve_run_mode(
+        _quality(has_live_odds=True)
+    )[0] == RunMode.PP_PARSED_FEATURES_PENDING
+    assert resolve_run_mode(
+        _quality(required_model_features_complete=True)
+    )[0] == RunMode.MODEL_READY_LIMITED
     assert resolve_run_mode(
         _quality(has_live_odds=True, required_model_features_complete=True)
     )[0] == RunMode.MODEL_READY
