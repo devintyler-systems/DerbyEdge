@@ -117,7 +117,12 @@ def test_stacked_saratoga_r9_header_and_entries_are_normalized():
     }
     assert len(payload["entries"]) == 13
     assert [entry["post"] for entry in payload["entries"]] == list(range(1, 14))
-    assert audit["diagnostics"]["entry_parser_strategy"] == "stacked"
+    assert audit["diagnostics"]["entry_parser_strategy"] == "name_aux_post_jockey_pp_trainer"
+    assert audit["diagnostics"]["entry_parser_candidates"]["name_aux_post_jockey_pp_trainer"] == {
+        "parsed_entries": 13,
+        "unique_posts": 13,
+        "complete_connection_ml_entries": 13,
+    }
     assert audit["entries_parsed"] == 13
     assert audit["field_size_declared_raw"] == 13
     assert audit["active_entries"] == 10
@@ -129,6 +134,8 @@ def test_stacked_saratoga_r9_retains_source_scratches_but_audits_active_only():
     payload, audit = _parse_stacked()
     by_post = {entry["post"]: entry for entry in payload["entries"]}
 
+    assert by_post[1]["horse_raw"] == "LEXINGTON PIKE"
+    assert by_post[2]["horse_raw"] == "BLUE PILL"
     assert {by_post[post]["horse_raw"] for post in (11, 12, 13)} == {
         "DUCKY MEDWICK", "HOT PROPERTY", "CULPRIT"
     }

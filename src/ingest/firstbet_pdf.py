@@ -485,7 +485,7 @@ def _parse_race_header(lines: list[str]) -> dict[str, Any]:
     detail = detail_lines[0] if detail_lines else ""
     match = re.match(
         r"^(\d{1,2}:\d{2}\s*[AP]M)\s+(\d+)\s+Horses\s+([A-Z]{2,5})\s+"
-        r"\$([\d,]+)\s+(.+?)\s+(Dirt|Turf|Synthetic|All[- ]?Weather)\s*/\s*([A-Za-z-]+)$",
+        r"\$([\d,]+)\s+(.+?)\s+(Inner\s*Turf|Innerturf|Dirt|Turf|Synthetic|All[- ]?Weather)\s*/\s*([A-Za-z-]+)$",
         detail,
         re.I,
     )
@@ -547,12 +547,46 @@ def _parse_race_header(lines: list[str]) -> dict[str, Any]:
 
 
 def _parse_entries(lines: list[str]) -> tuple[list[dict[str, Any]], dict[str, Any]]:
-    """Use compact anchors first, then the source's stacked entry layout."""
-    entries, diagnostics = _parse_compact_entries(lines)
-    if entries:
-        diagnostics["entry_parser_strategy"] = "compact"
-        return entries, diagnostics
-    return _parse_stacked_entries(lines)
+    """Run every supported source layout and retain the strongest parse.
+
+    A 1/ST export can mix page furniture with one of several column orders.
+    Choosing the first non-empty result made the parser brittle: an incidental
+    match can hide the strategy that actually recovered the full field.
+    """
+    strategies = (
+        ("compact", _parse_compact_entries),
+        ("stacked", _parse_stacked_entries),
+        ("name_aux_post_jockey_pp_trainer", _parse_name_aux_post_jockey_pp_trainer_entries),
+    )
+    candidates: list[tuple[tuple[int, int, int], str, list[dict[str, Any]], dict[str, Any]]] = []
+    for strategy_name, parser in strategies:
+        entries, diagnostics = parser(lines)
+        unique_posts = len({entry.get("post") for entry in entries if entry.get("post") is not None})
+        complete_profiles = sum(
+            all(entry.get(field) not in (None, "") for field in (
+                "horse_raw", "post", "jockey", "trainer", "morning_line_decimal"
+            ))
+            for entry in entries
+        )
+        candidates.append(((len(entries), unique_posts, complete_profiles), strategy_name, entries, diagnostics))
+
+    score, strategy_name, entries, diagnostics = max(candidates, key=lambda candidate: candidate[0])
+    diagnostics = dict(diagnostics)
+    diagnostics["entry_parser_strategy"] = strategy_name
+    diagnostics["entry_parser_candidates"] = {
+        name: {
+            "parsed_entries": candidate_score[0],
+            "unique_posts": candidate_score[1],
+            "complete_connection_ml_entries": candidate_score[2],
+        }
+        for candidate_score, name, _, _ in candidates
+    }
+    diagnostics["entry_parser_selection_score"] = {
+        "parsed_entries": score[0],
+        "unique_posts": score[1],
+        "complete_connection_ml_entries": score[2],
+    }
+    return entries, diagnostics
 
 
 def _parse_compact_entries(lines: list[str]) -> tuple[list[dict[str, Any]], dict[str, Any]]:
@@ -678,6 +712,81 @@ def _parse_stacked_entries(lines: list[str]) -> tuple[list[dict[str, Any]], dict
         "entry_parser_strategy": "stacked",
     }
     return sorted(entries, key=lambda entry: entry["post"]), diagnostics
+
+
+def _parse_name_aux_post_jockey_pp_trainer_entries(
+    lines: list[str],
+) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    """Parse 1/ST's name / auxiliary / post / connections column order.
+
+    pdfplumber can read the name column before the post and connection columns:
+    ``LEXINGTON PIKE 27`` / ``1`` / ``J: ... ML 20`` / ``PP1`` / ``T: ...``.
+    The complete five-line anchor is deliberately strict so a PP-history line
+    cannot masquerade as a runner. A scratch is carried on the name line.
+    """
+    anchors: list[tuple[int, int, str, bool, re.Match[str], re.Match[str]]] = []
+    for idx in range(len(lines) - 4):
+        parsed_name = _name_and_source_scratch(lines[idx])
+        post_match = re.fullmatch(r"(\d{1,2})", lines[idx + 1])
+        jockey_match = re.fullmatch(r"J:\s*(.+?)\s+ML\s+([\d/-]+)", lines[idx + 2], re.I)
+        pp_match = re.fullmatch(r"PP\s*(\d{1,2})", lines[idx + 3], re.I)
+        trainer_match = re.fullmatch(r"T:\s*(.+)", lines[idx + 4], re.I)
+        if not (parsed_name and post_match and jockey_match and pp_match and trainer_match):
+            continue
+        post = int(post_match.group(1))
+        if post != int(pp_match.group(1)):
+            continue
+        raw_name, is_scratched = parsed_name
+        anchors.append((idx, post, raw_name, is_scratched, jockey_match, trainer_match))
+
+    entries: list[dict[str, Any]] = []
+    duplicate_keys: list[str] = []
+    seen_keys: set[str] = set()
+    for position, (start_idx, post, raw_name, is_scratched, jockey_match, trainer_match) in enumerate(anchors):
+        end_idx = anchors[position + 1][0] if position + 1 < len(anchors) else len(lines)
+        pp_lines = lines[start_idx + 5:end_idx]
+        ml_source = jockey_match.group(2)
+        ml_text, ml_decimal = _normalize_ml(ml_source)
+        key = horse_key(raw_name)
+        if key in seen_keys:
+            duplicate_keys.append(key)
+        seen_keys.add(key)
+        entries.append({
+            "post": post,
+            "horse_raw": raw_name,
+            "horse_key": key,
+            "trainer": trainer_match.group(1).strip(),
+            "jockey": jockey_match.group(1).strip(),
+            "morning_line_source_text": ml_source,
+            "morning_line_text": ml_text,
+            "morning_line_decimal": ml_decimal,
+            "is_scratched": is_scratched,
+            "scratch_source": "1stbet_pdf_scr" if is_scratched else None,
+            "past_performances": _parse_past_performances(pp_lines),
+        })
+
+    diagnostics = {
+        "entry_anchor_count": len(anchors),
+        "duplicate_horse_keys": duplicate_keys,
+        "unmatched_entry_keys": [],
+    }
+    return sorted(entries, key=lambda entry: entry["post"]), diagnostics
+
+
+def _name_and_source_scratch(line: str) -> tuple[str, bool] | None:
+    """Return a source horse name after removing only allowed trailing tokens."""
+    candidate = line.strip()
+    if not re.fullmatch(r"[A-Z][A-Z0-9'.()\- /]*", candidate):
+        return None
+    scratch_match = re.fullmatch(r"(.+?)\s+SCR", candidate, re.I)
+    if scratch_match:
+        name = scratch_match.group(1).strip()
+        return (name, True) if name else None
+    # The source auxiliary is an integer. Do not strip fractional tokens such
+    # as ``7/2`` because they are not the documented auxiliary value.
+    aux_match = re.fullmatch(r"(.+?)\s+\d+", candidate)
+    name = aux_match.group(1).strip() if aux_match else candidate
+    return (name, False) if name else None
 
 
 def _parse_past_performances(lines: list[str]) -> list[dict[str, Any]]:
