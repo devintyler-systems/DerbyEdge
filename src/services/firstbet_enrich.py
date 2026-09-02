@@ -573,6 +573,9 @@ def enrich_entries_from_1stbet(
         ensure_firstbet_pp_table(conn)
 
         for r in enriched_runners:
+            if r.get("is_scratched"):
+                # Retain source scratches, but never give them PP-backed signal.
+                continue
             name = r.get("horse_name", "")
             pp   = r.get("post_position") or r.get("program_number")
             if not pp:

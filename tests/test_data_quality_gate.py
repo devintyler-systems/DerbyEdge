@@ -41,6 +41,20 @@ def test_incomplete_declared_field_blocks():
     assert any("Declared field size is 9" in reason for reason in reasons)
 
 
+def test_confirmed_scratches_fully_explain_active_field_reduction():
+    mode, reasons = resolve_run_mode(
+        _quality(
+            entries_parsed=10,
+            field_size_declared=13,
+            entries_with_pp_history=10,
+            starter_match_rate=1.0,
+            entries_scratched=3,
+        )
+    )
+    assert mode == RunMode.PP_PARSED_FEATURES_PENDING
+    assert not any("Declared field size" in reason for reason in reasons)
+
+
 def test_starter_match_and_pp_coverage_thresholds_block():
     mode, reasons = resolve_run_mode(
         _quality(entries_with_pp_history=7, starter_match_rate=7 / 9)

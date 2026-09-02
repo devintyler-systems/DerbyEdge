@@ -15,6 +15,7 @@ from src.services.race_card_builder import find_or_create_race
 
 ROOT = Path(__file__).resolve().parents[1]
 FIXTURE = Path(__file__).parent / "fixtures" / "Saratoga_R8_9-2-26.txt"
+STACKED_FIXTURE = Path(__file__).parent / "fixtures" / "Saratoga_R9_9-2-26.txt"
 
 
 def _connect(path: Path) -> sqlite3.Connection:
@@ -114,3 +115,55 @@ def test_score_race_feature_gate_precedes_every_model_call():
     gate = source.index("resolve_mode_with_feature_checks(")
     assert source.index("build_seed_baseline(") > gate
     assert source.index("train_or_build(") > gate
+
+
+def test_stacked_saratoga_r9_attaches_and_verifies_active_entries_only(
+    tmp_path, monkeypatch
+):
+    db_path = tmp_path / "saratoga-r9.sqlite"
+    conn = _connect(db_path)
+    conn.executescript((ROOT / "db" / "schema.sql").read_text(encoding="utf-8"))
+    payload, audit = parse_firstbet_text(
+        STACKED_FIXTURE.read_text(encoding="utf-8"),
+        filename="Saratoga_R9_9-2-26.pdf",
+        sha256="fixture",
+        uploaded_at_utc="2026-09-02T20:24:00Z",
+    )
+    legacy = to_legacy_race_result(payload, audit)
+    card_id, _, _, warnings = find_or_create_race(
+        conn,
+        legacy["track_code"], legacy["race_date"], legacy["race_number"], legacy["runners"],
+        distance_yards=1870, surface="turf", stakes_name="CLM", race_class="CLM",
+        purse=55000, conditions="yielding", field_size=13,
+    )
+    assert not warnings
+    enrichment = enrich_entries_from_1stbet(
+        conn, card_id, legacy["runners"], race_date=legacy["race_date"], race_distance_yards=1870,
+    )
+    assert enrichment["ok"] is True
+    assert enrichment["n_pp_rows"] == 20
+    assert conn.execute(
+        "SELECT COUNT(*) FROM entries WHERE card_id=? AND scratch_flag=0", (card_id,)
+    ).fetchone()[0] == 10
+    assert conn.execute(
+        "SELECT COUNT(*) FROM entries WHERE card_id=? AND scratch_flag=1", (card_id,)
+    ).fetchone()[0] == 3
+    conn.close()
+
+    monkeypatch.setattr("src.utils.db.get_connection", lambda: _connect(db_path))
+    feat_df = build_features(card_id=card_id)
+    check_conn = _connect(db_path)
+    try:
+        verification = verify_feature_frame(
+            feat_df,
+            model_config_for_card(check_conn, card_id),
+            expected_entries=10,
+            require_pp_backed_features=True,
+        )
+    finally:
+        check_conn.close()
+
+    assert len(feat_df) == 10
+    assert verification.entry_coverage_complete is True
+    assert verification.passed is True
+    assert verification.pp_backed_features_nonconstant is True
