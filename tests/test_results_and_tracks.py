@@ -54,6 +54,17 @@ class TestTrackNormalization:
         res = resolve_track(track_name="Prairie Meadows Racetrack")
         assert res["track_code"] == "PRM"
 
+    def test_saratoga_primary_code(self):
+        res = resolve_track(track_code="SAR")
+        assert res["track_code"] == "SAR"
+        assert res["track_name_canonical"] == "Saratoga"
+        assert res["resolution_source"] == "parsed_code"
+
+    def test_saratoga_race_course_alias_resolves(self):
+        res = resolve_track(track_name="Saratoga Race Course")
+        assert res["track_code"] == "SAR"
+        assert res["resolution_source"] == "alias_exact"
+
     def test_normalize_case_insensitive(self):
         assert normalize_track_name("PRAIRIE MEADOWS") == "prairie meadows"
 
@@ -735,6 +746,10 @@ class TestExtractTrackNoise:
     def test_extra_spaces_between_words(self):
         code, _ = _extract_track("Louisiana   Downs - May 12, 2026 - Race 5\n")
         assert code == "LAD"
+
+    def test_saratoga_race_course_header(self):
+        code, _ = _extract_track("SARATOGA RACE COURSE - August 29, 2026 - Race 5\n")
+        assert code == "SAR"
 
     def test_unrelated_track_not_matched(self):
         code, _ = _extract_track("Some Unknown Venue - May 12, 2026 - Race 5\n")

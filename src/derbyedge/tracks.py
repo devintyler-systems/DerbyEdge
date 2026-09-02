@@ -63,7 +63,11 @@ _TRACKS: tuple[_TrackRecord, ...] = (
     _TrackRecord("GP",  "Gulfstream Park",       ("Gulfstream Park", "Gulfstream")),
     _TrackRecord("AQU", "Aqueduct",              ("Aqueduct",)),
     _TrackRecord("DMR", "Del Mar",               ("Del Mar",)),
-    _TrackRecord("SAR", "Saratoga",              ("Saratoga",)),
+    _TrackRecord("SAR", "Saratoga", (
+        "Saratoga",
+        "Saratoga Race Course",
+        "Saratoga Racetrack",
+    )),
     _TrackRecord("OP",  "Oaklawn Park",          ("Oaklawn Park", "Oaklawn")),
     _TrackRecord("FG",  "Fair Grounds",          ("Fair Grounds",)),
     _TrackRecord("TP",  "Turfway Park",          ("Turfway Park", "Turfway")),

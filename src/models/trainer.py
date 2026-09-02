@@ -113,7 +113,7 @@ FEATURE_GROUPS: dict[str, dict] = {
             "features": {"speed_best_3": 0.40, "speed_last": 0.35, "beyer_last": 0.25},
         },
         "form_class": {
-            "group_weight": 0.18,
+            "group_weight": 0.20,
             "features": {
                 "form_cycle_idx":         0.35,
                 "class_delta":            0.30,
@@ -122,11 +122,11 @@ FEATURE_GROUPS: dict[str, dict] = {
             },
         },
         "distance_surface": {
-            "group_weight": 0.17,
+            "group_weight": 0.20,
             "features": {"distance_fit": 0.55, "surface_fit": 0.45},
         },
         "race_shape": {
-            "group_weight": 0.15,
+            "group_weight": 0.17,
             "features": {
                 "pace_fit_score":          0.65,
                 "traffic_resilience_proxy": 0.35,
@@ -139,10 +139,6 @@ FEATURE_GROUPS: dict[str, dict] = {
                 "trainer_intent_proxy":  0.30,
                 "finish_energy_proxy":   0.20,
             },
-        },
-        "derby_override": {
-            "group_weight": 0.07,
-            "features": {"derby_override_score": 1.00},
         },
         "market_prior": {
             "group_weight": 0.05,
@@ -335,6 +331,15 @@ TRAIN_CONFIGS: dict[str, dict] = {
         "underlay_edge_threshold": -0.015,  # model < market by 1.5pp -> UNDERLAY
     }
     for key in FEATURE_GROUPS
+}
+
+# The normal dirt-route model deliberately excludes Derby-only projections.
+# Its explicit family name prevents a non-Derby card from being presented as
+# a Kentucky Derby model in run metadata or downstream UI.
+TRAIN_CONFIGS["dirt_route"] = {
+    **TRAIN_CONFIGS["dirt_route"],
+    "model_family": "dirt_route_stakes_v1",
+    "model_name": "dirt_route_stakes_v1",
 }
 
 # Derby override config — shares all TRAIN_CONFIGS["dirt_route"] settings but

@@ -213,11 +213,11 @@ def load_live_odds_by_pp(conn: sqlite3.Connection, card_id: int) -> dict[int, di
     # Fetch that batch — try progressively simpler WHERE clauses
     rows = []
     for _q in [
-        ("SELECT post_position, decimal_odds, book_id, captured_at FROM live_odds "
+        ("SELECT entry_id, post_position, decimal_odds, book_id, captured_at FROM live_odds "
          "WHERE card_id=? AND is_scratched=0 AND is_morning_line=0 AND captured_at=?"),
-        ("SELECT post_position, decimal_odds, book_id, captured_at FROM live_odds "
+        ("SELECT entry_id, post_position, decimal_odds, book_id, captured_at FROM live_odds "
          "WHERE card_id=? AND is_scratched=0 AND captured_at=?"),
-        ("SELECT post_position, decimal_odds, book_id, captured_at FROM live_odds "
+        ("SELECT entry_id, post_position, decimal_odds, book_id, captured_at FROM live_odds "
          "WHERE card_id=? AND captured_at=?"),
     ]:
         try:
@@ -228,9 +228,18 @@ def load_live_odds_by_pp(conn: sqlite3.Connection, card_id: int) -> dict[int, di
 
     result: dict[int, dict] = {}
     for r in rows:
-        pp = r[0]
-        if pp not in result:
-            result[pp] = {"decimal_odds": r[1], "book_id": r[2], "captured_at": r[3]}
+        pp = r[1]
+        # A batch with competing quotes for one post is not a single selected
+        # market snapshot.  Return unavailable rather than picking arbitrary
+        # row order and mixing books in the Race Board overlay.
+        if pp in result:
+            return {}
+        result[pp] = {
+            "entry_id": r[0],
+            "decimal_odds": r[2],
+            "book_id": r[3],
+            "captured_at": r[4],
+        }
     return result
 
 

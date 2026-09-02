@@ -351,7 +351,11 @@ def _entry_features(row: pd.Series, field_df: pd.DataFrame) -> dict:
 # ---------------------------------------------------------------------------
 # Second pass: race-level features require full-field context
 # ---------------------------------------------------------------------------
-def _fill_race_level_features(df: pd.DataFrame) -> pd.DataFrame:
+def _fill_race_level_features(
+    df: pd.DataFrame,
+    *,
+    derby_active: bool,
+) -> pd.DataFrame:
     """Mutates df in place; returns it."""
 
     # morning_line_rank (1 = shortest price)
@@ -450,29 +454,40 @@ def _fill_race_level_features(df: pd.DataFrame) -> pd.DataFrame:
     else:
         df["public_underlay_penalty"] = 0.5   # neutral numeric default
 
-    # derby_override_score: weighted composite of available proxies
-    def _derby_override(row) -> Optional[float]:
-        parts: list[tuple[float, float]] = []
-        if row["classic_distance_projection"] is not None:
-            parts.append((float(row["classic_distance_projection"]), 0.35))
-        if row["pedigree_route_proxy"] is not None:
-            parts.append((float(row["pedigree_route_proxy"]),        0.20))
-        if row["pace_fit_score"] is not None:
-            parts.append((float(row["pace_fit_score"]),              0.20))
-        if row["work_readiness_score"] is not None:
-            parts.append((float(row["work_readiness_score"]),        0.15))
-        if row["gate_reliability"] is not None:
-            parts.append((float(row["gate_reliability"]),            0.10))
-        if not parts:
-            return None
-        total_w = sum(w for _, w in parts)
-        score   = sum(v * w for v, w in parts) / total_w
-        return round(score, 4)
+    # Derby-only projections must never cross into an ordinary race model.
+    # Keep the schema stable, but persist these fields as NULL outside the
+    # narrowly defined Kentucky Derby context.
+    if not derby_active:
+        for col in (
+            "classic_distance_projection",
+            "churchill_readiness",
+            "jan_apr_improvement_curve",
+            "derby_override_score",
+        ):
+            df[col] = None
+    else:
+        # derby_override_score: weighted composite of available proxies
+        def _derby_override(row) -> Optional[float]:
+            parts: list[tuple[float, float]] = []
+            if row["classic_distance_projection"] is not None:
+                parts.append((float(row["classic_distance_projection"]), 0.35))
+            if row["pedigree_route_proxy"] is not None:
+                parts.append((float(row["pedigree_route_proxy"]),        0.20))
+            if row["pace_fit_score"] is not None:
+                parts.append((float(row["pace_fit_score"]),              0.20))
+            if row["work_readiness_score"] is not None:
+                parts.append((float(row["work_readiness_score"]),        0.15))
+            if row["gate_reliability"] is not None:
+                parts.append((float(row["gate_reliability"]),            0.10))
+            if not parts:
+                return None
+            total_w = sum(w for _, w in parts)
+            score   = sum(v * w for v, w in parts) / total_w
+            return round(score, 4)
 
-    df["derby_override_score"] = (
-        pd.to_numeric(df.apply(_derby_override, axis=1), errors="coerce")
-        .fillna(0.0)
-    )
+        df["derby_override_score"] = pd.to_numeric(
+            df.apply(_derby_override, axis=1), errors="coerce"
+        )
 
     # T1: class_delta_v2 — z-score of log-earnings within field
     if "class_level" in df.columns:
@@ -484,6 +499,27 @@ def _fill_race_level_features(df: pd.DataFrame) -> pd.DataFrame:
     df["morning_line_delta"] = (df["market_implied_prob"] - 1.0 / len(df)).round(6)
 
     return df
+
+
+def _is_derby_context(conn, card_id: int) -> bool:
+    """True only for the Kentucky Derby profile that permits Derby features."""
+    row = conn.execute(
+        """
+        SELECT rc.surface, rc.distance_furlongs, rc.field_size, rc.stakes_name,
+               t.abbrev AS track_abbrev
+        FROM race_cards rc
+        JOIN tracks t ON t.track_id = rc.track_id
+        WHERE rc.card_id = ?
+        """,
+        (card_id,),
+    ).fetchone()
+    return bool(row) and (
+        str(row["surface"] or "").lower() == "dirt"
+        and float(row["distance_furlongs"] or 0) >= 9.5
+        and int(row["field_size"] or 0) >= 18
+        and "derby" in str(row["stakes_name"] or "").lower()
+        and str(row["track_abbrev"] or "").upper() == "CD"
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -687,6 +723,8 @@ def build_features(card_id: Optional[int] = None) -> pd.DataFrame:
         conn.close()
         raise RuntimeError(f"No entries for card_id={card_id} — run ingest first.")
 
+    derby_active = _is_derby_context(conn, card_id)
+
     build_ts = datetime.datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ")
 
     rows = []
@@ -707,7 +745,7 @@ def build_features(card_id: Optional[int] = None) -> pd.DataFrame:
     except Exception as exc:
         print(f"[builder] firstbet overlay skipped: {exc}")
 
-    feat_df = _fill_race_level_features(feat_df)
+    feat_df = _fill_race_level_features(feat_df, derby_active=derby_active)
 
     # Drop helper columns that are not in feature_store schema
     _drop = [c for c in feat_df.columns if c.startswith("_")]

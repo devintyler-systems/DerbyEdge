@@ -86,6 +86,13 @@ from src.services.race_display import (
     format_status_badge,
     get_race_workflow_status,
 )
+from src.app.board_state import (
+    LIVE_ODDS_UNAVAILABLE,
+    apply_live_odds_overlay,
+    latest_run_id_for_card,
+    load_run_index_for_card,
+    select_active_run_id,
+)
 
 # ── Page config ────────────────────────────────────────────────────────────────
 st.set_page_config(
@@ -153,7 +160,9 @@ CONF_ICON = {"HIGH": "🟢 HIGH", "MEDIUM": "🔵 MED",  "LOW": "🟡 LOW",
 
 # ── Data loaders ──────────────────────────────────────────────────────────────
 @st.cache_data(ttl=30)
-def load_board(run_id: str | None = None) -> tuple[pd.DataFrame | None, dict | None]:
+def load_board(
+    run_id: str | None = None, card_id: int | None = None
+) -> tuple[pd.DataFrame | None, dict | None]:
     try:
         conn = get_connection()
         # Ensure schema is current before any query — handles old local DBs gracefully.
@@ -161,9 +170,17 @@ def load_board(run_id: str | None = None) -> tuple[pd.DataFrame | None, dict | N
         ensure_score_runs_columns(conn)
 
         if run_id is None:
-            run = conn.execute(
-                "SELECT run_id FROM score_runs ORDER BY run_timestamp DESC LIMIT 1"
-            ).fetchone()
+            if card_id is None:
+                run = conn.execute(
+                    "SELECT run_id FROM score_runs "
+                    "ORDER BY run_timestamp DESC, run_id DESC LIMIT 1"
+                ).fetchone()
+            else:
+                run = conn.execute(
+                    "SELECT run_id FROM score_runs WHERE card_id=? "
+                    "ORDER BY run_timestamp DESC, run_id DESC LIMIT 1",
+                    (card_id,),
+                ).fetchone()
             if not run:
                 conn.close()
                 return None, None
@@ -210,11 +227,13 @@ def load_board(run_id: str | None = None) -> tuple[pd.DataFrame | None, dict | N
                    vel.dist_starts, vel.dist_wins,
                    vel.workouts_30, vel.gate_class, vel.stamina_index
             FROM entry_scores es
+            JOIN score_runs sr ON sr.run_id = es.run_id
             JOIN v_entries_live vel ON es.entry_id = vel.entry_id
             WHERE es.run_id = ?
+              AND (? IS NULL OR sr.card_id = ?)
             ORDER BY es.rank
             """,
-            conn, params=(run_id,),
+            conn, params=(run_id, card_id, card_id),
         )
 
         meta_row = conn.execute(
@@ -222,13 +241,15 @@ def load_board(run_id: str | None = None) -> tuple[pd.DataFrame | None, dict | N
             SELECT mr.model_id, mr.model_name, mr.model_family, mr.version,
                    mr.training_rows,
                    sr.run_id, sr.run_timestamp, sr.model_type,
+                   sr.card_id, mr.artifact_path,
                    sr.derby_override_active,
                    COALESCE(sr.quality_tier, 'seed_only') AS quality_tier
             FROM score_runs sr
-            JOIN model_registry mr ON sr.model_id = mr.model_id
+            LEFT JOIN model_registry mr ON sr.model_id = mr.model_id
             WHERE sr.run_id = ?
+              AND (? IS NULL OR sr.card_id = ?)
             """,
-            (run_id,),
+            (run_id, card_id, card_id),
         ).fetchone()
         conn.close()
         meta = dict(meta_row) if meta_row else {}
@@ -361,17 +382,9 @@ def load_run_index(card_id: int) -> list[dict]:
     """Score runs for a specific race card, newest-first."""
     try:
         conn = get_connection()
-        rows = conn.execute(
-            """SELECT sr.run_id, sr.run_timestamp, sr.model_type,
-                      mr.model_name, mr.version
-               FROM score_runs sr
-               JOIN model_registry mr ON sr.model_id = mr.model_id
-               WHERE sr.card_id = ?
-               ORDER BY sr.run_timestamp DESC""",
-            (card_id,),
-        ).fetchall()
+        rows = load_run_index_for_card(conn, card_id)
         conn.close()
-        return [dict(r) for r in rows]
+        return rows
     except Exception:
         return []
 
@@ -776,23 +789,43 @@ def _add_kelly(
     return out
 
 
-def _overlay_live_odds(df: pd.DataFrame, live_by_pp: dict) -> pd.DataFrame:
-    """Attach live_decimal_odds and live_market_prob columns from the live_odds dict."""
-    out = df.copy()
-    dec_list, prob_list = [], []
-    for _, row in out.iterrows():
-        pp = row.get("post_position")
-        lo = live_by_pp.get(int(pp)) if pp is not None else None
-        if lo and lo.get("decimal_odds") and float(lo["decimal_odds"]) > 1.0:
-            dec = float(lo["decimal_odds"])
-            dec_list.append(dec)
-            prob_list.append(round(1.0 / dec, 6))
-        else:
-            dec_list.append(None)
-            prob_list.append(None)
-    out["live_decimal_odds"] = dec_list
-    out["live_market_prob"]  = prob_list
-    return out
+def _run_bet_thresholds(meta: dict | None) -> tuple[float, float]:
+    """Read thresholds from the selected run's registered model artifact.
+
+    Old runs without an available artifact retain the scorer's historical
+    defaults, which preserves legacy board behavior while making current runs
+    artifact-driven.
+    """
+    default = (0.025, -0.015)
+    artifact_path = (meta or {}).get("artifact_path")
+    if not artifact_path:
+        return default
+    try:
+        with open(artifact_path, "rb") as fh:
+            artifact = pickle.load(fh)
+        config = (
+            artifact.get("config", {})
+            if isinstance(artifact, dict)
+            else getattr(artifact, "config", {})
+        )
+        return (
+            float(config.get("bet_edge_threshold", default[0])),
+            float(config.get("underlay_edge_threshold", default[1])),
+        )
+    except (OSError, TypeError, ValueError, pickle.UnpicklingError):
+        return default
+
+
+def _pin_newest_run(card_id: int) -> str | None:
+    """Persist the newest score run for exactly this card after scoring."""
+    conn = get_connection()
+    try:
+        run_id = latest_run_id_for_card(conn, card_id)
+    finally:
+        conn.close()
+    if run_id:
+        st.session_state["selected_run_id"] = run_id
+    return run_id
 
 
 # ── One-time startup DDL ──────────────────────────────────────────────────────
@@ -814,6 +847,8 @@ if "startup_ddl_done" not in st.session_state:
 # It is set by: (a) sidebar selectbox, (b) "Set as Active Race" button in Tab 5.
 if "active_card_id" not in st.session_state:
     st.session_state["active_card_id"] = None
+if "selected_run_id" not in st.session_state:
+    st.session_state["selected_run_id"] = None
 
 # Local aliases populated by the sidebar block below.
 race_info:       dict       = {}
@@ -968,23 +1003,29 @@ with st.sidebar:
 
         # ── Active Run selector ────────────────────────────────────────────
         _runs = load_run_index(active_card_id)
+        selected_run_id = select_active_run_id(
+            _runs, st.session_state.get("selected_run_id")
+        )
+        st.session_state["selected_run_id"] = selected_run_id
         if len(_runs) > 1:
             st.markdown("**Active Run**")
             _run_labels = [
                 f"{r['run_timestamp'][:19]} · {r['run_id'][:8]}" for r in _runs
             ]
-            _sel_idx = st.selectbox(
-                "Score run", range(len(_runs)),
-                format_func=lambda i: _run_labels[i],
+            _run_ids = [r["run_id"] for r in _runs]
+            selected_run_id = st.selectbox(
+                "Score run", _run_ids,
+                index=_run_ids.index(selected_run_id),
+                format_func=lambda run_id: _run_labels[_run_ids.index(run_id)],
                 label_visibility="collapsed",
             )
-            selected_run_id = _runs[_sel_idx]["run_id"]
+            # A manual change is an intentional pin for this card until the
+            # user changes it or a successful rebuild creates a newer run.
+            st.session_state["selected_run_id"] = selected_run_id
             st.divider()
-        elif _runs:
-            selected_run_id = _runs[0]["run_id"]
 
         # ── Model run badge ────────────────────────────────────────────────
-        _, _meta_sb = load_board(selected_run_id)
+        _, _meta_sb = load_board(selected_run_id, active_card_id)
         if _meta_sb:
             st.markdown("**Model Run**")
             _mt  = _meta_sb.get("model_type", "N/A")
@@ -1024,9 +1065,13 @@ with st.sidebar:
                         _rbok = _rbok2
                 st.session_state["_last_pipeline_out"] = _rbout
                 if _rbok:
-                    st.success("Rebuild complete.")
-                    st.cache_data.clear()
-                    st.rerun()
+                    _new_run_id = _pin_newest_run(int(_sb_card))
+                    if _new_run_id:
+                        st.success("Rebuild complete.")
+                        st.cache_data.clear()
+                        st.rerun()
+                    else:
+                        st.error("Rebuild completed but did not create a score run for this card.")
                 else:
                     st.error("Rebuild failed — see pipeline output in Race Board tab.")
             st.divider()
@@ -1087,7 +1132,9 @@ with st.sidebar:
 active_card_id = st.session_state["active_card_id"]
 
 # ── Load all data ──────────────────────────────────────────────────────────────
-board_df, meta = load_board(selected_run_id) if selected_run_id else (None, None)
+board_df, meta = (
+    load_board(selected_run_id, active_card_id) if selected_run_id else (None, None)
+)
 feat_df  = load_features(active_card_id) if active_card_id else pd.DataFrame()
 catalog  = load_catalog()
 artifact = load_artifact()
@@ -1100,9 +1147,21 @@ _live_odds_by_pp, _live_odds_err = (
 if _live_odds_err:
     st.warning(f"Live odds error: {_live_odds_err}")
 
-# Overlay live decimal odds + implied prob onto board_df so all tabs can use them
-if board_df is not None and _live_odds_by_pp:
-    board_df = _overlay_live_odds(board_df, _live_odds_by_pp)
+# Live odds are optional.  A partial or mismatched snapshot must never replace
+# score-run morning-line values, so the overlay helper returns an explicit state.
+_live_overlay = None
+_usable_live_odds_by_pp: dict = {}
+if board_df is not None:
+    _bet_threshold, _underlay_threshold = _run_bet_thresholds(meta)
+    _live_overlay = apply_live_odds_overlay(
+        board_df,
+        _live_odds_by_pp,
+        bet_edge_threshold=_bet_threshold,
+        underlay_edge_threshold=_underlay_threshold,
+    )
+    board_df = _live_overlay.board
+    if _live_overlay.available:
+        _usable_live_odds_by_pp = _live_odds_by_pp
 
 # ── Header ─────────────────────────────────────────────────────────────────────
 if race_info:
@@ -1206,9 +1265,12 @@ with tab1:
                         )
                     st.session_state["_last_pipeline_out"] = _out2
                     if _ok2:
-                        st.success("Race scored.")
-                        st.cache_data.clear()
-                        st.rerun()
+                        if _pin_newest_run(int(active_card_id)):
+                            st.success("Race scored.")
+                            st.cache_data.clear()
+                            st.rerun()
+                        else:
+                            st.error("Scoring completed but did not create a score run for this card.")
                     else:
                         st.error("Score failed — run Build features first.")
 
@@ -1230,9 +1292,12 @@ with tab1:
                             _ok3, _out3 = False, _out3a
                     st.session_state["_last_pipeline_out"] = _out3
                     if _ok3:
-                        st.success("Build + Score completed.")
-                        st.cache_data.clear()
-                        st.rerun()
+                        if _pin_newest_run(int(active_card_id)):
+                            st.success("Build + Score completed.")
+                            st.cache_data.clear()
+                            st.rerun()
+                        else:
+                            st.error("Scoring completed but did not create a score run for this card.")
                     else:
                         st.error("Pipeline failed — see output below.")
 
@@ -1306,8 +1371,8 @@ with tab1:
         # ── Board thresholds reminder ──────────────────────────────────────────
         st.markdown(
             '<div class="info-banner">Bet thresholds: '
-            '<strong>BET</strong> = edge ≥ +0.025 · '
-            '<strong>UL</strong> = edge &lt; −0.015 · '
+            f'<strong>BET</strong> = edge ≥ {_bet_threshold:+.3f} · '
+            f'<strong>UL</strong> = edge &lt; {_underlay_threshold:.3f} · '
             '<strong>NEUTRAL</strong> otherwise</div>',
             unsafe_allow_html=True,
         )
@@ -1340,18 +1405,24 @@ with tab1:
                     unsafe_allow_html=True,
                 )
 
-        disp = _add_kelly(disp, float(bankroll), float(kelly_pct), _live_odds_by_pp)
-        has_live_odds = bool(_live_odds_by_pp)
+        disp = _add_kelly(
+            disp, float(bankroll), float(kelly_pct), _usable_live_odds_by_pp
+        )
+        has_live_odds = bool(_live_overlay and _live_overlay.available)
         has_kelly = bankroll > 0
 
         if has_live_odds:
-            _snap_ts_board = max(lo["captured_at"] for lo in _live_odds_by_pp.values())
+            _snap_ts_board = _live_overlay.snapshot_timestamp or "unknown"
+            _snap_source_board = _live_overlay.snapshot_source or "unknown source"
             st.markdown(
                 f'<div class="info-banner">📊 Live odds snapshot active — '
                 f'<strong>{_snap_ts_board[:19]}</strong> UTC · '
-                f'{len(_live_odds_by_pp)} entries · board, Kelly &amp; market chart use this snapshot only</div>',
+                f'{_snap_source_board} · {len(_usable_live_odds_by_pp)} entries · '
+                'board, Kelly &amp; market chart use this snapshot only</div>',
                 unsafe_allow_html=True,
             )
+        else:
+            st.caption(LIVE_ODDS_UNAVAILABLE)
 
         # ── Build display frame ────────────────────────────────────────────────
         base_cols = [
@@ -1480,10 +1551,8 @@ with tab1:
         chart_df = disp.sort_values("win_probability", ascending=True).copy()
         chart_df["win_pct"] = chart_df["win_probability"] * 100
 
-        if "live_market_prob" in chart_df.columns and chart_df["live_market_prob"].notna().any():
-            chart_df["market_pct"] = chart_df["live_market_prob"].fillna(
-                chart_df["market_implied_prob"]
-            ) * 100
+        if has_live_odds:
+            chart_df["market_pct"] = chart_df["live_market_prob"] * 100
             mkt_series_label = "Live Market %"
         else:
             chart_df["market_pct"] = chart_df["market_implied_prob"] * 100
@@ -1632,9 +1701,9 @@ with tab2:
         )
 
         m1, m2, m3, m4, m5 = st.columns(5)
-        _live_mkt = horse.get("live_market_prob")
-        _mkt_prob = float(_live_mkt) if _live_mkt else float(horse["market_implied_prob"])
-        _mkt_label = "Live Mkt %" if _live_mkt else "Market %"
+        _live_mkt = horse.get("live_market_prob") if has_live_odds else None
+        _mkt_prob = float(_live_mkt) if pd.notna(_live_mkt) else float(horse["market_implied_prob"])
+        _mkt_label = "Live Mkt %" if pd.notna(_live_mkt) else "Market % (ML)"
         m1.metric("Win %",      f"{horse['win_probability']*100:.1f}%")
         m2.metric("Fair Odds",  f"{horse['fair_odds']:.1f}-1")
         m3.metric("Model Edge", _edge_str(horse["value_score"]))
@@ -3716,7 +3785,7 @@ with tab7:
                 )
 
                 if _eval["kelly_staked"] > 0:
-                    _odds_src7 = "live snapshot" if _live_odds_by_pp else "ML proxy"
+                    _odds_src7 = "live snapshot" if (_live_overlay and _live_overlay.available) else "ML proxy"
                     st.caption(
                         f"Kelly staked ${_eval['kelly_staked']:,.0f} "
                         f"(normalized $1k bankroll, 5% cap) · odds source: {_odds_src7}"

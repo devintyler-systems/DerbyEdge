@@ -8,9 +8,9 @@ Usage
 
 Outputs
 -------
-    output/derby_2026_features.csv     — sample feature table (all 20 entries)
-    output/feature_catalog.csv         — machine-readable feature definitions
-    output/feature_store_report.md     — QA report: populated vs null by feature
+    output/runs/{track}_{date}_r{race}/features.csv — feature table for one card
+    output/feature_catalog.csv                     — machine-readable feature definitions
+    output/runs/{track}_{date}_r{race}/feature_store_report.md — QA report
 """
 
 import argparse
@@ -24,6 +24,7 @@ sys.path.insert(0, str(ROOT))
 import pandas as pd
 
 from src.features.builder import build_features
+from src.utils.run_assets import run_dir_for_card
 
 OUTPUT_DIR = ROOT / "output"
 
@@ -259,8 +260,8 @@ def write_catalog(path: Path) -> None:
     print(f"  [catalog]  {len(CATALOG)} features -> {path}")
 
 
-def write_feature_report(feat_df: pd.DataFrame, path: Path) -> None:
-    """Write output/feature_store_report.md."""
+def write_feature_report(feat_df: pd.DataFrame, path: Path, race_label: str) -> None:
+    """Write the feature-store report for one card-scoped run."""
     path.parent.mkdir(parents=True, exist_ok=True)
 
     feature_cols = [
@@ -290,7 +291,7 @@ def write_feature_report(feat_df: pd.DataFrame, path: Path) -> None:
         "# DerbyEdge Feature Store Report",
         "",
         f"**Generated**: {feat_df['build_ts'].iloc[0]}  ",
-        f"**Race**     : 2026 Kentucky Derby (G1) — Churchill Downs  ",
+        f"**Race**     : {race_label}  ",
         f"**Entries**  : {n_rows}",
         "",
         "## Feature Count",
@@ -411,15 +412,17 @@ def main() -> int:
     catalog_path = OUTPUT_DIR / "feature_catalog.csv"
     write_catalog(catalog_path)
 
-    # 3. Write sample features CSV
-    sample_path = OUTPUT_DIR / "derby_2026_features.csv"
-    OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+    # 3. Write card-scoped feature artifacts so one race never overwrites another.
+    built_card_id = int(feat_df["card_id"].iloc[0])
+    run_dir = run_dir_for_card(built_card_id)
+    run_dir.mkdir(parents=True, exist_ok=True)
+    sample_path = run_dir / "features.csv"
     feat_df.to_csv(sample_path, index=False)
     print(f"  [output]   {len(feat_df)} rows -> {sample_path}")
 
     # 4. Write QA report
-    report_path = OUTPUT_DIR / "feature_store_report.md"
-    write_feature_report(feat_df, report_path)
+    report_path = run_dir / "feature_store_report.md"
+    write_feature_report(feat_df, report_path, race_label=run_dir.name)
 
     # 5. Print top null-rate summary
     null_pct = feat_df[feature_cols].isna().mean().sort_values(ascending=False)

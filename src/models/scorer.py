@@ -20,6 +20,7 @@ Missing-data flags are per-horse text labels (CRITICAL_MISSING + dist_fit_single
 """
 
 import datetime
+import json
 import os
 import sqlite3
 import uuid
@@ -27,6 +28,7 @@ from pathlib import Path
 from typing import Optional
 
 from src.utils.horse_norm import normalize_horse_name as _norm_horse
+from src.utils.run_assets import card_run_key, run_dir_for_card
 
 import numpy as np
 import pandas as pd
@@ -595,8 +597,10 @@ def _write_board(
     artifact:    ModelArtifact,
     metrics:     dict,
     score_ts:    str,
+    race_meta:   dict,
+    run_dir:     Path,
 ) -> None:
-    OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+    run_dir.mkdir(parents=True, exist_ok=True)
 
     # ── CSV ────────────────────────────────────────────────────────────────
     csv_cols = [
@@ -608,7 +612,7 @@ def _write_board(
         "value_score", "bet_tag", "low_conf_bet_block",
         "model_confidence", "missing_data_flags",
     ]
-    board[csv_cols].to_csv(OUTPUT_DIR / "derby_2026_board.csv", index=False)
+    board[csv_cols].to_csv(run_dir / "board.csv", index=False)
 
     # ── Markdown ───────────────────────────────────────────────────────────
     bet_horses = board[board["bet_tag"] == "bet"]["horse_name"].tolist()
@@ -627,7 +631,7 @@ def _write_board(
                      if "low_conf_bet_block" in board.columns else []
 
     lines = [
-        "# DerbyEdge Engine — 2026 Kentucky Derby Board",
+        f"# DerbyEdge Engine — {race_meta['track']} {race_meta['race_date']} Race {race_meta['race_no']} Board",
         "",
         "## Board Summary",
         "",
@@ -637,7 +641,7 @@ def _write_board(
         f"| Version | `{artifact.version}` |",
         f"| Score timestamp | {score_ts} |",
         f"| Model ID | {model_id} |",
-        f"| Race | 2026 Kentucky Derby (G1) · Churchill Downs · 2026-05-02 |",
+        f"| Race | {race_meta['track']} · {race_meta['race_date']} · Race {race_meta['race_no']} |",
         f"| Total horses | {len(board)} |",
         f"| Bet-tagged | {metrics['bet_count']} ({bet_str}) |",
         f"| Underlay-tagged | {metrics['underlay_count']} ({ul_str}) |",
@@ -759,8 +763,9 @@ def _write_board(
         "> To elevate after manual review, override the bet_tag in the database directly.",
     ]
 
-    (OUTPUT_DIR / "derby_2026_board.md").write_text("\n".join(lines), encoding="utf-8")
-    print(f"  [board]    board written -> {OUTPUT_DIR / 'derby_2026_board.md'}")
+    board_path = run_dir / "board.md"
+    board_path.write_text("\n".join(lines), encoding="utf-8")
+    print(f"  [board]    board written -> {board_path}")
 
 
 def _write_eval_report(
@@ -768,10 +773,11 @@ def _write_eval_report(
     artifact:  ModelArtifact,
     board:     pd.DataFrame,
     model_id:  int,
+    run_dir:   Path,
 ) -> None:
-    OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+    run_dir.mkdir(parents=True, exist_ok=True)
     race_type = metrics["race_type_key"]
-    path      = OUTPUT_DIR / f"model_evaluation_{race_type}.md"
+    path      = run_dir / "model_evaluation.md"
 
     quality = (
         "SEED-ONLY BASELINE — principled weighted composite from 46-feature "
@@ -977,6 +983,10 @@ def score_race(card_id: Optional[int] = None) -> pd.DataFrame:
         fallback_surface=surface,
         fallback_dist=dist_furlongs,
     )
+    run_dir = run_dir_for_card(card_id, conn=conn)
+    run_key = card_run_key(
+        _race_meta["track"], _race_meta["race_date"], _race_meta["race_no"]
+    )
 
     # ── Derby override detection ───────────────────────────────────────────
     derby_active = is_derby_context(conn, card_id)
@@ -1141,12 +1151,8 @@ def score_race(card_id: Optional[int] = None) -> pd.DataFrame:
          int(policy_chaos_default), policy_chaos_reason),
     )
 
-    # Purge stale runs for this card (keep only latest)
-    conn.execute(
-        "DELETE FROM entry_scores WHERE run_id IN "
-        "(SELECT run_id FROM score_runs WHERE card_id=? AND run_id != ?)",
-        (card_id, run_id),
-    )
+    # Keep prior run rows: the app's card-scoped selector supports audit and
+    # comparison, and no score run should erase a previous score artifact.
 
     for i, (_, erow) in enumerate(entries_df.iterrows()):
         eid = int(erow["entry_id"])
@@ -1253,8 +1259,34 @@ def score_race(card_id: Optional[int] = None) -> pd.DataFrame:
     board = board.sort_values("rank").reset_index(drop=True)
 
     # ── Write outputs ──────────────────────────────────────────────────────
-    _write_board(board, run_id, model_id, artifact, metrics, score_ts)
-    _write_eval_report(metrics, artifact, board, model_id)
+    _write_board(
+        board, run_id, model_id, artifact, metrics, score_ts,
+        race_meta=_race_meta, run_dir=run_dir,
+    )
+    _write_eval_report(metrics, artifact, board, model_id, run_dir=run_dir)
+    metadata_path = run_dir / "metadata.json"
+    metadata_path.write_text(
+        json.dumps(
+            {
+                "run_id": run_id,
+                "run_key": run_key,
+                "card_id": card_id,
+                "track_abbrev": _race_meta["track"],
+                "card_date": _race_meta["race_date"],
+                "race_number": int(_race_meta["race_no"]),
+                "surface": surface,
+                "distance_furlongs": dist_furlongs,
+                "model_name": artifact.model_name,
+                "model_family": artifact.config["model_family"],
+                "derby_override_active": derby_active,
+                "scored_at": score_ts,
+            },
+            indent=2,
+            sort_keys=True,
+        ) + "\n",
+        encoding="utf-8",
+    )
+    print(f"  [output]   run assets -> {run_dir}")
 
     low_conf_n = int((board["model_confidence"] == "low").sum())
     blocked_n = metrics.get("blocked_bet_count", 0)
