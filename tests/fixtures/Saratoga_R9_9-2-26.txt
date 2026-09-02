@@ -1,0 +1,188 @@
+9/2/26, 1:24 PM 1/ST BET - The Easy & Smart Way to Bet the Races
+SARATOGA TB
+R 9
+2:46 PM
+13 Horses
+CLM
+$55,000
+1 1/16M
+Innerturf
+Yielding
+1
+PP1
+TURF HORSE ONE
+J: Rider One
+T: Trainer One
+1
+ML 4
+W 12% P 28% S 40%
+Saratoga 10 Aug 2026
+2nd (4/1) 8 Horses Claiming $55,000 Race 3
+8.5F Turf/Firm
+rallied from midpack, gained late
+Belmont 15 Jul 2026
+4th (6/1) 9 Horses Claiming $50,000 Race 4
+8F Turf/Good
+pressed pace, weakened
+2
+PP2
+TURF HORSE TWO
+J: Rider Two
+T: Trainer Two
+2
+ML 5
+W 15% P 31% S 46%
+Saratoga 12 Aug 2026
+1st (5/1) 7 Horses Claiming $55,000 Race 2
+8.5F Turf/Yielding
+set pace, drew clear
+Belmont 18 Jul 2026
+3rd (7/2) 10 Horses Claiming $50,000 Race 5
+9F Turf/Firm
+ran on late
+3
+PP3
+TURF HORSE THREE
+J: Rider Three
+T: Trainer Three
+3
+ML 6
+W 8% P 20% S 34%
+Saratoga 1 Aug 2026
+5th (8/1) 9 Horses Claiming $55,000 Race 1
+8.5F Turf/Good
+saved ground, no rally
+Belmont 1 Jul 2026
+2nd (5/1) 8 Horses Claiming $45,000 Race 6
+8F Turf/Firm
+bid 3p turn, gained
+4
+PP4
+TURF HORSE FOUR
+J: Rider Four
+T: Trainer Four
+4
+ML 8
+W 10% P 25% S 39%
+Saratoga 18 Aug 2026
+3rd (6/1) 6 Horses Claiming $55,000 Race 7
+8.5F Turf/Yielding
+chased pace, held third
+Belmont 20 Jul 2026
+6th (10/1) 11 Horses Claiming $50,000 Race 3
+9F Turf/Soft
+wide, tired
+5
+PP5
+TURF HORSE FIVE
+J: Rider Five
+T: Trainer Five
+5
+ML 10
+W 7% P 18% S 29%
+Saratoga 8 Aug 2026
+7th (12/1) 10 Horses Claiming $55,000 Race 8
+8.5F Turf/Firm
+off slow, no factor
+Belmont 9 Jul 2026
+1st (9/1) 7 Horses Claiming $40,000 Race 2
+8F Turf/Good
+stalked, rallied
+6
+PP6
+TURF HORSE SIX
+J: Rider Six
+T: Trainer Six
+6
+ML 12
+W 18% P 35% S 52%
+Saratoga 20 Aug 2026
+1st (3/1) 8 Horses Claiming $55,000 Race 5
+8.5F Turf/Firm
+prompted, prevailed
+Belmont 21 Jul 2026
+2nd (4/1) 9 Horses Claiming $50,000 Race 1
+9F Turf/Good
+dueled, held place
+7
+PP7
+TURF HORSE SEVEN
+J: Rider Seven
+T: Trainer Seven
+7
+ML 15
+W 5% P 14% S 25%
+Saratoga 6 Aug 2026
+8th (15/1) 12 Horses Claiming $55,000 Race 9
+8.5F Turf/Yielding
+trailed throughout
+Belmont 5 Jul 2026
+4th (8/1) 8 Horses Claiming $45,000 Race 4
+8F Turf/Firm
+steadied early, improved
+8
+PP8
+TURF HORSE EIGHT
+J: Rider Eight
+T: Trainer Eight
+8
+ML 20
+W 11% P 24% S 38%
+Saratoga 14 Aug 2026
+4th (10/1) 9 Horses Claiming $55,000 Race 4
+8.5F Turf/Firm
+inside trip, evenly
+Belmont 14 Jul 2026
+3rd (6/1) 7 Horses Claiming $50,000 Race 7
+9F Turf/Soft
+rallied outside
+9
+PP9
+TURF HORSE NINE
+J: Rider Nine
+T: Trainer Nine
+9
+ML 30
+W 4% P 12% S 22%
+Saratoga 4 Aug 2026
+6th (20/1) 10 Horses Claiming $55,000 Race 6
+8.5F Turf/Good
+brief speed, weakened
+Belmont 2 Jul 2026
+5th (15/1) 9 Horses Claiming $45,000 Race 8
+8F Turf/Firm
+no threat
+10
+PP10
+TURF HORSE TEN
+J: Rider Ten
+T: Trainer Ten
+10
+ML 7/2
+W 20% P 39% S 55%
+Saratoga 16 Aug 2026
+2nd (2/1) 8 Horses Claiming $55,000 Race 2
+8.5F Turf/Yielding
+vied, fought on
+Belmont 17 Jul 2026
+1st (3/1) 6 Horses Claiming $50,000 Race 5
+9F Turf/Firm
+pressed, got up
+11
+PP11
+DUCKY MEDWICK
+J: Rider Eleven
+T: Trainer Eleven
+SCR
+12
+PP12
+HOT PROPERTY
+J: Rider Twelve
+T: Trainer Twelve
+SCR
+13
+PP13
+CULPRIT
+J: Rider Thirteen
+T: Trainer Thirteen
+SCR

@@ -31,6 +31,10 @@ class DataQuality:
     has_live_odds: bool
     required_model_features_complete: bool
     blocking_errors: list[str] = field(default_factory=list)
+    # Raw declared fields can include source-confirmed scratches. All gates use
+    # active entries, while this count lets the field-size gate distinguish a
+    # fully explained scratch reduction from a parser omission.
+    entries_scratched: int = 0
 
 
 def resolve_run_mode(q: DataQuality) -> tuple[RunMode, list[str]]:
@@ -40,10 +44,18 @@ def resolve_run_mode(q: DataQuality) -> tuple[RunMode, list[str]]:
     if q.entries_parsed < 2:
         errors.append("Fewer than two valid entries were parsed.")
 
-    if q.field_size_declared and q.entries_parsed != q.field_size_declared:
+    expected_active = (
+        q.field_size_declared - q.entries_scratched
+        if q.field_size_declared is not None else None
+    )
+    if expected_active is not None and q.entries_parsed != expected_active:
         errors.append(
             f"Declared field size is {q.field_size_declared}; "
-            f"only {q.entries_parsed} entries were parsed."
+            f"only {q.entries_parsed} active entries were parsed"
+            + (
+                f" after {q.entries_scratched} parsed scratches."
+                if q.entries_scratched else "."
+            )
         )
 
     if not q.race_metadata_complete:

@@ -39,7 +39,7 @@ def get_card_run_state(
     """Recompute effective state from immutable ingest and current DB facts."""
     audit = load_latest_card_audit(card_id, runs_root=runs_root)
     expected_entries = (
-        int(audit.get("entries_parsed") or 0)
+        int(audit.get("active_entries", audit.get("entries_parsed")) or 0)
         if audit else _active_entry_count(conn, card_id)
     )
     verification = verify_card_features(
@@ -110,10 +110,11 @@ def data_quality_from_card(
                 live_entry_ids.add(entry_id)
 
     if audit:
-        parsed = int(audit.get("entries_parsed") or 0)
+        parsed = int(audit.get("active_entries", audit.get("entries_parsed")) or 0)
         entries_with_pp = int(audit.get("entries_with_pp_history") or 0)
         match_rate = float(audit.get("starter_match_rate") or 0.0)
         declared = audit.get("field_size_declared")
+        scratches = int(audit.get("scratches") or 0)
         metadata_complete = bool(audit.get("race_metadata_complete", race is not None))
         has_morning_lines = bool(audit.get("has_morning_lines", entries))
         blocking_errors = list(audit.get("blocking_errors") or [])
@@ -135,6 +136,7 @@ def data_quality_from_card(
         )
         has_morning_lines = bool(entries) and all(row[1] is not None for row in entries)
         blocking_errors = [] if race else [f"No race card found for card_id={card_id}."]
+        scratches = 0
     return DataQuality(
         entries_parsed=parsed,
         field_size_declared=int(declared) if declared else None,
@@ -149,6 +151,7 @@ def data_quality_from_card(
         ),
         required_model_features_complete=required_model_features_complete,
         blocking_errors=blocking_errors,
+        entries_scratched=scratches,
     )
 
 

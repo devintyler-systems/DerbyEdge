@@ -7,10 +7,12 @@ from src.ingest.firstbet_pdf import (
     ingest_firstbet_pdf,
     parse_firstbet_text,
 )
+from src.ingest.run_state import RunMode
 from src.utils.horse_norm import horse_key
 
 
 FIXTURE = Path(__file__).parent / "fixtures" / "Saratoga_R8_9-2-26.txt"
+STACKED_FIXTURE = Path(__file__).parent / "fixtures" / "Saratoga_R9_9-2-26.txt"
 
 
 def _parse(text: str | None = None):
@@ -18,6 +20,15 @@ def _parse(text: str | None = None):
         text if text is not None else FIXTURE.read_text(encoding="utf-8"),
         filename="Saratoga_R8_9-2-26.pdf",
         sha256="fixture-sha256",
+        uploaded_at_utc="2026-09-02T20:24:00Z",
+    )
+
+
+def _parse_stacked():
+    return parse_firstbet_text(
+        STACKED_FIXTURE.read_text(encoding="utf-8"),
+        filename="Saratoga_R9_9-2-26.pdf",
+        sha256="stacked-fixture-sha256",
         uploaded_at_utc="2026-09-02T20:24:00Z",
     )
 
@@ -86,6 +97,47 @@ def test_name_normalization_removes_apostrophes_without_splitting_token():
     assert horse_key("Rina's Revenge") == "RINAS_REVENGE"
     payload, _ = _parse()
     assert payload["entries"][-1]["horse_key"] == "RINAS_REVENGE"
+
+
+def test_stacked_saratoga_r9_header_and_entries_are_normalized():
+    payload, audit = _parse_stacked()
+
+    assert payload["race"] == {
+        "track_code": "SAR",
+        "track_name": "Saratoga",
+        "race_number": 9,
+        "race_date": "2026-09-02",
+        "post_time_local": "14:46",
+        "class_family": "CLM",
+        "purse_usd": 55000,
+        "distance_furlongs": 8.5,
+        "surface": "turf",
+        "going": "yielding",
+        "field_size_declared": 13,
+    }
+    assert len(payload["entries"]) == 13
+    assert [entry["post"] for entry in payload["entries"]] == list(range(1, 14))
+    assert audit["diagnostics"]["entry_parser_strategy"] == "stacked"
+    assert audit["entries_parsed"] == 13
+    assert audit["field_size_declared_raw"] == 13
+    assert audit["active_entries"] == 10
+    assert audit["scratches"] == 3
+    assert audit["run_mode"] == RunMode.PP_PARSED_FEATURES_PENDING.value
+
+
+def test_stacked_saratoga_r9_retains_source_scratches_but_audits_active_only():
+    payload, audit = _parse_stacked()
+    by_post = {entry["post"]: entry for entry in payload["entries"]}
+
+    assert {by_post[post]["horse_raw"] for post in (11, 12, 13)} == {
+        "DUCKY MEDWICK", "HOT PROPERTY", "CULPRIT"
+    }
+    assert all(by_post[post]["is_scratched"] is True for post in (11, 12, 13))
+    assert all(by_post[post]["scratch_source"] == "1stbet_pdf_scr" for post in (11, 12, 13))
+    assert all(by_post[post]["is_scratched"] is False for post in range(1, 11))
+    assert audit["entries_with_pp_history"] == 10
+    assert audit["starter_match_rate"] == 1.0
+    assert audit["feature_coverage"]["recent_form"] == 1.0
 
 
 def test_every_upload_attempt_persists_both_audit_artifacts(tmp_path):

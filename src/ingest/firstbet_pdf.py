@@ -53,7 +53,7 @@ _ODDS_RE = re.compile(r"\((\d+(?:/\d+)?)\)")
 _PURSE_RE = re.compile(r"\$([\d,]+)")
 _DIST_RE = re.compile(r"\b((?:\d+\s+\d+/\d+|\d+(?:\.\d+)?)\s*[FM])\b", re.I)
 _SURFACE_GOING_RE = re.compile(
-    r"\b(Dirt|Turf|Synthetic|All[- ]?Weather)\s*/\s*([A-Za-z-]+)", re.I
+    r"\b(Dirt|Inner\s*Turf|Turf|Synthetic|All[- ]?Weather)\s*/\s*([A-Za-z-]+)", re.I
 )
 _CLASS_RE = re.compile(
     r"\b(Maiden\s+Special\s+Wt\.?|Maiden\s+Special\s+Weight|"
@@ -176,7 +176,10 @@ def ingest_firstbet_pdf(
             "ingest_run_mode": RunMode.BLOCKED.value,
             "source_provider": "1stbet",
             "field_size_declared": None,
+            "field_size_declared_raw": None,
             "entries_parsed": 0,
+            "active_entries": 0,
+            "scratches": 0,
             "entries_with_pp_history": 0,
             "total_pp_starts_parsed": 0,
             "starter_match_rate": 0.0,
@@ -328,7 +331,8 @@ def to_legacy_race_result(
             "morning_line_decimal_includes_stake": True,
             "past_performances": entry.get("past_performances") or [],
             "last_5": legacy_starts,
-            "is_scratched": False,
+            "is_scratched": bool(entry.get("is_scratched")),
+            "scratch_source": entry.get("scratch_source"),
         })
     return {
         "ok": audit.get("run_mode") != RunMode.BLOCKED.value,
@@ -364,20 +368,22 @@ def build_feature_audit(
 ) -> dict[str, Any]:
     race = payload.get("race") or {}
     entries = list(payload.get("entries") or [])
-    entries_with_pp = sum(bool(e.get("past_performances")) for e in entries)
-    total_pp = sum(len(e.get("past_performances") or []) for e in entries)
+    active_entries = [entry for entry in entries if not entry.get("is_scratched")]
+    scratches = len(entries) - len(active_entries)
+    entries_with_pp = sum(bool(e.get("past_performances")) for e in active_entries)
+    total_pp = sum(len(e.get("past_performances") or []) for e in active_entries)
     metadata_complete = all(race.get(field) not in (None, "") for field in REQUIRED_RACE_FIELDS)
     blocking: list[str] = []
     invalid_entries = [
         str(e.get("post") or "?")
-        for e in entries
+        for e in active_entries
         if not all(e.get(k) not in (None, "") for k in ("post", "horse_raw", "trainer", "jockey"))
         or e.get("morning_line_decimal") is None
     ]
     if invalid_entries:
         blocking.append("Entries missing horse, post, trainer, jockey, or morning line: " + ", ".join(invalid_entries))
 
-    parsed = len(entries)
+    parsed = len(active_entries)
     match_rate = entries_with_pp / parsed if parsed else 0.0
     quality = DataQuality(
         entries_parsed=parsed,
@@ -385,13 +391,16 @@ def build_feature_audit(
         entries_with_pp_history=entries_with_pp,
         starter_match_rate=match_rate,
         race_metadata_complete=metadata_complete,
-        has_morning_lines=bool(entries) and all(e.get("morning_line_decimal") for e in entries),
+        has_morning_lines=bool(active_entries) and all(
+            e.get("morning_line_decimal") for e in active_entries
+        ),
         has_live_odds=False,
         required_model_features_complete=False,
         blocking_errors=blocking,
+        entries_scratched=scratches,
     )
     mode, reasons = resolve_run_mode(quality)
-    coverage = _coverage(entries)
+    coverage = _coverage(active_entries)
     warnings = [
         "No speed figures supplied by source.",
         "No fractional pace figures supplied by source.",
@@ -405,6 +414,7 @@ def build_feature_audit(
     diagnostics = dict(entry_diagnostics or {})
     diagnostics.update({
         "parsed_post_positions": [e.get("post") for e in entries],
+        "active_post_positions": [e.get("post") for e in active_entries],
         "missing_post_positions": _missing_posts(race.get("field_size_declared"), entries),
         "horse_join_strategy": "strict_canonical_key",
     })
@@ -417,7 +427,10 @@ def build_feature_audit(
         "ingest_run_mode": mode.value,
         "source_provider": "1stbet",
         "field_size_declared": race.get("field_size_declared"),
-        "entries_parsed": parsed,
+        "field_size_declared_raw": race.get("field_size_declared"),
+        "entries_parsed": len(entries),
+        "active_entries": parsed,
+        "scratches": scratches,
         "entries_with_pp_history": entries_with_pp,
         "total_pp_starts_parsed": total_pp,
         "starter_match_rate": round(match_rate, 4),
@@ -450,7 +463,26 @@ def _parse_race_header(lines: list[str]) -> dict[str, Any]:
             identity_idx = idx
             break
 
-    detail = lines[identity_idx + 1] if identity_idx is not None and identity_idx + 1 < len(lines) else ""
+    # The 1/ST PDF text extractor can emit the track and race as two lines:
+    # ``SARATOGA TB`` / ``R 9``. Keep the compact form above as the primary
+    # parser so existing cards retain their established behavior.
+    if identity_idx is None:
+        for idx in range(min(len(lines) - 1, 10)):
+            track_match = re.match(r"^(.+?)(?:\s+TB)?$", lines[idx], re.I)
+            race_match = re.match(r"^R\s+(\d{1,2})$", lines[idx + 1], re.I)
+            if track_match and race_match:
+                candidate = track_match.group(1).strip()
+                if candidate and not re.search(r"1/ST|BET|\d{1,2}/\d{1,2}/\d", candidate, re.I):
+                    track_name = candidate.title()
+                    race_number = int(race_match.group(1))
+                    identity_idx = idx + 1
+                    break
+
+    detail_lines = (
+        lines[identity_idx + 1:min(identity_idx + 9, len(lines))]
+        if identity_idx is not None else []
+    )
+    detail = detail_lines[0] if detail_lines else ""
     match = re.match(
         r"^(\d{1,2}:\d{2}\s*[AP]M)\s+(\d+)\s+Horses\s+([A-Z]{2,5})\s+"
         r"\$([\d,]+)\s+(.+?)\s+(Dirt|Turf|Synthetic|All[- ]?Weather)\s*/\s*([A-Za-z-]+)$",
@@ -466,6 +498,37 @@ def _parse_race_header(lines: list[str]) -> dict[str, Any]:
         distance = _distance_furlongs(match.group(5))
         surface = _surface(match.group(6))
         going = match.group(7).lower()
+    elif detail_lines:
+        # Stacked layout: time / field / class / purse / distance / surface / going.
+        # Parse labels rather than relying on an exact line count so page chrome
+        # between source fields cannot silently change the meaning of a card.
+        detail_text = " ".join(detail_lines)
+        time_match = re.search(r"\b(\d{1,2}:\d{2}\s*[AP]M)\b", detail_text, re.I)
+        field_match = _FIELD_RE.search(detail_text)
+        class_match = re.search(r"\bHorses\s+([A-Z]{2,5})\s+\$", detail_text, re.I)
+        purse_match = _PURSE_RE.search(detail_text)
+        distance_match = _DIST_RE.search(detail_text)
+        surface_match = re.search(
+            r"\b(Inner\s*Turf|Innerturf|Dirt|Turf|Synthetic|All[- ]?Weather)\b",
+            detail_text,
+            re.I,
+        )
+        if time_match:
+            post_time = _to_24_hour(time_match.group(1))
+        if field_match:
+            field_size = int(field_match.group(1))
+        if class_match:
+            class_family = class_match.group(1).upper()
+        if purse_match:
+            purse = int(purse_match.group(1).replace(",", ""))
+        if distance_match:
+            distance = _distance_furlongs(distance_match.group(1))
+        if surface_match:
+            surface = _surface(surface_match.group(1))
+            after_surface = detail_text[surface_match.end():]
+            going_match = re.search(r"\b([A-Za-z-]+)\b", after_surface)
+            if going_match:
+                going = going_match.group(1).lower()
 
     resolved = resolve_track(track_name=track_name, track_code=None)
     return {
@@ -484,6 +547,15 @@ def _parse_race_header(lines: list[str]) -> dict[str, Any]:
 
 
 def _parse_entries(lines: list[str]) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    """Use compact anchors first, then the source's stacked entry layout."""
+    entries, diagnostics = _parse_compact_entries(lines)
+    if entries:
+        diagnostics["entry_parser_strategy"] = "compact"
+        return entries, diagnostics
+    return _parse_stacked_entries(lines)
+
+
+def _parse_compact_entries(lines: list[str]) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     anchors: list[tuple[int, str, int, int]] = []
     for idx, line in enumerate(lines):
         header = _ENTRY_HEADER_RE.match(line)
@@ -535,6 +607,8 @@ def _parse_entries(lines: list[str]) -> tuple[list[dict[str, Any]], dict[str, An
             "morning_line_source_text": ml_source,
             "morning_line_text": ml_text,
             "morning_line_decimal": ml_decimal,
+            "is_scratched": False,
+            "scratch_source": None,
             "past_performances": _parse_past_performances(lines[pp_idx + 1:end_idx]),
         })
 
@@ -542,6 +616,66 @@ def _parse_entries(lines: list[str]) -> tuple[list[dict[str, Any]], dict[str, An
         "entry_anchor_count": len(anchors),
         "duplicate_horse_keys": duplicate_keys,
         "unmatched_entry_keys": [],
+    }
+    return sorted(entries, key=lambda entry: entry["post"]), diagnostics
+
+
+def _parse_stacked_entries(lines: list[str]) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    """Parse 1/ST's alternate post / PP / horse / connections stack.
+
+    In this layout an auxiliary program number (or ``SCR``) is emitted after
+    the trainer, and the morning line is emitted on its own line. Anchoring on
+    the adjacent post and PP lines prevents PP-history text from becoming an
+    entry merely because it contains a number.
+    """
+    anchors: list[tuple[int, int]] = []
+    for idx in range(len(lines) - 2):
+        post_match = re.fullmatch(r"(\d{1,2})", lines[idx])
+        pp_match = re.fullmatch(r"PP\s*(\d{1,2})", lines[idx + 1], re.I)
+        if post_match and pp_match and int(post_match.group(1)) == int(pp_match.group(1)):
+            anchors.append((idx, int(post_match.group(1))))
+
+    entries: list[dict[str, Any]] = []
+    duplicate_keys: list[str] = []
+    seen_keys: set[str] = set()
+    for position, (start_idx, post) in enumerate(anchors):
+        end_idx = anchors[position + 1][0] if position + 1 < len(anchors) else len(lines)
+        profile = lines[start_idx + 2:end_idx]
+        raw_name = profile[0].strip() if profile else ""
+        jockey_line = next((line for line in profile if re.match(r"^J:", line, re.I)), "")
+        trainer_line = next((line for line in profile if re.match(r"^T:", line, re.I)), "")
+        jockey_match = re.match(r"^J:\s*(.+?)(?:\s+ML\s+[\d/-]+)?$", jockey_line, re.I)
+        trainer_match = re.match(r"^T:\s*(.+)$", trainer_line, re.I)
+        ml_line = next((line for line in profile if re.match(r"^ML\b", line, re.I)), "")
+        ml_match = re.search(r"\bML\s*:?\s*([\d/-]+)", ml_line, re.I)
+        if not ml_match:
+            ml_match = re.search(r"\bML\s*:?\s*([\d/-]+)", jockey_line, re.I)
+        ml_source = ml_match.group(1) if ml_match else None
+        ml_text, ml_decimal = _normalize_ml(ml_source)
+        is_scratched = any(re.fullmatch(r"SCR", line, re.I) for line in profile)
+        key = horse_key(raw_name)
+        if key in seen_keys:
+            duplicate_keys.append(key)
+        seen_keys.add(key)
+        entries.append({
+            "post": post,
+            "horse_raw": raw_name,
+            "horse_key": key,
+            "trainer": trainer_match.group(1).strip() if trainer_match else None,
+            "jockey": jockey_match.group(1).strip() if jockey_match else None,
+            "morning_line_source_text": ml_source,
+            "morning_line_text": ml_text,
+            "morning_line_decimal": ml_decimal,
+            "is_scratched": is_scratched,
+            "scratch_source": "1stbet_pdf_scr" if is_scratched else None,
+            "past_performances": _parse_past_performances(profile),
+        })
+
+    diagnostics = {
+        "entry_anchor_count": len(anchors),
+        "duplicate_horse_keys": duplicate_keys,
+        "unmatched_entry_keys": [],
+        "entry_parser_strategy": "stacked",
     }
     return sorted(entries, key=lambda entry: entry["post"]), diagnostics
 
@@ -684,6 +818,8 @@ def _surface(raw: str | None) -> str | None:
     if not raw:
         return None
     normalized = raw.lower().replace(" ", "-")
+    if normalized.replace("-", "") == "innerturf":
+        return "turf"
     return "all_weather" if normalized == "all-weather" else normalized
 
 

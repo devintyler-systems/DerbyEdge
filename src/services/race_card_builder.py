@@ -196,6 +196,7 @@ def create_entries_from_runners(
         post_position       (int; if absent, program_number or 1-based index used)
         morning_line        (str like "5-2")
         morning_line_decimal(float, overrides morning_line string)
+        is_scratched       (bool; source-confirmed scratch)
 
     Uses INSERT OR IGNORE so existing entries are skipped, not overwritten.
     Returns (n_inserted, warnings).
@@ -240,6 +241,14 @@ def create_entries_from_runners(
             continue
 
         if pp in used_pp:
+            if r.get("is_scratched"):
+                # A re-sync may be the first source artifact that records the
+                # scratch; preserve that source truth on an existing entry.
+                conn.execute(
+                    "UPDATE entries SET scratch_flag=1 WHERE card_id=? AND post_position=?",
+                    (card_id, pp),
+                )
+                continue
             warnings.append(f"'{name}': post_position {pp} already occupied — skipped")
             continue
 
@@ -251,15 +260,16 @@ def create_entries_from_runners(
             ml = parse_morning_line(r.get("morning_line"))
         if not (ml and float(ml) > 0):
             ml = default_morning_line
-            warnings.append(f"'{name}': no morning line — using {default_morning_line:.0f}-1")
+            if not r.get("is_scratched"):
+                warnings.append(f"'{name}': no morning line — using {default_morning_line:.0f}-1")
 
         horse_id = _get_or_create_horse(conn, name)
         try:
             conn.execute(
                 """INSERT OR IGNORE INTO entries
-                   (card_id, horse_id, post_position, morning_line_odds)
-                   VALUES (?, ?, ?, ?)""",
-                (card_id, horse_id, pp, float(ml)),
+                   (card_id, horse_id, post_position, morning_line_odds, scratch_flag)
+                   VALUES (?, ?, ?, ?, ?)""",
+                (card_id, horse_id, pp, float(ml), int(bool(r.get("is_scratched")))),
             )
             if conn.execute("SELECT changes()").fetchone()[0]:
                 n_inserted += 1
