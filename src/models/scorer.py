@@ -62,6 +62,7 @@ from src.models.policy import (
     normalize_surface as _policy_norm_surface,
     normalize_dist_category as _policy_norm_dist,
 )
+from src.services.run_mode import ensure_scoring_eligible
 
 ROOT       = Path(__file__).resolve().parents[2]
 OUTPUT_DIR = ROOT / "output"
@@ -927,6 +928,18 @@ def score_race(card_id: Optional[int] = None) -> pd.DataFrame:
     if card_id is None:
         conn.close()
         raise RuntimeError("No Kentucky Derby card found — run ingest first.")
+
+    # Hard product-state guard: baseline-only and invalid cards never reach a
+    # trained or heuristic model call.
+    try:
+        ensure_scoring_eligible(
+            conn,
+            card_id,
+            runs_root=Path(__file__).resolve().parents[2] / "data" / "runs",
+        )
+    except Exception:
+        conn.close()
+        raise
 
     # ── Load data ──────────────────────────────────────────────────────────
     entries_df = pd.read_sql(

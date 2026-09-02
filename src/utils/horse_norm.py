@@ -20,14 +20,23 @@ Example
 from __future__ import annotations
 
 import re
+import unicodedata
 
-_REMOVE = re.compile(r"['\.,\-\(\)]")
-_WS     = re.compile(r"\s+")
+def horse_key(value: str) -> str:
+    """Return the single canonical key used for horse identity joins.
+
+    The key is deliberately strict.  Callers may surface fuzzy candidates to
+    an operator, but must never use them as an automatic join.
+    """
+    text = unicodedata.normalize("NFKD", value or "")
+    text = text.encode("ascii", "ignore").decode("ascii").upper()
+    text = text.replace("&", " AND ")
+    text = text.replace("'", "")
+    text = re.sub(r"[^A-Z0-9]+", "_", text)
+    return re.sub(r"_+", "_", text).strip("_")
 
 
 def normalize_horse_name(name: str) -> str:
-    s = str(name).lower().strip()
-    s = s.replace("&", "and")
-    s = _REMOVE.sub("", s)
-    s = _WS.sub(" ", s).strip()
-    return s
+    # Preserve the historical lower-space representation for existing DB
+    # lookups while deriving it from the same strict canonicalizer.
+    return horse_key(name).replace("_", " ").lower()

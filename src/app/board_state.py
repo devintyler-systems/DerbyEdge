@@ -12,6 +12,8 @@ from typing import Mapping, Sequence
 import numpy as np
 import pandas as pd
 
+from src.ingest.run_state import RunMode
+
 
 LIVE_ODDS_UNAVAILABLE = (
     "Live odds unavailable — showing score-run morning-line value estimates."
@@ -25,6 +27,41 @@ class LiveOddsOverlay:
     message: str
     snapshot_timestamp: str | None = None
     snapshot_source: str | None = None
+
+
+@dataclass(frozen=True)
+class RaceBoardContract:
+    """Render permissions derived from run mode, never from column presence."""
+
+    show_model_probability: bool
+    show_morning_line_reference: bool
+    show_live_market: bool
+    show_fair_odds: bool
+    show_edge: bool
+    show_bet_tags: bool
+    show_stakes: bool
+    scoring_controls_enabled: bool
+    chart_series: tuple[str, ...]
+
+
+def race_board_contract(mode: RunMode, *, has_live_odds: bool = False) -> RaceBoardContract:
+    if mode == RunMode.BLOCKED:
+        return RaceBoardContract(False, False, False, False, False, False, False, False, ())
+    if mode == RunMode.MARKET_BASELINE_ONLY:
+        return RaceBoardContract(
+            False, True, False, False, False, False, False, False,
+            ("Morning-Line Implied Win Probability",),
+        )
+    if mode == RunMode.MODEL_READY_LIMITED:
+        return RaceBoardContract(
+            True, True, has_live_odds, True, False, False, False, True,
+            ("Model Win %", "Morning-Line Implied %"),
+        )
+    return RaceBoardContract(
+        True, True, has_live_odds, True, has_live_odds, has_live_odds,
+        has_live_odds, True,
+        ("Model Win %", "Live Market %" if has_live_odds else "Morning-Line Implied %"),
+    )
 
 
 def load_run_index_for_card(conn, card_id: int) -> list[dict]:

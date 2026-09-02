@@ -22,6 +22,7 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
 from src.models.scorer import score_race
+from src.services.run_mode import ensure_scoring_eligible
 from src.utils.db import get_connection, get_derby_card_id
 
 
@@ -61,6 +62,15 @@ def main() -> int:
     if card_id is None:
         raise RuntimeError("No default Kentucky Derby card found — pass --card-id.")
     card_meta = _load_card_metadata(card_id)
+
+    gate_conn = get_connection()
+    try:
+        run_state = ensure_scoring_eligible(
+            gate_conn, card_id, runs_root=ROOT / "data" / "runs"
+        )
+    finally:
+        gate_conn.close()
+    print(f"  Run mode: {run_state.mode.value}")
 
     if args.rebuild_features:
         from src.features.builder import build_features
