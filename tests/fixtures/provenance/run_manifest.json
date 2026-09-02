@@ -1,0 +1,17 @@
+{
+  "manifest_id": "run-manifest-fixture-001",
+  "asset_class": "scored_race_run",
+  "run_id": "run-fixture-001",
+  "race_id": "SAR-20260902-R01",
+  "decision_timestamp_utc": "2026-09-02T12:30:00Z",
+  "code_commit_sha": "abcdef1",
+  "model_id": "dirt-route-v1",
+  "raw_input_manifest_ids": ["raw-fixture-001"],
+  "feature_schema_version": "v1",
+  "odds_snapshot_timestamp_utc": "2026-09-02T12:29:00Z",
+  "output_sha256s": {
+    "board.csv": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+  },
+  "probability_sum": 1.0,
+  "bet_policy_version": "v1"
+}
