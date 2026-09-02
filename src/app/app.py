@@ -105,6 +105,11 @@ from src.app.board_state import (
     effective_board_mode,
     source_feature_inventory,
 )
+from src.app.board_formatting import (
+    _edge_str,
+    morning_line_str,
+    prepare_probability_display_columns,
+)
 
 # ── Page config ────────────────────────────────────────────────────────────────
 st.set_page_config(
@@ -634,10 +639,6 @@ def _no_data(msg: str = "No score data found.") -> None:
         "python scripts/score.py",
         language="bash",
     )
-
-
-def _edge_str(v: float) -> str:
-    return f"+{v:.3f}" if v > 0 else f"{v:.3f}"
 
 
 def _conf_label(flag: int) -> str:
@@ -1549,11 +1550,13 @@ with tab1:
             c1.metric("Horses", len(board_df))
             c2.metric("Low confidence", int(n_low))
             c3.metric("Sum win prob", f"{sum_wp:.4f}")
-            st.caption(
+            _top_caption = (
                 f"Top forecast: **{top_horse['horse_name']}** "
-                f"{top_horse['win_probability']*100:.1f}% · "
-                f"fair {top_horse['fair_odds']:.1f}-1"
+                f"{top_horse['win_probability']*100:.1f}%"
             )
+            if _ui_contract.show_fair_odds:
+                _top_caption += f" · fair {top_horse['fair_odds']:.1f}-1"
+            st.caption(_top_caption)
         st.divider()
 
         # ── Derby override banner ──────────────────────────────────────────────
@@ -1650,10 +1653,9 @@ with tab1:
             tbl["Conf"] = tbl["confidence_bucket"].map(CONF_ICON)
         else:
             tbl["Conf"] = tbl["confidence_flag"].map(CONF_ICON)
-        tbl["Win%"] = (tbl["win_probability"] * 100).round(2)
-        tbl["ML"]   = tbl["morning_line_odds"].apply(lambda x: f"{x:.0f}-1")
-        tbl["Edge"] = tbl["value_score"].apply(_edge_str)
-        tbl["ML-Implied %"] = (tbl["market_implied_prob"] * 100).round(2)
+        tbl = prepare_probability_display_columns(
+            tbl, show_edge=_ui_contract.show_edge
+        )
 
         display_cols: dict = {
             "rank":            "Rank",
@@ -1928,18 +1930,23 @@ with tab2:
             unsafe_allow_html=True,
         )
 
-        _detail_cols = st.columns(5 if _ui_contract.show_edge else 4)
+        _detail_cols = st.columns(
+            3 + int(_ui_contract.show_fair_odds) + int(_ui_contract.show_edge)
+        )
         _live_mkt = horse.get("live_market_prob") if has_live_odds else None
         _mkt_prob = float(_live_mkt) if pd.notna(_live_mkt) else float(horse["market_implied_prob"])
         _mkt_label = "Live Mkt %" if pd.notna(_live_mkt) else "ML-Implied %"
-        _detail_cols[0].metric("Win %", f"{horse['win_probability']*100:.1f}%")
-        _detail_cols[1].metric("Fair Odds", f"{horse['fair_odds']:.1f}-1")
-        _offset = 2
+        _detail_offset = 0
+        _detail_cols[_detail_offset].metric("Win %", f"{horse['win_probability']*100:.1f}%")
+        _detail_offset += 1
+        if _ui_contract.show_fair_odds:
+            _detail_cols[_detail_offset].metric("Fair Odds", f"{horse['fair_odds']:.1f}-1")
+            _detail_offset += 1
         if _ui_contract.show_edge:
-            _detail_cols[2].metric("Model Edge", _edge_str(horse["value_score"]))
-            _offset = 3
-        _detail_cols[_offset].metric("Morning Line", f"{horse['morning_line_odds']:.0f}-1")
-        _detail_cols[_offset + 1].metric(_mkt_label, f"{_mkt_prob*100:.1f}%")
+            _detail_cols[_detail_offset].metric("Model Edge", _edge_str(horse["value_score"]))
+            _detail_offset += 1
+        _detail_cols[_detail_offset].metric("Morning Line", morning_line_str(horse["morning_line_odds"]))
+        _detail_cols[_detail_offset + 1].metric(_mkt_label, f"{_mkt_prob*100:.1f}%")
 
         st.divider()
 
