@@ -160,6 +160,8 @@ def create_race_card(
     stakes_name: str | None = None,
     race_class: str | None = None,
     purse: int | None = None,
+    conditions: str | None = None,
+    field_size: int | None = None,
 ) -> int:
     """Create a race_cards row and return its card_id.
 
@@ -169,10 +171,11 @@ def create_race_card(
     conn.execute(
         """INSERT OR IGNORE INTO race_cards
            (track_id, card_date, race_number, stakes_name, race_class,
-            purse, distance_yards, surface)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+            purse, distance_yards, surface, conditions, field_size)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
         (track_id, race_date, race_number, stakes_name or None,
-         race_class or None, purse, distance_yards, surface),
+         race_class or None, purse, distance_yards, surface,
+         conditions or None, field_size),
     )
     conn.commit()
     return find_race_card(conn, track_code, race_date, race_number)
@@ -242,6 +245,8 @@ def create_entries_from_runners(
 
         # Morning line
         ml = r.get("morning_line_decimal")
+        if ml and r.get("morning_line_decimal_includes_stake"):
+            ml = float(ml) - 1.0
         if not (ml and float(ml) > 0):
             ml = parse_morning_line(r.get("morning_line"))
         if not (ml and float(ml) > 0):
@@ -279,6 +284,8 @@ def find_or_create_race(
     stakes_name: str | None = None,
     race_class: str | None = None,
     purse: int | None = None,
+    conditions: str | None = None,
+    field_size: int | None = None,
 ) -> tuple[int, bool, int, list[str]]:
     """Find or create race_card + entries for runners.
 
@@ -291,7 +298,21 @@ def find_or_create_race(
             conn, track_code, race_date, race_number,
             distance_yards=distance_yards, surface=surface,
             stakes_name=stakes_name, race_class=race_class, purse=purse,
+            conditions=conditions, field_size=field_size,
         )
+    else:
+        # A source-specific re-sync may fill metadata that an earlier generic
+        # import could not parse; never overwrite it with nulls.
+        conn.execute(
+            """UPDATE race_cards SET
+                   race_class=COALESCE(?, race_class),
+                   purse=COALESCE(?, purse),
+                   conditions=COALESCE(?, conditions),
+                   field_size=COALESCE(?, field_size)
+               WHERE card_id=?""",
+            (race_class, purse, conditions, field_size, card_id),
+        )
+        conn.commit()
 
     n_entries, warnings = create_entries_from_runners(conn, card_id, runners)
     return card_id, was_created, n_entries, warnings

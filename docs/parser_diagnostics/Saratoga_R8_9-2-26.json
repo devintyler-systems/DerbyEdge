@@ -1,0 +1,53 @@
+{
+  "source": {
+    "provider": "1stbet",
+    "filename": "Saratoga_R8_9-2-26.pdf",
+    "sha256": "dc70d4bdbce4d552e6efb7a53cc6c9cbcb3bbdfe449d0b66e0555bd8412a15b8",
+    "extracted_text_chars": 7442,
+    "extracted_text_lines": 246
+  },
+  "race": {
+    "track_code": "SAR",
+    "track_name": "Saratoga",
+    "race_number": 8,
+    "race_date": "2026-09-02",
+    "post_time_local": "14:12",
+    "class_family": "AOC",
+    "purse_usd": 110000,
+    "distance_furlongs": 6.5,
+    "surface": "dirt",
+    "going": "muddy",
+    "field_size_declared": 9
+  },
+  "run_mode": "MODEL_READY_LIMITED",
+  "entries_parsed": 9,
+  "parsed_post_positions": [1, 2, 3, 4, 5, 6, 7, 8, 9],
+  "entries_with_pp_history": 9,
+  "total_pp_starts_parsed": 42,
+  "starter_match_rate": 1.0,
+  "duplicate_horse_keys": [],
+  "unmatched_entry_keys": [],
+  "missing_post_positions": [],
+  "horse_join_strategy": "strict_canonical_key",
+  "feature_coverage": {
+    "recent_form": 1.0,
+    "distance_surface_fit": 1.0,
+    "run_style_proxy": 0.89,
+    "trip_flags": 1.0,
+    "off_track_evidence": 0.44,
+    "speed_figures": 0.0,
+    "fractional_pace": 0.0,
+    "workouts": 0.0,
+    "live_odds": 0.0
+  },
+  "blocking_errors": [],
+  "warnings": [
+    "No speed figures supplied by source.",
+    "No fractional pace figures supplied by source.",
+    "Morning line is not live market odds.",
+    "Muddy-track evidence is incomplete for some starters.",
+    "Forecast uses only 1/ST PDF-supported features.",
+    "No live odds supplied; edge, fair odds comparison, and bet tags remain disabled."
+  ],
+  "note": "The source contains 42 PP starts; this differs from the illustrative brief count of 41. Diagnostics report the parsed source truth."
+}

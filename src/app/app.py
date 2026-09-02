@@ -5,6 +5,8 @@ src/app/app.py
 Run: streamlit run src/app/app.py
 """
 
+import hashlib
+import json
 import math
 import os
 import pickle
@@ -47,6 +49,13 @@ from src.services.race_card_builder import (
     norm_surface as _rcb_norm_surface,
 )
 from src.services.pdf_ingest import parse_race_pdf, parse_results_pdf
+from src.ingest.firstbet_pdf import (
+    bind_run_to_card,
+    ingest_firstbet_pdf,
+    to_legacy_race_result,
+)
+from src.ingest.run_state import RunMode
+from src.services.run_mode import CardRunState, get_card_run_state
 from src.services.pp_intake import (
     ingest_pp_rows,
     parse_pp_csv,
@@ -92,6 +101,8 @@ from src.app.board_state import (
     latest_run_id_for_card,
     load_run_index_for_card,
     select_active_run_id,
+    race_board_contract,
+    source_feature_inventory,
 )
 
 # ── Page config ────────────────────────────────────────────────────────────────
@@ -328,7 +339,7 @@ def load_race_info(card_id: int) -> dict:
             """SELECT rc.card_id, rc.card_date, rc.race_number,
                       rc.stakes_name, rc.purse, rc.distance_furlongs,
                       rc.surface, rc.race_class, rc.age_restriction,
-                      rc.field_size,
+                      rc.field_size, rc.conditions,
                       t.name AS track_name, t.abbrev AS track_abbrev,
                       t.city, t.state
                FROM race_cards rc
@@ -494,9 +505,12 @@ def load_entries(card_id: int) -> pd.DataFrame:
         conn = get_connection()
         df = pd.read_sql(
             """SELECT e.post_position AS "Post", h.name AS "Horse",
+                      tr.full_name AS "Trainer", jo.full_name AS "Jockey",
                       e.morning_line_odds AS "ML Odds"
                FROM entries e
                JOIN horses h ON e.horse_id = h.horse_id
+               LEFT JOIN people tr ON e.trainer_id = tr.person_id
+               LEFT JOIN people jo ON e.jockey_id = jo.person_id
                WHERE e.card_id = ? AND e.scratch_flag = 0
                ORDER BY e.post_position""",
             conn, params=(card_id,),
@@ -859,6 +873,9 @@ _rdns: dict = {
     "pp_loaded": False, "model_run": False,
     "n_pp_rows": 0, "n_odds_posts": 0,
 }
+_card_run_state = CardRunState(RunMode.BLOCKED, ["No active race."], None)
+_run_mode = RunMode.BLOCKED
+_sidebar_contract = race_board_contract(_run_mode)
 
 # ── Sidebar ────────────────────────────────────────────────────────────────────
 with st.sidebar:
@@ -979,6 +996,17 @@ with st.sidebar:
 
         # ── Race readiness badges ──────────────────────────────────────────
         _rdns = load_race_readiness(active_card_id)
+        _mode_conn = get_connection()
+        try:
+            _card_run_state = get_card_run_state(
+                _mode_conn, int(active_card_id), runs_root=ROOT / "data" / "runs"
+            )
+        finally:
+            _mode_conn.close()
+        _run_mode = _card_run_state.mode
+        _sidebar_contract = race_board_contract(
+            _run_mode, has_live_odds=_rdns["live_odds_loaded"]
+        )
         def _rbadge(ok: bool, label: str) -> str:
             cls = "badge-impl" if ok else "badge-phld"
             sym = "✓" if ok else "✗"
@@ -997,8 +1025,16 @@ with st.sidebar:
             ]),
             unsafe_allow_html=True,
         )
-        if not _rdns["pp_loaded"]:
-            st.caption("⚠ No PP history — model uses base-rate priors")
+        if _run_mode == RunMode.BLOCKED:
+            st.caption("⛔ Scoring blocked — inspect the data-quality panel.")
+        elif _run_mode == RunMode.MARKET_BASELINE_ONLY:
+            st.caption("⚠ Morning-line baseline only — no model forecast.")
+        elif _run_mode == RunMode.PP_PARSED_FEATURES_PENDING:
+            st.caption("PPs parsed — feature verification is still pending.")
+        elif _run_mode == RunMode.MODEL_READY_LIMITED:
+            st.caption("Limited-source forecast — wagering outputs disabled.")
+        else:
+            st.caption("Model and live-market comparison eligible.")
         st.divider()
 
         # ── Active Run selector ────────────────────────────────────────────
@@ -1051,7 +1087,7 @@ with st.sidebar:
                 f"{_meta_sb.get('run_timestamp', '')[:19]}"
             )
             _sb_card = st.session_state.get("active_card_id")
-            if _sb_card and st.button(
+            if _sb_card and _sidebar_contract.scoring_controls_enabled and st.button(
                 "⚡ Rebuild features + rescore",
                 use_container_width=True,
                 key="rebuild_sb",
@@ -1074,54 +1110,47 @@ with st.sidebar:
                         st.error("Rebuild completed but did not create a score run for this card.")
                 else:
                     st.error("Rebuild failed — see pipeline output in Race Board tab.")
+            elif _sb_card and not _sidebar_contract.scoring_controls_enabled:
+                st.caption("Rebuild/rescore is disabled in this run mode.")
             st.divider()
 
-    # ── Board Filters ──────────────────────────────────────────────────────
-    st.markdown("**Board Filters**")
-    filt_hide_ul  = st.checkbox("Hide underlays",         value=False)
-    filt_conf_med = st.checkbox("Medium confidence only", value=False)
-    filt_bet_only = st.checkbox("Bet candidates only",    value=False)
+    filt_hide_ul = filt_bet_only = False
+    filt_conf_med = False
+    bankroll, kelly_pct = 0, 5
+    chaos_on, chaos_idx = False, 0.85
+    if _run_mode == RunMode.MODEL_READY:
+        # ── Board Filters ──────────────────────────────────────────────────
+        st.markdown("**Board Filters**")
+        filt_hide_ul = st.checkbox("Hide underlays", value=False)
+        filt_conf_med = st.checkbox("Medium confidence only", value=False)
+        filt_bet_only = st.checkbox("Bet candidates only", value=False)
 
-    st.divider()
-    st.markdown("**Bankroll & Kelly**")
-    bankroll = st.number_input(
-        "Bankroll ($)", min_value=0, max_value=1_000_000, value=100, step=100,
-        help="Total betting bankroll. Stake$ = bankroll × capped Kelly fraction.",
-    )
-    kelly_pct = st.slider(
-        "Kelly fraction", 1, 25, 5, 1,
-        help=(
-            "Fractional Kelly multiplier (1–25 where 25 = full Kelly). "
-            "25 ≈ full Kelly · 12 ≈ half Kelly · 6 ≈ quarter Kelly · 5 ≈ fifth Kelly. "
-            "All stakes scale proportionally — halving this halves every stake. "
-            "Hard cap: 25% of bankroll per bet regardless."
-        ),
-    )
+        st.divider()
+        st.markdown("**Bankroll & Kelly**")
+        bankroll = st.number_input(
+            "Bankroll ($)", min_value=0, max_value=1_000_000, value=100, step=100,
+            help="Total betting bankroll. Stake$ = bankroll × capped Kelly fraction.",
+        )
+        kelly_pct = st.slider(
+            "Kelly fraction", 1, 25, 5, 1,
+            help="Fractional Kelly multiplier; hard cap is 25% of bankroll per bet.",
+        )
 
-    st.divider()
-    st.markdown("**Derby Chaos Overlay**")
-    _n_runners = _rdns.get("runners_loaded", 0)
-    _chaos_race_ok = _n_runners >= _CHAOS_MIN_FIELD
-    chaos_on = st.toggle(
-        "Apply chaos patch", value=False,
-        disabled=not _chaos_race_ok,
-        help=(
-            "Reallocate win mass toward dark-horse beneficiaries. "
-            f"Requires ≥{_CHAOS_MIN_FIELD} starters (3yo G1 dirt-route scope)."
-        ),
-    )
-    if not _chaos_race_ok:
-        chaos_on = False  # override: widget may hold stale True from a prior race
-        _msg = (
-            f"Disabled — {_n_runners} starter(s). "
-            f"Chaos patch is designed for large-field stakes races (≥{_CHAOS_MIN_FIELD})."
-        ) if _n_runners > 0 else f"Disabled — no runners loaded (≥{_CHAOS_MIN_FIELD} required)."
-        st.caption(_msg)
-    chaos_idx = st.slider(
-        "Chaos index", 0.0, 1.0, 0.85, 0.05,
-        disabled=not chaos_on,
-        help="0 = deterministic chalk · 1 = maximum chaos. Activates at ≥ 0.70.",
-    )
+        st.divider()
+        st.markdown("**Derby Chaos Overlay**")
+        _n_runners = _rdns.get("runners_loaded", 0)
+        _chaos_race_ok = _n_runners >= _CHAOS_MIN_FIELD
+        chaos_on = st.toggle(
+            "Apply chaos patch", value=False, disabled=not _chaos_race_ok,
+            help=f"Requires at least {_CHAOS_MIN_FIELD} starters.",
+        )
+        if not _chaos_race_ok:
+            chaos_on = False
+            st.caption(f"Disabled — {_n_runners} starter(s); ≥{_CHAOS_MIN_FIELD} required.")
+        chaos_idx = st.slider(
+            "Chaos index", 0.0, 1.0, 0.85, 0.05,
+            disabled=not chaos_on,
+        )
 
     st.divider()
     if st.button("↺ Refresh data", use_container_width=True):
@@ -1135,6 +1164,14 @@ active_card_id = st.session_state["active_card_id"]
 board_df, meta = (
     load_board(selected_run_id, active_card_id) if selected_run_id else (None, None)
 )
+if _run_mode in (
+    RunMode.BLOCKED,
+    RunMode.MARKET_BASELINE_ONLY,
+    RunMode.PP_PARSED_FEATURES_PENDING,
+):
+    # A stale historical score run must not leak model artifacts into a mode
+    # that explicitly forbids a forecast.
+    board_df, meta = None, None
 feat_df  = load_features(active_card_id) if active_card_id else pd.DataFrame()
 catalog  = load_catalog()
 artifact = load_artifact()
@@ -1151,7 +1188,7 @@ if _live_odds_err:
 # score-run morning-line values, so the overlay helper returns an explicit state.
 _live_overlay = None
 _usable_live_odds_by_pp: dict = {}
-if board_df is not None:
+if board_df is not None and _run_mode == RunMode.MODEL_READY:
     _bet_threshold, _underlay_threshold = _run_bet_thresholds(meta)
     _live_overlay = apply_live_odds_overlay(
         board_df,
@@ -1168,13 +1205,81 @@ if race_info:
     _hdr_label = format_race_label(race_info)
 else:
     _hdr_label = "DerbyEdge Operator Console"
+_ui_contract = race_board_contract(
+    _run_mode,
+    has_live_odds=bool(_live_overlay and _live_overlay.available),
+)
 st.markdown(f'<p class="console-title">⚙ {_hdr_label}</p>', unsafe_allow_html=True)
-if meta:
+if meta and _ui_contract.show_model_probability:
     st.caption(
         f"Model `{meta.get('model_name', '')}` v{meta.get('version', '')} · "
         f"Run `{meta.get('run_id', '')}` · "
         f"{meta.get('run_timestamp', '')[:19]} UTC"
     )
+
+# ── Hard data-quality panel ──────────────────────────────────────────────────
+if active_card_id:
+    _audit = _card_run_state.audit or {}
+    _entries_parsed = _audit.get("entries_parsed", _rdns.get("runners_loaded", 0))
+    _pp_starts = _audit.get("total_pp_starts_parsed", _rdns.get("n_pp_rows", 0))
+    _match_rate = _audit.get(
+        "starter_match_rate",
+        (_card_run_state.quality.starter_match_rate if _card_run_state.quality else 0.0),
+    )
+    if _run_mode == RunMode.BLOCKED:
+        _reason = next(iter(_card_run_state.reasons), "Race data failed validation.")
+        st.error(
+            "⛔ SCORING BLOCKED\n\n"
+            f"Reason: {_reason}\n\n"
+            f"Starter match rate: {_match_rate:.0%} · "
+            f"Parsed past-performance starts: {_pp_starts}\n\n"
+            "Action: Re-upload the original 1/ST PDF or inspect parser diagnostics."
+        )
+    elif _run_mode == RunMode.MARKET_BASELINE_ONLY:
+        st.warning(
+            "⚠ MARKET BASELINE ONLY — NOT A MODEL FORECAST\n\n"
+            "The source supplied morning lines but no attachable past-performance histories. "
+            "Displayed values are normalized morning-line implied probabilities. "
+            "Fair odds, edge, wager tags, and stake sizing are disabled."
+        )
+    elif _run_mode == RunMode.PP_PARSED_FEATURES_PENDING:
+        st.info(
+            "PP PARSED — FEATURES PENDING\n\n"
+            "1/ST past performances were attached, but the current model feature "
+            "frame has not passed schema and non-degeneracy checks. Build features "
+            "before scoring. No model output is available in this state."
+        )
+    elif _run_mode == RunMode.MODEL_READY_LIMITED:
+        _coverage = _audit.get("feature_coverage") or {}
+        _inventory = source_feature_inventory(_coverage)
+        _inventory_text = " · ".join(
+            f"{_label}: {', '.join(_items) if _items else 'None'}"
+            for _label, _items in _inventory.items()
+        )
+        st.warning(
+            "LIMITED-SOURCE FORECAST\n\n"
+            f"{_entries_parsed}/{race_info.get('field_size') or _entries_parsed} starters "
+            "have parsed PP history. The forecast uses 1/ST PDF-derived inputs only. "
+            "Unavailable: speed figures, fractional pace, workouts, pedigree, live odds. "
+            "Betting outputs remain disabled. "
+            f"Source inventory — {_inventory_text}"
+        )
+    else:
+        st.success("MODEL READY — forecast and complete live-market comparison are eligible.")
+
+    if _audit:
+        with st.expander("Data-quality and parser diagnostics"):
+            st.json({k: v for k, v in _audit.items() if not k.startswith("_")})
+            st.download_button(
+                "Download feature_audit.json",
+                data=json.dumps(
+                    {k: v for k, v in _audit.items() if not k.startswith("_")},
+                    indent=2,
+                ) + "\n",
+                file_name="feature_audit.json",
+                mime="application/json",
+                key=f"download_feature_audit_{active_card_id}",
+            )
 
 tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10 = st.tabs([
     "📋 Race Board",
@@ -1194,7 +1299,7 @@ _ONBOARDING_KEY = "hide_new_here_onboarding"
 
 with tab1:
     # ── New-user onboarding panel ─────────────────────────────────────────────
-    if not st.session_state.get(_ONBOARDING_KEY, False):
+    if _run_mode == RunMode.MODEL_READY and not st.session_state.get(_ONBOARDING_KEY, False):
         with st.container(border=True):
             st.write("**New here? Start with these 3 steps**")
             st.markdown(
@@ -1211,7 +1316,54 @@ with tab1:
                 st.session_state[_ONBOARDING_KEY] = True
                 st.rerun()
 
-    if board_df is None:
+    if _run_mode == RunMode.BLOCKED:
+        st.subheader("Parsed Entries")
+        _blocked_entries = load_entries(int(active_card_id)) if active_card_id else pd.DataFrame()
+        if _blocked_entries.empty:
+            st.info("No valid entries are available for this race.")
+        else:
+            _blocked_show = _blocked_entries.drop(columns=["ML Odds"], errors="ignore")
+            st.dataframe(_blocked_show, use_container_width=True, hide_index=True)
+        st.caption("Race metadata and diagnostics are available above. No scoring artifacts are rendered.")
+
+    elif _run_mode == RunMode.MARKET_BASELINE_ONLY:
+        st.subheader("Morning-Line Baseline")
+        _baseline = load_entries(int(active_card_id)) if active_card_id else pd.DataFrame()
+        if _baseline.empty:
+            st.info("No morning-line entries are available.")
+        else:
+            _raw_ml = 1.0 / (pd.to_numeric(_baseline["ML Odds"], errors="coerce") + 1.0)
+            _baseline["ML-Implied Probability"] = 100 * _raw_ml / _raw_ml.sum()
+            _baseline["Morning Line"] = _baseline["ML Odds"].apply(
+                lambda value: f"{value:g}-1" if pd.notna(value) else "—"
+            )
+            _baseline_show = _baseline[[
+                "Horse", "Post", "Trainer", "Jockey", "Morning Line",
+                "ML-Implied Probability",
+            ]]
+            st.dataframe(
+                _baseline_show,
+                use_container_width=True,
+                hide_index=True,
+                column_config={
+                    "ML-Implied Probability": st.column_config.NumberColumn(format="%.2f%%")
+                },
+            )
+            _baseline_chart = _baseline.sort_values(
+                "ML-Implied Probability", ascending=True
+            )
+            _baseline_fig = go.Figure(go.Bar(
+                y=_baseline_chart["Horse"],
+                x=_baseline_chart["ML-Implied Probability"],
+                name="Morning-Line Implied Win Probability",
+                orientation="h",
+                marker_color="#f0883e",
+            ))
+            _baseline_fig.update_layout(height=500, **_plotly_dark())
+            st.subheader("Morning-Line Implied Win Probability")
+            st.plotly_chart(_baseline_fig, use_container_width=True)
+
+    elif board_df is None:
         # ── Unscored race: readiness + build/score actions ────────────────────
         _ru1, _ru2, _ru3, _ru4 = st.columns(4)
         _ru1.metric("Runners", _rdns["runners_loaded"] or "—",
@@ -1339,20 +1491,30 @@ with tab1:
         )
         top_horse = board_df.iloc[0]
 
-        c1, c2, c3, c4, c5 = st.columns(5)
-        c1.metric("Horses",        len(board_df))
-        c2.metric("Bet-tagged",    int(n_bets),  delta=None)
-        c3.metric("Underlays",     int(n_ul),    delta=None)
-        c4.metric("Low confidence",int(n_low))
-        c5.metric("Sum win prob",  f"{sum_wp:.4f}")
-
-        st.caption(
-            f"Top: **{top_horse['horse_name']}** "
-            f"{top_horse['win_probability']*100:.1f}% · "
-            f"fair {top_horse['fair_odds']:.1f}-1 · "
-            f"edge {_edge_str(top_horse['value_score'])} · "
-            f"{TAG_ICON.get(top_horse['bet_tag'], top_horse['bet_tag'])}"
-        )
+        if _ui_contract.show_edge:
+            c1, c2, c3, c4, c5 = st.columns(5)
+            c1.metric("Horses", len(board_df))
+            c2.metric("Bet-tagged", int(n_bets), delta=None)
+            c3.metric("Underlays", int(n_ul), delta=None)
+            c4.metric("Low confidence", int(n_low))
+            c5.metric("Sum win prob", f"{sum_wp:.4f}")
+            st.caption(
+                f"Top: **{top_horse['horse_name']}** "
+                f"{top_horse['win_probability']*100:.1f}% · "
+                f"fair {top_horse['fair_odds']:.1f}-1 · "
+                f"edge {_edge_str(top_horse['value_score'])} · "
+                f"{TAG_ICON.get(top_horse['bet_tag'], top_horse['bet_tag'])}"
+            )
+        else:
+            c1, c2, c3 = st.columns(3)
+            c1.metric("Horses", len(board_df))
+            c2.metric("Low confidence", int(n_low))
+            c3.metric("Sum win prob", f"{sum_wp:.4f}")
+            st.caption(
+                f"Top forecast: **{top_horse['horse_name']}** "
+                f"{top_horse['win_probability']*100:.1f}% · "
+                f"fair {top_horse['fair_odds']:.1f}-1"
+            )
         st.divider()
 
         # ── Derby override banner ──────────────────────────────────────────────
@@ -1369,13 +1531,14 @@ with tab1:
             )
 
         # ── Board thresholds reminder ──────────────────────────────────────────
-        st.markdown(
-            '<div class="info-banner">Bet thresholds: '
-            f'<strong>BET</strong> = edge ≥ {_bet_threshold:+.3f} · '
-            f'<strong>UL</strong> = edge &lt; {_underlay_threshold:.3f} · '
-            '<strong>NEUTRAL</strong> otherwise</div>',
-            unsafe_allow_html=True,
-        )
+        if _ui_contract.show_edge:
+            st.markdown(
+                '<div class="info-banner">Bet thresholds: '
+                f'<strong>BET</strong> = edge ≥ {_bet_threshold:+.3f} · '
+                f'<strong>UL</strong> = edge &lt; {_underlay_threshold:.3f} · '
+                '<strong>NEUTRAL</strong> otherwise</div>',
+                unsafe_allow_html=True,
+            )
 
         # ── Chaos overlay + Kelly ─────────────────────────────────────────────
         if chaos_on:
@@ -1405,11 +1568,12 @@ with tab1:
                     unsafe_allow_html=True,
                 )
 
-        disp = _add_kelly(
-            disp, float(bankroll), float(kelly_pct), _usable_live_odds_by_pp
-        )
+        if _ui_contract.show_stakes:
+            disp = _add_kelly(
+                disp, float(bankroll), float(kelly_pct), _usable_live_odds_by_pp
+            )
         has_live_odds = bool(_live_overlay and _live_overlay.available)
-        has_kelly = bankroll > 0
+        has_kelly = _ui_contract.show_stakes and bankroll > 0
 
         if has_live_odds:
             _snap_ts_board = _live_overlay.snapshot_timestamp or "unknown"
@@ -1429,6 +1593,7 @@ with tab1:
             "rank", "horse_name", "post_position",
             "morning_line_odds", "win_probability",
             "fair_odds", "value_score", "bet_tag",
+            "market_implied_prob",
             "pace_fit_score", "form_score", "surface_dist_fit",
             "confidence_flag", "trainer", "jockey",
         ]
@@ -1449,6 +1614,7 @@ with tab1:
         tbl["Win%"] = (tbl["win_probability"] * 100).round(2)
         tbl["ML"]   = tbl["morning_line_odds"].apply(lambda x: f"{x:.0f}-1")
         tbl["Edge"] = tbl["value_score"].apply(_edge_str)
+        tbl["ML-Implied %"] = (tbl["market_implied_prob"] * 100).round(2)
 
         display_cols: dict = {
             "rank":            "Rank",
@@ -1456,16 +1622,21 @@ with tab1:
             "post_position":   "Post",
             "trainer":         "Trainer",
             "jockey":          "Jockey",
-            "ML":              "ML",
+            "ML":              "Morning Line",
             "Win%":            "Win %",
-            "fair_odds":       "Fair Odds",
-            "Edge":            "Edge",
-            "Tag":             "Tag",
             "Conf":            "Conf",
             "pace_fit_score":  "Pace Fit",
             "form_score":      "Form",
             "surface_dist_fit":"SuDist",
         }
+        if _ui_contract.show_morning_line_reference:
+            display_cols["ML-Implied %"] = "ML-Implied %"
+        if _ui_contract.show_fair_odds:
+            display_cols["fair_odds"] = "Fair Odds"
+        if _ui_contract.show_edge:
+            display_cols["Edge"] = "Edge"
+        if _ui_contract.show_bet_tags:
+            display_cols["Tag"] = "Tag"
         if chaos_on and "chaos_win_prob" in tbl.columns:
             tbl["Chaos%"] = (tbl["chaos_win_prob"] * 100).round(2)
             display_cols["Chaos%"] = "Chaos%"
@@ -1497,6 +1668,7 @@ with tab1:
             hide_index=True,
             column_config={
                 "Win %":     st.column_config.NumberColumn("Win %",     format="%.2f"),
+                "ML-Implied %": st.column_config.NumberColumn("ML-Implied %", format="%.2f"),
                 "Chaos%":    st.column_config.NumberColumn("Chaos%",    format="%.2f"),
                 "Fair Odds": st.column_config.NumberColumn("Fair Odds", format="%.1f"),
                 "Pace Fit":  st.column_config.NumberColumn("Pace Fit",  format="%.3f"),
@@ -1547,7 +1719,10 @@ with tab1:
             )
 
         # ── Win probability bar chart ──────────────────────────────────────────
-        st.subheader("Win Probability vs Market")
+        st.subheader(
+            "Win Probability vs Live Market"
+            if has_live_odds else "Forecast vs Morning-Line Implied Probability"
+        )
         chart_df = disp.sort_values("win_probability", ascending=True).copy()
         chart_df["win_pct"] = chart_df["win_probability"] * 100
 
@@ -1556,13 +1731,16 @@ with tab1:
             mkt_series_label = "Live Market %"
         else:
             chart_df["market_pct"] = chart_df["market_implied_prob"] * 100
-            mkt_series_label = "Market % (ML)"
+            mkt_series_label = "Morning-Line Implied %"
 
         fig = go.Figure()
-        bar_colors = [
-            "#3fb950" if t == "bet" else "#f85149" if t == "underlay" else "#4facfe"
-            for t in chart_df["bet_tag"]
-        ]
+        bar_colors = (
+            [
+                "#3fb950" if t == "bet" else "#f85149" if t == "underlay" else "#4facfe"
+                for t in chart_df["bet_tag"]
+            ]
+            if _ui_contract.show_bet_tags else "#4facfe"
+        )
         fig.add_trace(go.Bar(
             y=chart_df["horse_name"], x=chart_df["win_pct"],
             name="Model Win%", orientation="h",
@@ -1653,7 +1831,12 @@ with tab1:
 # ── TAB 2: Entry Details ───────────────────────────────────────────────────────
 with tab2:
     if board_df is None:
-        st.info("No score run for this race yet.")
+        if _run_mode == RunMode.MARKET_BASELINE_ONLY:
+            st.info("Morning-line baseline only; no model score exists for this race.")
+        elif _run_mode == RunMode.BLOCKED:
+            st.info("Scoring is blocked for this race.")
+        else:
+            st.info("No score run for this race yet.")
         if active_card_id:
             _ent_df = load_entries(int(active_card_id))
             if not _ent_df.empty:
@@ -1663,11 +1846,12 @@ with tab2:
                 st.warning(
                     "No entries found. Use Market Intake to add runners."
                 )
-        st.markdown(
-            '<div class="info-banner">Use the <strong>Race Board</strong> tab '
-            'to build features and score this race.</div>',
-            unsafe_allow_html=True,
-        )
+        if _ui_contract.scoring_controls_enabled:
+            st.markdown(
+                '<div class="info-banner">Use the <strong>Race Board</strong> tab '
+                'to build features and score this race.</div>',
+                unsafe_allow_html=True,
+            )
     else:
         options = [
             f"{int(r['rank'])}. {r['horse_name']} (Post {int(r['post_position'])})"
@@ -1691,7 +1875,10 @@ with tab2:
         _fb_stat_row = _fb_horse_stats.iloc[0] if not _fb_horse_stats.empty else None
 
         # ── Horse card ─────────────────────────────────────────────────────────
-        col_tag  = TAG_BADGE.get(horse["bet_tag"], horse["bet_tag"])
+        col_tag = (
+            TAG_BADGE.get(horse["bet_tag"], horse["bet_tag"])
+            if _ui_contract.show_bet_tags else ""
+        )
         col_conf = CONF_BADGE.get(_conf_label(horse["confidence_flag"]), "")
 
         st.markdown(
@@ -1700,15 +1887,18 @@ with tab2:
             unsafe_allow_html=True,
         )
 
-        m1, m2, m3, m4, m5 = st.columns(5)
+        _detail_cols = st.columns(5 if _ui_contract.show_edge else 4)
         _live_mkt = horse.get("live_market_prob") if has_live_odds else None
         _mkt_prob = float(_live_mkt) if pd.notna(_live_mkt) else float(horse["market_implied_prob"])
-        _mkt_label = "Live Mkt %" if pd.notna(_live_mkt) else "Market % (ML)"
-        m1.metric("Win %",      f"{horse['win_probability']*100:.1f}%")
-        m2.metric("Fair Odds",  f"{horse['fair_odds']:.1f}-1")
-        m3.metric("Model Edge", _edge_str(horse["value_score"]))
-        m4.metric("ML Odds",    f"{horse['morning_line_odds']:.0f}-1")
-        m5.metric(_mkt_label,   f"{_mkt_prob*100:.1f}%")
+        _mkt_label = "Live Mkt %" if pd.notna(_live_mkt) else "ML-Implied %"
+        _detail_cols[0].metric("Win %", f"{horse['win_probability']*100:.1f}%")
+        _detail_cols[1].metric("Fair Odds", f"{horse['fair_odds']:.1f}-1")
+        _offset = 2
+        if _ui_contract.show_edge:
+            _detail_cols[2].metric("Model Edge", _edge_str(horse["value_score"]))
+            _offset = 3
+        _detail_cols[_offset].metric("Morning Line", f"{horse['morning_line_odds']:.0f}-1")
+        _detail_cols[_offset + 1].metric(_mkt_label, f"{_mkt_prob*100:.1f}%")
 
         st.divider()
 
@@ -2401,10 +2591,39 @@ with tab5:
     )
 
     if _pdf5_file is not None:
-        with st.spinner("Extracting race data from PDF…"):
-            _pr5 = parse_race_pdf(_pdf5_file.getvalue())
+        _pdf5_bytes = _pdf5_file.getvalue()
+        _pdf5_sha = hashlib.sha256(_pdf5_bytes).hexdigest()
+        _cached_upload = st.session_state.get("_pdf5_parse_cache") or {}
+        if _cached_upload.get("sha256") == _pdf5_sha:
+            _pr5 = _cached_upload["result"]
+        else:
+            with st.spinner("Extracting and validating race data from PDF…"):
+                _generic_pr5 = parse_race_pdf(_pdf5_bytes)
+                if _generic_pr5.get("is_1stbet"):
+                    _firstbet_run = ingest_firstbet_pdf(
+                        _pdf5_bytes,
+                        filename=_pdf5_file.name,
+                        runs_root=ROOT / "data" / "runs",
+                    )
+                    _pr5 = to_legacy_race_result(
+                        _firstbet_run["payload"], _firstbet_run["feature_audit"]
+                    )
+                    _pr5.update({
+                        "normalized_payload": _firstbet_run["payload"],
+                        "feature_audit": _firstbet_run["feature_audit"],
+                        "ingest_run_id": _firstbet_run["run_id"],
+                        "artifact_paths": _firstbet_run["paths"],
+                        "raw_text": _generic_pr5.get("raw_text"),
+                        "runners_primary": _generic_pr5.get("runners_primary") or [],
+                        "runners_fallback": _generic_pr5.get("runners_fallback") or [],
+                    })
+                else:
+                    _pr5 = _generic_pr5
+            st.session_state["_pdf5_parse_cache"] = {
+                "sha256": _pdf5_sha, "result": _pr5,
+            }
 
-        if not _pr5["ok"]:
+        if not _pr5["ok"] and not _pr5.get("normalized_payload"):
             st.markdown(
                 f'<div class="warn-banner">⚠ PDF parse failed: {_pr5["error"]}</div>',
                 unsafe_allow_html=True,
@@ -2412,6 +2631,18 @@ with tab5:
         else:
             _p5_runners      = _pr5.get("runners") or []
             _p5_runner_count = len(_p5_runners)
+
+            if _pr5.get("run_mode") == RunMode.BLOCKED.value:
+                st.error(
+                    "SCORING BLOCKED — "
+                    + (_pr5.get("error") or "The upload failed data-quality validation.")
+                )
+            elif _pr5.get("run_mode") == RunMode.MARKET_BASELINE_ONLY.value:
+                st.warning("MARKET BASELINE ONLY — morning lines parsed, no PP history attached.")
+            elif _pr5.get("run_mode") == RunMode.PP_PARSED_FEATURES_PENDING.value:
+                st.info("PPs parsed — create/re-sync the card, then build and verify features.")
+            elif _pr5.get("run_mode") == RunMode.MODEL_READY_LIMITED.value:
+                st.warning("LIMITED-SOURCE FORECAST eligible after race-card creation.")
 
             if _pr5["warnings"]:
                 with st.expander(
@@ -2461,6 +2692,8 @@ with tab5:
                 st.caption(f"runners (canonical): {len(_pr5.get('runners') or [])}")
                 st.caption(f"runners_primary: {len(_pr5.get('runners_primary') or [])}")
                 st.caption(f"runners_fallback: {len(_pr5.get('runners_fallback') or [])}")
+                if _pr5.get("feature_audit"):
+                    st.json(_pr5["feature_audit"])
 
             # ── Track code resolution & override ─────────────────────────────
             _p5_parsed_code   = (_pr5.get("track_code") or "").strip().upper()
@@ -2517,6 +2750,8 @@ with tab5:
                 _p5_missing.append("race number")
             if not _p5_runners:
                 _p5_missing.append("runners (0 found)")
+            if _pr5.get("run_mode") == RunMode.BLOCKED.value:
+                _p5_missing.append("data-quality validation")
             _p5_can_create = len(_p5_missing) == 0
 
             if _p5_missing:
@@ -2545,7 +2780,10 @@ with tab5:
                         distance_yards=_p5_dist_yd,
                         surface=_rcb_norm_surface(_pr5.get("surface") or ""),
                         stakes_name=_pr5.get("race_type") or None,
+                        race_class=_pr5.get("race_type") or None,
                         purse=_pr5.get("purse_usd") or None,
+                        conditions=_pr5.get("going") or None,
+                        field_size=_pr5.get("field_size") or None,
                     )
                     st.success(
                         f"{'Updated' if _p5_exist_cid else 'Created'} race card "
@@ -2556,12 +2794,15 @@ with tab5:
                     # ── 1/ST BET enrichment ────────────────────────────────
                     if _pr5.get("is_1stbet") and _pr5.get("raw_text"):
                         with st.spinner("Enriching entries with PP data…"):
-                            _p5_enriched = enrich_runners_1stbet(
-                                _pr5["raw_text"],
-                                _p5_runners,
-                                race_date=_pr5["race_date"],
-                                race_distance_yards=_p5_dist_yd or 1760,
-                            )
+                            if _pr5.get("normalized_payload"):
+                                _p5_enriched = _p5_runners
+                            else:
+                                _p5_enriched = enrich_runners_1stbet(
+                                    _pr5["raw_text"],
+                                    _p5_runners,
+                                    race_date=_pr5["race_date"],
+                                    race_distance_yards=_p5_dist_yd or 1760,
+                                )
                             _p5_er = enrich_entries_from_1stbet(
                                 _conn5, _p5_cid, _p5_enriched,
                                 race_date=_pr5["race_date"],
@@ -2577,6 +2818,12 @@ with tab5:
                             st.warning("1/ST BET enrichment encountered errors.")
                         for _p5ew in (_p5_er.get("warnings") or []):
                             st.caption(_p5ew)
+                    if _pr5.get("ingest_run_id"):
+                        bind_run_to_card(
+                            _pr5["ingest_run_id"],
+                            int(_p5_cid),
+                            runs_root=ROOT / "data" / "runs",
+                        )
                     st.session_state["active_card_id"] = _p5_cid
                     st.cache_data.clear()
                     st.rerun()

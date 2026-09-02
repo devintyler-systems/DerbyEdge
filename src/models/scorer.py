@@ -62,6 +62,16 @@ from src.models.policy import (
     normalize_surface as _policy_norm_surface,
     normalize_dist_category as _policy_norm_dist,
 )
+from src.ingest.run_state import (
+    RunMode,
+    resolve_mode_with_feature_checks,
+)
+from src.services.feature_state import verify_feature_frame
+from src.services.run_mode import (
+    ScoringBlockedError,
+    get_card_run_state,
+    quality_with_verified_features,
+)
 
 ROOT       = Path(__file__).resolve().parents[2]
 OUTPUT_DIR = ROOT / "output"
@@ -928,6 +938,24 @@ def score_race(card_id: Optional[int] = None) -> pd.DataFrame:
         conn.close()
         raise RuntimeError("No Kentucky Derby card found — run ingest first.")
 
+    # Reject source-invalid and baseline-only cards immediately. A pending PP
+    # card is allowed to reach feature loading so the exact constructed frame
+    # can be verified, but never a model call.
+    try:
+        _pre_feature_state = get_card_run_state(
+            conn,
+            card_id,
+            runs_root=Path(__file__).resolve().parents[2] / "data" / "runs",
+        )
+        if _pre_feature_state.mode in (RunMode.BLOCKED, RunMode.MARKET_BASELINE_ONLY):
+            raise ScoringBlockedError(
+                f"SCORING BLOCKED [{_pre_feature_state.mode.value}]: "
+                + ("; ".join(_pre_feature_state.reasons) or "Data-quality gate rejected the card.")
+            )
+    except Exception:
+        conn.close()
+        raise
+
     # ── Load data ──────────────────────────────────────────────────────────
     entries_df = pd.read_sql(
         "SELECT * FROM v_entries_live WHERE card_id=? ORDER BY post_position",
@@ -992,6 +1020,43 @@ def score_race(card_id: Optional[int] = None) -> pd.DataFrame:
     derby_active = is_derby_context(conn, card_id)
     print(f"  [scorer]   card_id={card_id}  race_type={race_type_key}  "
           f"entries={len(feat_df)}  derby_override={derby_active}")
+
+    # Final product-state gate. This is intentionally after feature
+    # construction/loading and immediately before every model predict path.
+    _active_config = (
+        DERBY_TRAIN_CONFIG
+        if derby_active else TRAIN_CONFIGS.get(race_type_key, TRAIN_CONFIGS["dirt_route"])
+    )
+    _feature_verification = verify_feature_frame(
+        feat_df,
+        _active_config,
+        expected_entries=(
+            _pre_feature_state.quality.entries_parsed
+            if _pre_feature_state.quality else len(entries_df)
+        ),
+        require_pp_backed_features=bool(
+            _pre_feature_state.audit
+            and _pre_feature_state.audit.get("source_provider") == "1stbet"
+        ),
+    )
+    _effective_quality = quality_with_verified_features(
+        _pre_feature_state.quality, _feature_verification
+    ) if _pre_feature_state.quality else None
+    if _effective_quality is None:
+        conn.close()
+        raise ScoringBlockedError("SCORING BLOCKED: no DataQuality could be resolved.")
+    _effective_mode, _effective_reasons = resolve_mode_with_feature_checks(
+        _effective_quality, _feature_verification.core_rows
+    )
+    _effective_reasons = list(dict.fromkeys(
+        _effective_reasons + list(_feature_verification.warnings)
+    ))
+    if _effective_mode not in (RunMode.MODEL_READY_LIMITED, RunMode.MODEL_READY):
+        conn.close()
+        raise ScoringBlockedError(
+            f"SCORING BLOCKED [{_effective_mode.value}]: "
+            + ("; ".join(_effective_reasons) or "Feature verification failed.")
+        )
 
     # ── Build model ────────────────────────────────────────────────────────
     if derby_active:
