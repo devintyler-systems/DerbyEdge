@@ -65,6 +65,12 @@ def ensure_score_runs_columns(conn: sqlite3.Connection) -> None:
         _add_col_if_missing(conn, "score_runs", "chaos_intensity",    "REAL", cols),
         _add_col_if_missing(conn, "score_runs", "field_entropy_score", "REAL", cols),
         _add_col_if_missing(conn, "score_runs", "quality_tier",        "TEXT", cols),
+        _add_col_if_missing(conn, "score_runs", "effective_run_mode",  "TEXT", cols),
+        _add_col_if_missing(conn, "score_runs", "model_collapse_status", "TEXT", cols),
+        _add_col_if_missing(conn, "score_runs", "max_abs_model_ml_delta", "REAL", cols),
+        _add_col_if_missing(conn, "score_runs", "mean_abs_model_ml_delta", "REAL", cols),
+        _add_col_if_missing(conn, "score_runs", "displayed_model_assigned_from_market",
+                            "INTEGER NOT NULL DEFAULT 0", cols),
     ])
     if changed:
         conn.commit()
@@ -97,6 +103,13 @@ def ensure_entry_scores_columns(conn: sqlite3.Connection) -> None:
         ("confidence_score",    "REAL"),
         ("confidence_bucket",   "TEXT"),
         ("confidence_reasons",  "TEXT"),
+        # ── probability provenance / market-independence rollout ──
+        ("p_ml_implied",        "REAL"),
+        ("p_signal_pre_market", "REAL"),
+        ("p_model_pre_market",  "REAL"),
+        ("p_market_live",       "REAL"),
+        ("p_model_blended",     "REAL"),
+        ("edge_vs_live_market", "REAL"),
     ]
 
     changed = False

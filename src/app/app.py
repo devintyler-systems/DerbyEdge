@@ -102,6 +102,7 @@ from src.app.board_state import (
     load_run_index_for_card,
     select_active_run_id,
     race_board_contract,
+    effective_board_mode,
     source_feature_inventory,
 )
 
@@ -224,6 +225,9 @@ def load_board(
                    es.fair_odds, es.value_score, es.bet_tag,
                    es.pace_fit_score, es.form_score, es.surface_dist_fit,
                    es.market_implied_prob,
+                   es.p_ml_implied, es.p_signal_pre_market,
+                   es.p_model_pre_market, es.p_market_live,
+                   es.p_model_blended, es.edge_vs_live_market,
                    es.confidence_flag, es.missing_data_flag,
                    {_conf_fragment}
                    vel.trainer_id, vel.jockey_id,
@@ -254,7 +258,10 @@ def load_board(
                    sr.run_id, sr.run_timestamp, sr.model_type,
                    sr.card_id, mr.artifact_path,
                    sr.derby_override_active,
-                   COALESCE(sr.quality_tier, 'seed_only') AS quality_tier
+                   COALESCE(sr.quality_tier, 'seed_only') AS quality_tier,
+                   sr.effective_run_mode, sr.model_collapse_status,
+                   sr.max_abs_model_ml_delta, sr.mean_abs_model_ml_delta,
+                   sr.displayed_model_assigned_from_market
             FROM score_runs sr
             LEFT JOIN model_registry mr ON sr.model_id = mr.model_id
             WHERE sr.run_id = ?
@@ -1164,14 +1171,17 @@ active_card_id = st.session_state["active_card_id"]
 board_df, meta = (
     load_board(selected_run_id, active_card_id) if selected_run_id else (None, None)
 )
+_run_mode = effective_board_mode(_run_mode, board_df, meta)
 if _run_mode in (
     RunMode.BLOCKED,
     RunMode.MARKET_BASELINE_ONLY,
+    RunMode.MARKET_ANCHORED_NOT_ACTIONABLE,
     RunMode.PP_PARSED_FEATURES_PENDING,
 ):
     # A stale historical score run must not leak model artifacts into a mode
     # that explicitly forbids a forecast.
-    board_df, meta = None, None
+    if _run_mode != RunMode.MARKET_ANCHORED_NOT_ACTIONABLE:
+        board_df, meta = None, None
 feat_df  = load_features(active_card_id) if active_card_id else pd.DataFrame()
 catalog  = load_catalog()
 artifact = load_artifact()
@@ -1241,6 +1251,21 @@ if active_card_id:
             "The source supplied morning lines but no attachable past-performance histories. "
             "Displayed values are normalized morning-line implied probabilities. "
             "Fair odds, edge, wager tags, and stake sizing are disabled."
+        )
+    elif _run_mode == RunMode.MARKET_ANCHORED_NOT_ACTIONABLE:
+        _max_delta = (meta or {}).get("max_abs_model_ml_delta")
+        _mean_delta = (meta or {}).get("mean_abs_model_ml_delta")
+        _delta_text = (
+            f"Measured model-vs-ML deltas — max: {_max_delta:.6f} · mean: {_mean_delta:.6f}"
+            if _max_delta is not None and _mean_delta is not None
+            else "Measured model-vs-ML deltas are unavailable for this legacy score run."
+        )
+        st.warning(
+            "⚠ MARKET-ANCHORED MODEL — NOT ACTIONABLE\n\n"
+            "The pre-market model vector is indistinguishable from the morning-line prior, "
+            "so it is not presented as an independent DerbyEdge forecast. "
+            "Fair odds, edge, wager tags, stake sizing, deployment, and the dual-series chart are disabled.\n\n"
+            + _delta_text
         )
     elif _run_mode == RunMode.PP_PARSED_FEATURES_PENDING:
         st.info(
@@ -1326,14 +1351,28 @@ with tab1:
             st.dataframe(_blocked_show, use_container_width=True, hide_index=True)
         st.caption("Race metadata and diagnostics are available above. No scoring artifacts are rendered.")
 
-    elif _run_mode == RunMode.MARKET_BASELINE_ONLY:
+    elif _run_mode in (RunMode.MARKET_BASELINE_ONLY, RunMode.MARKET_ANCHORED_NOT_ACTIONABLE):
         st.subheader("Morning-Line Baseline")
-        _baseline = load_entries(int(active_card_id)) if active_card_id else pd.DataFrame()
+        _baseline = (
+            board_df[["horse_name", "post_position", "trainer", "jockey", "morning_line_odds", "p_ml_implied"]]
+            .rename(columns={
+                "horse_name": "Horse", "post_position": "Post", "trainer": "Trainer",
+                "jockey": "Jockey", "morning_line_odds": "ML Odds",
+                "p_ml_implied": "Persisted ML-Implied Probability",
+            })
+            if _run_mode == RunMode.MARKET_ANCHORED_NOT_ACTIONABLE and board_df is not None
+            else load_entries(int(active_card_id)) if active_card_id else pd.DataFrame()
+        )
         if _baseline.empty:
             st.info("No morning-line entries are available.")
         else:
-            _raw_ml = 1.0 / (pd.to_numeric(_baseline["ML Odds"], errors="coerce") + 1.0)
-            _baseline["ML-Implied Probability"] = 100 * _raw_ml / _raw_ml.sum()
+            if "Persisted ML-Implied Probability" in _baseline:
+                _baseline["ML-Implied Probability"] = 100 * pd.to_numeric(
+                    _baseline["Persisted ML-Implied Probability"], errors="coerce"
+                )
+            else:
+                _raw_ml = 1.0 / (pd.to_numeric(_baseline["ML Odds"], errors="coerce") + 1.0)
+                _baseline["ML-Implied Probability"] = 100 * _raw_ml / _raw_ml.sum()
             _baseline["Morning Line"] = _baseline["ML Odds"].apply(
                 lambda value: f"{value:g}-1" if pd.notna(value) else "—"
             )
@@ -1830,9 +1869,11 @@ with tab1:
 
 # ── TAB 2: Entry Details ───────────────────────────────────────────────────────
 with tab2:
-    if board_df is None:
+    if board_df is None or _run_mode == RunMode.MARKET_ANCHORED_NOT_ACTIONABLE:
         if _run_mode == RunMode.MARKET_BASELINE_ONLY:
             st.info("Morning-line baseline only; no model score exists for this race.")
+        elif _run_mode == RunMode.MARKET_ANCHORED_NOT_ACTIONABLE:
+            st.info("Market-anchored model output is not actionable; entry-level forecast artifacts are hidden.")
         elif _run_mode == RunMode.BLOCKED:
             st.info("Scoring is blocked for this race.")
         else:

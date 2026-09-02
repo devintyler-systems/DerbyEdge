@@ -13,6 +13,10 @@ import numpy as np
 import pandas as pd
 
 from src.ingest.run_state import RunMode
+from src.services.model_independence import (
+    MODEL_COLLAPSED_TO_ML_PRIOR,
+    detect_market_prior_collapse,
+)
 
 
 LIVE_ODDS_UNAVAILABLE = (
@@ -52,19 +56,52 @@ def race_board_contract(mode: RunMode, *, has_live_odds: bool = False) -> RaceBo
             False, True, False, False, False, False, False, False,
             ("Morning-Line Implied Win Probability",),
         )
+    if mode == RunMode.MARKET_ANCHORED_NOT_ACTIONABLE:
+        return RaceBoardContract(
+            False, True, False, False, False, False, False, False,
+            ("Morning-Line Implied Win Probability",),
+        )
     if mode == RunMode.PP_PARSED_FEATURES_PENDING:
         return RaceBoardContract(
             False, False, False, False, False, False, False, False, ()
         )
     if mode == RunMode.MODEL_READY_LIMITED:
         return RaceBoardContract(
-            True, True, has_live_odds, True, False, False, False, True,
+            True, True, has_live_odds, False, False, False, False, True,
             ("Model Win %", "Morning-Line Implied %"),
         )
     return RaceBoardContract(
-        True, True, has_live_odds, True, has_live_odds, has_live_odds,
+        True, True, has_live_odds, has_live_odds, has_live_odds, has_live_odds,
         has_live_odds, True,
         ("Model Win %", "Live Market %" if has_live_odds else "Morning-Line Implied %"),
+    )
+
+
+def effective_board_mode(
+    source_mode: RunMode,
+    board: pd.DataFrame | None,
+    run_meta: Mapping[str, object] | None,
+) -> RunMode:
+    """Apply a persisted or recomputed market-prior collapse state.
+
+    Old score runs have no provenance fields, so they fail closed rather than
+    being rendered as an independently produced forecast.
+    """
+    if source_mode not in (RunMode.MODEL_READY_LIMITED, RunMode.MODEL_READY):
+        return source_mode
+    if (run_meta or {}).get("model_collapse_status") == MODEL_COLLAPSED_TO_ML_PRIOR:
+        return RunMode.MARKET_ANCHORED_NOT_ACTIONABLE
+    if board is None or board.empty or "p_model_pre_market" not in board:
+        return RunMode.MARKET_ANCHORED_NOT_ACTIONABLE
+    model = pd.to_numeric(board["p_model_pre_market"], errors="coerce").to_numpy()
+    market_col = "p_ml_implied" if "p_ml_implied" in board else "market_implied_prob"
+    if market_col not in board:
+        return RunMode.MARKET_ANCHORED_NOT_ACTIONABLE
+    market = pd.to_numeric(board[market_col], errors="coerce").to_numpy()
+    collapse = detect_market_prior_collapse(model, market)
+    return (
+        RunMode.MARKET_ANCHORED_NOT_ACTIONABLE
+        if collapse.collapsed else source_mode
     )
 
 
@@ -184,7 +221,11 @@ def apply_live_odds_overlay(
         if quote.get("book_id"):
             sources.add(str(quote["book_id"]))
 
-    model_prob = pd.to_numeric(board["win_probability"], errors="coerce")
+    model_column = (
+        "p_model_pre_market"
+        if "p_model_pre_market" in board.columns else "win_probability"
+    )
+    model_prob = pd.to_numeric(board[model_column], errors="coerce")
     if model_prob.isna().any() or not np.isfinite(model_prob.to_numpy()).all():
         return _unavailable(board, "invalid persisted model probabilities")
     raw_market = 1.0 / np.asarray(decimals, dtype=float)
@@ -198,7 +239,9 @@ def apply_live_odds_overlay(
             out[f"score_run_{column}"] = out[column]
     out["live_decimal_odds"] = decimals
     out["live_market_prob"] = normalized_market
+    out["p_market_live"] = normalized_market
     out["market_implied_prob"] = normalized_market
+    out["edge_vs_live_market"] = edge
     out["value_score"] = edge
     tags = np.where(edge >= bet_edge_threshold, "bet",
                     np.where(edge < underlay_edge_threshold, "underlay", "neutral"))

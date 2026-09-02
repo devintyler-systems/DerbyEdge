@@ -94,6 +94,14 @@ class TestEnsureEntryScoresColumns:
         ensure_entry_scores_columns(conn)
         assert "low_conf_bet_block" in _col_names(conn, "entry_scores")
 
+    def test_adds_probability_provenance_columns(self):
+        conn = _old_entry_scores_conn()
+        ensure_entry_scores_columns(conn)
+        assert {
+            "p_ml_implied", "p_signal_pre_market", "p_model_pre_market",
+            "p_market_live", "p_model_blended", "edge_vs_live_market",
+        }.issubset(_col_names(conn, "entry_scores"))
+
     def test_idempotent_no_error_on_second_call(self):
         conn = _old_entry_scores_conn()
         ensure_entry_scores_columns(conn)
@@ -184,6 +192,15 @@ class TestEnsureScoreRunsColumns:
         conn = _old_score_runs_conn()
         ensure_score_runs_columns(conn)
         assert "quality_tier" in _col_names(conn, "score_runs")
+
+    def test_adds_market_prior_collapse_audit_columns(self):
+        conn = _old_score_runs_conn()
+        ensure_score_runs_columns(conn)
+        assert {
+            "effective_run_mode", "model_collapse_status",
+            "max_abs_model_ml_delta", "mean_abs_model_ml_delta",
+            "displayed_model_assigned_from_market",
+        }.issubset(_col_names(conn, "score_runs"))
 
     def test_idempotent(self):
         conn = _old_score_runs_conn()

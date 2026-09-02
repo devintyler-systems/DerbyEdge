@@ -269,6 +269,12 @@ CREATE TABLE IF NOT EXISTS score_runs (
     chaos_active          INTEGER NOT NULL DEFAULT 0 CHECK(chaos_active IN (0,1)),
     chaos_intensity       REAL,
     field_entropy_score   REAL,
+    effective_run_mode    TEXT,
+    model_collapse_status TEXT,
+    max_abs_model_ml_delta REAL,
+    mean_abs_model_ml_delta REAL,
+    displayed_model_assigned_from_market INTEGER NOT NULL DEFAULT 0
+                              CHECK(displayed_model_assigned_from_market IN (0,1)),
     created_at            TEXT    NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
 );
 
@@ -302,6 +308,13 @@ CREATE TABLE IF NOT EXISTS entry_scores (
     surface_dist_fit    REAL,
     value_score         REAL,
     market_implied_prob REAL,
+    -- Explicit probability provenance; only pre-market model p is forecast-eligible.
+    p_ml_implied        REAL,
+    p_signal_pre_market REAL,
+    p_model_pre_market  REAL,
+    p_market_live       REAL,
+    p_model_blended     REAL,
+    edge_vs_live_market REAL,
     -- model_edge: positive = model likes horse more than market
     model_edge          REAL
                         GENERATED ALWAYS AS (

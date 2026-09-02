@@ -54,6 +54,7 @@ from src.utils.db import (
     get_connection,
     get_derby_card_id,
     ensure_entry_scores_columns,
+    ensure_score_runs_columns,
 )
 from src.models.policy import (
     bucket_field_size,
@@ -71,6 +72,11 @@ from src.services.run_mode import (
     ScoringBlockedError,
     get_card_run_state,
     quality_with_verified_features,
+)
+from src.services.odds_intake import load_live_odds_by_pp
+from src.services.model_independence import (
+    detect_market_prior_collapse,
+    pre_market_signal_probabilities,
 )
 
 ROOT       = Path(__file__).resolve().parents[2]
@@ -549,6 +555,37 @@ def _bet_tag(edge: float, bet_threshold: float, underlay_threshold: float) -> st
     if edge < underlay_threshold:
         return "underlay"
     return "neutral"
+
+
+def _complete_live_market_probs(
+    conn: sqlite3.Connection,
+    card_id: int,
+    entries_df: pd.DataFrame,
+) -> Optional[np.ndarray]:
+    """Return a normalized live-market vector only for a complete exact snapshot."""
+    live_by_pp = load_live_odds_by_pp(conn, card_id)
+    try:
+        posts = [int(value) for value in entries_df["post_position"]]
+        entry_ids = [int(value) for value in entries_df["entry_id"]]
+    except (KeyError, TypeError, ValueError):
+        return None
+    if not live_by_pp or set(live_by_pp) != set(posts):
+        return None
+
+    decimals: list[float] = []
+    for post, entry_id in zip(posts, entry_ids):
+        quote = live_by_pp.get(post)
+        try:
+            quote_entry_id = int(quote["entry_id"])
+            decimal = float(quote["decimal_odds"])
+        except (KeyError, TypeError, ValueError):
+            return None
+        if quote_entry_id != entry_id or not np.isfinite(decimal) or decimal <= 1.0:
+            return None
+        decimals.append(decimal)
+    raw = 1.0 / np.asarray(decimals, dtype=float)
+    total = float(raw.sum())
+    return raw / total if total > 0 and np.isfinite(total) else None
 
 
 pass  # _model_confidence / _missing_flags / _compute_confidence_and_flags
@@ -1072,7 +1109,7 @@ def score_race(card_id: Optional[int] = None) -> pd.DataFrame:
         )
     config = artifact.config
 
-    # ── Sanitize win_probs — final gate before all downstream math ─────────
+    # ── Sanitize trained/blended probabilities for audit-only persistence ──
     _n_entries = len(feat_df)
     _n_nonfinite = int((~np.isfinite(win_probs)).sum())
     if _n_nonfinite or win_probs.sum() <= 0:
@@ -1105,7 +1142,7 @@ def score_race(card_id: Optional[int] = None) -> pd.DataFrame:
             race_type_key, dist_furlongs, surface,
         )
 
-    win_probs, _ml_loaded = _decide_served_probs(
+    blended_probs, _ml_loaded = _decide_served_probs(
         _serving_mode, derby_active, _heuristic_probs, _ml_win_probs
     )
     print(
@@ -1113,16 +1150,65 @@ def score_race(card_id: Optional[int] = None) -> pd.DataFrame:
         f"derby_override={derby_active}"
     )
 
+    # ── Independent pre-market forecast / collapse gate ───────────────────
+    # The trained/blended vector remains diagnostic only. Non-Derby display
+    # and action calculations use a signal built without ML/market features or
+    # market-target calibration.
+    if derby_active:
+        p_signal_pre_market = blended_probs.copy()
+        p_model_pre_market = blended_probs.copy()
+        _collapse = None
+    else:
+        p_signal_pre_market = pre_market_signal_probabilities(feat_df, config)
+        p_model_pre_market = p_signal_pre_market.copy()
+        _collapse = detect_market_prior_collapse(
+            p_model_pre_market, market_probs,
+            displayed_model_assigned_from_market=False,
+        )
+
+    _model_is_finite = bool(
+        len(p_model_pre_market)
+        and np.isfinite(p_model_pre_market).all()
+        and float(p_model_pre_market.sum()) > 0
+    )
+    analysis_probs = (
+        p_model_pre_market / p_model_pre_market.sum()
+        if _model_is_finite else np.full(_n_entries, 1.0 / _n_entries)
+    )
+    collapsed_to_ml = bool(_collapse and _collapse.collapsed)
+    effective_run_mode = (
+        RunMode.MARKET_ANCHORED_NOT_ACTIONABLE
+        if collapsed_to_ml else _effective_mode
+    )
+    if collapsed_to_ml:
+        print(
+            "  [scorer]   MODEL_COLLAPSED_TO_ML_PRIOR "
+            f"max_delta={_collapse.max_abs_delta} mean_delta={_collapse.mean_abs_delta}"
+        )
+
     # ── Derived scoring ────────────────────────────────────────────────────
-    fair_odds          = np.round(1.0 / np.maximum(win_probs, 1e-9) - 1.0, 2)
-    model_edge         = np.round(win_probs - market_probs, 4)
-    place_probs, show_probs = _place_show_probs(win_probs)
+    # Morning-line probability is never substituted for the live market.
+    p_market_live = _complete_live_market_probs(conn, card_id, entries_df)
+    if p_market_live is not None and not collapsed_to_ml:
+        edge_vs_live_market = analysis_probs - p_market_live
+        model_edge = np.round(edge_vs_live_market, 4)
+    else:
+        edge_vs_live_market = np.full(_n_entries, np.nan)
+        model_edge = np.full(_n_entries, np.nan)
+    fair_odds = (
+        np.round(1.0 / np.maximum(analysis_probs, 1e-9) - 1.0, 2)
+        if not collapsed_to_ml else np.full(_n_entries, np.nan)
+    )
+    place_probs, show_probs = _place_show_probs(analysis_probs)
 
     bet_thr  = config["bet_edge_threshold"]
     ul_thr   = config["underlay_edge_threshold"]
-    bet_tags = [_bet_tag(e, bet_thr, ul_thr) for e in model_edge]
+    bet_tags = [
+        _bet_tag(float(edge), bet_thr, ul_thr) if np.isfinite(edge) else None
+        for edge in model_edge
+    ]
     rank_arr = (
-        pd.to_numeric(pd.Series(win_probs), errors="coerce")
+        pd.to_numeric(pd.Series(analysis_probs), errors="coerce")
         .fillna(0.0)
         .rank(ascending=False, method="first")
         .astype(int)
@@ -1140,7 +1226,7 @@ def score_race(card_id: Optional[int] = None) -> pd.DataFrame:
         for f in g["features"]
     ]
     conf_df = compute_horse_confidence(
-        feat_df, entries_df, win_probs, market_probs,
+        feat_df, entries_df, analysis_probs, market_probs,
         model_feats, derby_override=derby_active,
     )
 
@@ -1166,16 +1252,16 @@ def score_race(card_id: Optional[int] = None) -> pd.DataFrame:
     # ── Chaos pipeline ────────────────────────────────────────────────────
     (chaos_scores, chaos_boosts, chaos_tiers, chaos_eligs,
      chaos_applied, chaos_intensity) = _chaos_outputs_for_run(
-        entries_df, feat_df, win_probs, form_arr, surf_dist_arr,
+        entries_df, feat_df, analysis_probs, form_arr, surf_dist_arr,
         derby_active=derby_active, chaos_index=_DERBY_DEFAULT_CHAOS_INDEX,
     )
-    field_entropy = float(-np.sum(win_probs * np.log(np.maximum(win_probs, 1e-9))))
+    field_entropy = float(-np.sum(analysis_probs * np.log(np.maximum(analysis_probs, 1e-9))))
     if chaos_applied:
         print(f"  [scorer]   chaos applied  intensity={chaos_intensity:.3f}  "
               f"entropy={field_entropy:.3f}")
 
     # ── Metrics ───────────────────────────────────────────────────────────
-    metrics = _compute_metrics(win_probs, market_probs, artifact)
+    metrics = _compute_metrics(analysis_probs, market_probs, artifact)
     metrics["score_ts"]          = score_ts
     metrics["bet_count"]         = sum(1 for t in final_bet_tags if t == "bet")
     metrics["blocked_bet_count"] = sum(low_conf_bet_block)
@@ -1188,6 +1274,7 @@ def score_race(card_id: Optional[int] = None) -> pd.DataFrame:
     # ── DB writes ──────────────────────────────────────────────────────────
     _ensure_chaos_columns(conn)
     _ensure_policy_columns(conn)
+    ensure_score_runs_columns(conn)
     ensure_entry_scores_columns(conn)
     run_id = str(uuid.uuid4())[:8]
 
@@ -1205,12 +1292,19 @@ def score_race(card_id: Optional[int] = None) -> pd.DataFrame:
         "INSERT INTO score_runs "
         "(run_id, card_id, model_id, model_type, derby_override_active, quality_tier, "
         " chaos_active, chaos_intensity, field_entropy_score,"
+        " effective_run_mode, model_collapse_status, max_abs_model_ml_delta,"
+        " mean_abs_model_ml_delta, displayed_model_assigned_from_market,"
         " policy_surface, policy_dist_category, policy_field_size_bucket,"
         " policy_tier_selected, policy_tier_reason,"
         " policy_chaos_selected, policy_chaos_reason) "
-        "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
         (run_id, card_id, model_id, artifact.model_type, int(derby_active), quality_tier,
          int(chaos_applied), round(chaos_intensity, 4), round(field_entropy, 4),
+         effective_run_mode.value,
+         _collapse.status if _collapse else None,
+         _collapse.max_abs_delta if _collapse else None,
+         _collapse.mean_abs_delta if _collapse else None,
+         0,
          _policy_surf_norm, _policy_dist_cat, policy_field_bucket,
          policy_tier, policy_tier_reason,
          int(policy_chaos_default), policy_chaos_reason),
@@ -1230,13 +1324,43 @@ def score_race(card_id: Optional[int] = None) -> pd.DataFrame:
             conf_reasons= str(cr["confidence_reasons"])
         else:
             conf_flag, conf_score, conf_bucket, conf_reasons = 0, 0.25, "LOW", "no feature data"
+        score_values = (
+            run_id, eid, erow["horse_name"], int(erow["post_position"]),
+            float(erow["morning_line_odds"]),
+            None if collapsed_to_ml else round(float(analysis_probs[i]), 6),
+            None if collapsed_to_ml else round(float(place_probs[i]), 6),
+            None if collapsed_to_ml else round(float(show_probs[i]), 6),
+            round(float(feat_df.iloc[i]["pace_fit_score"]) if feat_df.iloc[i]["pace_fit_score"] is not None else 0.0, 4),
+            round(float(form_arr[i]), 4),
+            round(float(surf_dist_arr[i]), 4),
+            round(float(model_edge[i]), 4) if np.isfinite(model_edge[i]) else None,
+            round(float(market_probs[i]), 6),
+            round(float(market_probs[i]), 6),
+            round(float(p_signal_pre_market[i]), 6) if np.isfinite(p_signal_pre_market[i]) else None,
+            round(float(p_model_pre_market[i]), 6) if np.isfinite(p_model_pre_market[i]) else None,
+            round(float(p_market_live[i]), 6) if p_market_live is not None else None,
+            round(float(blended_probs[i]), 6),
+            round(float(edge_vs_live_market[i]), 6) if np.isfinite(edge_vs_live_market[i]) else None,
+            final_bet_tags[i],
+            conf_flag, 1, int(low_conf_bet_block[i]), int(rank_arr[i]),
+            erow.get("trainer", ""), erow.get("jockey", ""),
+            round(float(chaos_scores[i]), 6) if chaos_applied else None,
+            round(float(chaos_boosts[i]), 6) if chaos_applied else None,
+            chaos_tiers[i] if chaos_applied else None, int(chaos_eligs[i]),
+            conf_score, conf_bucket, conf_reasons,
+            _policy_surf_norm, _policy_dist_cat, policy_field_bucket,
+            policy_tier, policy_tier_reason,
+            int(policy_chaos_default), policy_chaos_reason,
+        )
         conn.execute(
             """
             INSERT INTO entry_scores (
                 run_id, entry_id, horse_name, post_position,
                 morning_line_odds, win_probability, place_probability, show_probability,
                 pace_fit_score, form_score, surface_dist_fit, value_score,
-                market_implied_prob, bet_tag,
+                market_implied_prob, p_ml_implied, p_signal_pre_market,
+                p_model_pre_market, p_market_live, p_model_blended,
+                edge_vs_live_market, bet_tag,
                 confidence_flag, missing_data_flag, low_conf_bet_block, rank,
                 trainer_name, jockey_name,
                 chaos_score, chaos_boost, chaos_tier, chaos_eligible,
@@ -1244,37 +1368,8 @@ def score_race(card_id: Optional[int] = None) -> pd.DataFrame:
                 policy_surface, policy_dist_category, policy_field_size_bucket,
                 policy_tier_selected, policy_tier_reason,
                 policy_chaos_selected, policy_chaos_reason
-            ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
-            """,
-            (
-                run_id, eid, erow["horse_name"], int(erow["post_position"]),
-                float(erow["morning_line_odds"]),
-                round(float(win_probs[i]),    6),
-                round(float(place_probs[i]),  6),
-                round(float(show_probs[i]),   6),
-                round(float(feat_df.iloc[i]["pace_fit_score"]) if feat_df.iloc[i]["pace_fit_score"] is not None else 0.0, 4),
-                round(float(form_arr[i]),     4),
-                round(float(surf_dist_arr[i]), 4),
-                round(float(model_edge[i]),   4),
-                round(float(market_probs[i]), 6),
-                final_bet_tags[i],
-                conf_flag,
-                1,   # missing_data_flag=1 for all entries (PLACEHOLDERs are absent)
-                int(low_conf_bet_block[i]),
-                int(rank_arr[i]),
-                erow.get("trainer", ""),
-                erow.get("jockey", ""),
-                round(float(chaos_scores[i]), 6) if chaos_applied else None,
-                round(float(chaos_boosts[i]), 6) if chaos_applied else None,
-                chaos_tiers[i]                   if chaos_applied else None,
-                int(chaos_eligs[i]),
-                conf_score,
-                conf_bucket,
-                conf_reasons,
-                _policy_surf_norm, _policy_dist_cat, policy_field_bucket,
-                policy_tier, policy_tier_reason,
-                int(policy_chaos_default), policy_chaos_reason,
-            ),
+            ) VALUES (""" + ",".join("?" for _ in score_values) + ")",
+            score_values,
         )
 
     conn.commit()
@@ -1287,8 +1382,8 @@ def score_race(card_id: Optional[int] = None) -> pd.DataFrame:
         "dist_starts",
     ]].copy().reset_index(drop=True)
 
-    board["model_win_prob"]     = win_probs
-    board["model_win_prob_pct"] = np.round(win_probs * 100, 2)
+    board["model_win_prob"]     = np.nan if collapsed_to_ml else analysis_probs
+    board["model_win_prob_pct"] = np.round(board["model_win_prob"] * 100, 2)
     board["fair_odds"]          = fair_odds
     board["market_prob"]        = market_probs
     board["value_score"]        = model_edge
@@ -1344,6 +1439,10 @@ def score_race(card_id: Optional[int] = None) -> pd.DataFrame:
                 "model_name": artifact.model_name,
                 "model_family": artifact.config["model_family"],
                 "derby_override_active": derby_active,
+                "effective_run_mode": effective_run_mode.value,
+                "model_collapse_status": _collapse.status if _collapse else None,
+                "max_abs_model_ml_delta": _collapse.max_abs_delta if _collapse else None,
+                "mean_abs_model_ml_delta": _collapse.mean_abs_delta if _collapse else None,
                 "scored_at": score_ts,
             },
             indent=2,
@@ -1367,7 +1466,7 @@ def score_race(card_id: Optional[int] = None) -> pd.DataFrame:
             entries_df=entries_df,
             heuristic_probs=_heuristic_probs,
             ml_probs=_ml_win_probs,
-            served_probs=win_probs,
+            served_probs=blended_probs,
             ml_loaded_flag=_ml_loaded,
             mode=_serving_mode,
             model_version=artifact.version,
