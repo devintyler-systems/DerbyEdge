@@ -1,0 +1,42 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://derbyedge.local/schemas/model_manifest.schema.json",
+  "title": "DerbyEdge fitted model manifest",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "manifest_id", "asset_class", "model_id", "model_family", "target_definition",
+    "training_window", "training_data_manifest_ids", "feature_schema_version",
+    "feature_columns_sha256", "code_commit_sha", "training_started_at_utc",
+    "training_completed_at_utc", "evaluation_metrics", "calibration_summary",
+    "promotion_status", "artifact_sha256"
+  ],
+  "properties": {
+    "manifest_id": { "$ref": "#/$defs/immutableId" },
+    "asset_class": { "const": "fitted_model_artifact" },
+    "model_id": { "$ref": "#/$defs/immutableId" },
+    "model_family": { "$ref": "#/$defs/nonEmptyString" },
+    "target_definition": { "$ref": "#/$defs/nonEmptyString" },
+    "training_window": {
+      "type": "object", "additionalProperties": false,
+      "required": ["start_utc", "end_utc"],
+      "properties": { "start_utc": { "$ref": "#/$defs/utcTimestamp" }, "end_utc": { "$ref": "#/$defs/utcTimestamp" } }
+    },
+    "training_data_manifest_ids": { "type": "array", "minItems": 1, "items": { "$ref": "#/$defs/immutableId" }, "uniqueItems": true },
+    "feature_schema_version": { "$ref": "#/$defs/nonEmptyString" },
+    "feature_columns_sha256": { "$ref": "#/$defs/sha256" },
+    "code_commit_sha": { "type": "string", "pattern": "^[a-f0-9]{7,64}$" },
+    "training_started_at_utc": { "$ref": "#/$defs/utcTimestamp" },
+    "training_completed_at_utc": { "$ref": "#/$defs/utcTimestamp" },
+    "evaluation_metrics": { "type": "object", "minProperties": 1 },
+    "calibration_summary": { "type": "object", "minProperties": 1 },
+    "promotion_status": { "type": "string", "enum": ["candidate", "shadow", "approved", "rejected", "retired"] },
+    "artifact_sha256": { "$ref": "#/$defs/sha256" }
+  },
+  "$defs": {
+    "nonEmptyString": { "type": "string", "minLength": 1, "pattern": ".*\\S.*" },
+    "immutableId": { "type": "string", "minLength": 3, "maxLength": 128, "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$" },
+    "sha256": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
+    "utcTimestamp": { "type": "string", "format": "date-time", "pattern": "Z$" }
+  }
+}

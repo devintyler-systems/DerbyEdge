@@ -1,0 +1,52 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://derbyedge.local/schemas/raw_input_manifest.schema.json",
+  "title": "DerbyEdge raw input or curated seed manifest",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "manifest_id",
+    "asset_class",
+    "source_provider",
+    "source_url_or_reference",
+    "retrieved_at_utc",
+    "as_of_utc",
+    "license_or_terms_reference",
+    "file_sha256",
+    "file_size_bytes",
+    "schema_fingerprint",
+    "race_scope",
+    "ingestion_tool_version"
+  ],
+  "properties": {
+    "manifest_id": { "$ref": "#/$defs/immutableId" },
+    "asset_class": {
+      "type": "string",
+      "enum": ["raw_input_snapshot", "curated_seed_fixture"]
+    },
+    "source_provider": { "$ref": "#/$defs/nonEmptyString" },
+    "source_url_or_reference": { "$ref": "#/$defs/nonEmptyString" },
+    "retrieved_at_utc": { "$ref": "#/$defs/utcTimestamp" },
+    "as_of_utc": { "$ref": "#/$defs/utcTimestamp" },
+    "license_or_terms_reference": { "$ref": "#/$defs/nonEmptyString" },
+    "file_sha256": { "$ref": "#/$defs/sha256" },
+    "file_size_bytes": { "type": "integer", "minimum": 0 },
+    "schema_fingerprint": { "$ref": "#/$defs/sha256" },
+    "race_scope": { "type": "object", "minProperties": 1 },
+    "ingestion_tool_version": { "$ref": "#/$defs/nonEmptyString" },
+    "fixture_id": { "$ref": "#/$defs/immutableId" },
+    "fixture_schema_version": { "$ref": "#/$defs/nonEmptyString" }
+  },
+  "allOf": [
+    {
+      "if": { "properties": { "asset_class": { "const": "curated_seed_fixture" } } },
+      "then": { "required": ["fixture_id", "fixture_schema_version"] }
+    }
+  ],
+  "$defs": {
+    "nonEmptyString": { "type": "string", "minLength": 1, "pattern": ".*\\S.*" },
+    "immutableId": { "type": "string", "minLength": 3, "maxLength": 128, "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$" },
+    "sha256": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
+    "utcTimestamp": { "type": "string", "format": "date-time", "pattern": "Z$" }
+  }
+}

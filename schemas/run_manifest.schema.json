@@ -1,0 +1,33 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://derbyedge.local/schemas/run_manifest.schema.json",
+  "title": "DerbyEdge scored race run manifest",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "manifest_id", "asset_class", "run_id", "race_id", "decision_timestamp_utc",
+    "code_commit_sha", "model_id", "raw_input_manifest_ids", "feature_schema_version",
+    "odds_snapshot_timestamp_utc", "output_sha256s", "probability_sum", "bet_policy_version"
+  ],
+  "properties": {
+    "manifest_id": { "$ref": "#/$defs/immutableId" },
+    "asset_class": { "const": "scored_race_run" },
+    "run_id": { "$ref": "#/$defs/immutableId" },
+    "race_id": { "$ref": "#/$defs/immutableId" },
+    "decision_timestamp_utc": { "$ref": "#/$defs/utcTimestamp" },
+    "code_commit_sha": { "type": "string", "pattern": "^[a-f0-9]{7,64}$" },
+    "model_id": { "$ref": "#/$defs/immutableId" },
+    "raw_input_manifest_ids": { "type": "array", "minItems": 1, "items": { "$ref": "#/$defs/immutableId" }, "uniqueItems": true },
+    "feature_schema_version": { "$ref": "#/$defs/nonEmptyString" },
+    "odds_snapshot_timestamp_utc": { "$ref": "#/$defs/utcTimestamp" },
+    "output_sha256s": { "type": "object", "minProperties": 1, "additionalProperties": { "$ref": "#/$defs/sha256" } },
+    "probability_sum": { "type": "number", "minimum": 0.999, "maximum": 1.001 },
+    "bet_policy_version": { "$ref": "#/$defs/nonEmptyString" }
+  },
+  "$defs": {
+    "nonEmptyString": { "type": "string", "minLength": 1, "pattern": ".*\\S.*" },
+    "immutableId": { "type": "string", "minLength": 3, "maxLength": 128, "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$" },
+    "sha256": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
+    "utcTimestamp": { "type": "string", "format": "date-time", "pattern": "Z$" }
+  }
+}

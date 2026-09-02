@@ -16,22 +16,18 @@ db/derbyedge.db
 *.sqlite
 *.sqlite3
 
-# Model artifacts
-saved_models/*.pkl
-saved_models/*.joblib
-saved_models/*.bin
+# Model artifacts (manifests remain version-controlled)
+saved_models/
+models/**/*.pkl
+models/**/*.joblib
+models/**/*.bin
+models/**/*.model
+models/**/*.onnx
 
-# Generated outputs
-output/*.csv
-output/*.md
-output/*.html
-output/*.png
-output/*.json
-
-# Keep selected release artifacts if you want them versioned
-!output/v1_acceptance_checklist.md
-!output/derby_2026_board.md
-!output/model_evaluation_dirt_route.md
+# Generated score runs and evaluation artifacts
+output/
+evaluation_runs/
+eval_runs/
 
 # Test / coverage / cache
 .pytest_cache/
@@ -67,7 +63,18 @@ Thumbs.db
 Sportsbook_Screenshots/
 data/processed/
 data/raw/
+data/raw-inputs/
+data/raw_input/
+data/downloads/
 samples/
+
+# Local scratch space (schemas/, docs/, manifests/, and tests/ stay tracked)
+scratch/
+tmp/
+local/
+test-tmp/
+*.tmp
+*.bak
 
 # Local docs / binaries
 *.xlsx
