@@ -139,6 +139,7 @@ CREATE TABLE IF NOT EXISTS horse_starts (
     speed_figure       INTEGER,
     beyer_figure       INTEGER,
     earned_purse       INTEGER,
+    field_size_last    INTEGER,   -- number of starters in this race (written by ingest)
     created_at         TEXT    NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
 );
 
@@ -264,6 +265,10 @@ CREATE TABLE IF NOT EXISTS score_runs (
     model_type            TEXT    NOT NULL DEFAULT 'fallback'
                           CHECK(model_type IN ('xgboost','fallback','derby_override','seed_only_baseline')),
     derby_override_active INTEGER NOT NULL DEFAULT 0 CHECK(derby_override_active IN (0,1)),
+    quality_tier          TEXT    NOT NULL DEFAULT 'seed_only',
+    chaos_active          INTEGER NOT NULL DEFAULT 0 CHECK(chaos_active IN (0,1)),
+    chaos_intensity       REAL,
+    field_entropy_score   REAL,
     created_at            TEXT    NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
 );
 
@@ -313,6 +318,10 @@ CREATE TABLE IF NOT EXISTS entry_scores (
     rank                INTEGER,
     trainer_name        TEXT,
     jockey_name         TEXT,
+    chaos_score         REAL,
+    chaos_boost         REAL,
+    chaos_tier          TEXT,
+    chaos_eligible      INTEGER NOT NULL DEFAULT 0 CHECK(chaos_eligible IN (0,1)),
     created_at          TEXT    NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
     UNIQUE(run_id, entry_id)
 );
@@ -387,7 +396,65 @@ CREATE TABLE IF NOT EXISTS feature_store (
     churchill_readiness         REAL,   -- PLACEHOLDER: needs Churchill historical data
     jan_apr_improvement_curve   REAL,   -- PLACEHOLDER: needs sequential speed figs
     derby_override_score        REAL,   -- DEGRADED: weighted composite of available proxies
+    -- Tier 1 features (added 2026-05)
+    speed_fig_adj               REAL,   -- T1: z-score of speed_last within field
+    layoff_bucket_encoded       REAL,   -- T1: empirical win-rate by rest period bucket
+    class_level                 REAL,   -- T1: log(career_earnings+1) proxy
+    class_delta_v2              REAL,   -- T1: z-score of class_level within field
+    horses_beaten_pct_actual    REAL,   -- T1: uses field_size_last when available
+    pace_pressure_tier          INTEGER,-- T1: 0=lone_speed 1=soft 2=moderate 3=contested
+    collapse_risk_v2            REAL,   -- T1: front_pct + 0.5*presser_pct
+    morning_line_delta          REAL,   -- T1: market_implied_prob minus 1/field_size
     UNIQUE(card_id, entry_id)
+);
+
+-- ============================================================
+-- 15. STARTER_OBSERVATIONS
+--     One row per starter per race, joining pre-race model outputs
+--     with post-race labels.  Written automatically after each
+--     result ingest.  Leakage boundary: finish_pos / win_flag /
+--     off_odds are the only post-race columns; everything else is
+--     known before post time.
+-- ============================================================
+CREATE TABLE IF NOT EXISTS starter_observations (
+    obs_id                 INTEGER PRIMARY KEY AUTOINCREMENT,
+    -- Race context
+    race_id                INTEGER NOT NULL,    -- = card_id
+    race_date              TEXT    NOT NULL,    -- YYYY-MM-DD
+    track                  TEXT    NOT NULL,    -- track abbrev
+    race_no                INTEGER NOT NULL,
+    surface                TEXT,
+    distance_furlongs      REAL,
+    distance_bucket        TEXT,               -- sprint | route
+    field_size             INTEGER,
+    -- Starter (pre-race identity)
+    horse                  TEXT    NOT NULL,
+    post                   INTEGER,
+    trainer                TEXT,
+    jockey                 TEXT,
+    -- Pre-race model outputs
+    ml_odds                REAL,               -- morning line decimal odds
+    pred_win_prob          REAL,               -- heuristic win probability [0,1]
+    pred_fair_odds         REAL,               -- 1/pred_win_prob - 1
+    pred_rank              INTEGER,            -- model rank within field
+    edge                   REAL,               -- pred_win_prob - market_implied_prob
+    tag                    TEXT,               -- bet | neutral | underlay | no_data
+    pace_fit               REAL,
+    form_score             REAL,
+    sudist_fit             REAL,
+    chaos_pct              REAL,
+    tier                   TEXT,               -- chaos tier label
+    scratched              INTEGER NOT NULL DEFAULT 0,
+    -- Post-race labels (leakage boundary; written on result ingestion)
+    finish_pos             INTEGER,
+    win_flag               INTEGER,            -- 1 if official winner, else 0
+    off_odds               REAL,               -- official odds decimal
+    -- Provenance
+    model_version          TEXT,
+    source_prediction_file TEXT,
+    source_result_file     TEXT,
+    created_at             TEXT    NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+    UNIQUE(race_id, post)
 );
 
 -- ============================================================
@@ -426,6 +493,10 @@ CREATE INDEX IF NOT EXISTS idx_sr_card         ON score_runs(card_id);
 CREATE INDEX IF NOT EXISTS idx_fs_card         ON feature_store(card_id);
 CREATE INDEX IF NOT EXISTS idx_fs_entry        ON feature_store(entry_id);
 
+-- starter_observations
+CREATE INDEX IF NOT EXISTS idx_obs_race_date   ON starter_observations(race_date);
+CREATE INDEX IF NOT EXISTS idx_obs_track_date  ON starter_observations(track, race_date);
+
 -- ============================================================
 -- VIEWS
 -- All views are pre-race safe (no post-result fields are used
@@ -462,6 +533,7 @@ JOIN tracks t ON rc.track_id = t.track_id;
 -- v_entries_live: non-scratched entries with full connection info.
 -- Seed-compat aggregate columns (career_starts, etc.) come from
 -- entries; they are NULL when this entry has no seed row.
+-- field_size_last: from the horse's most recent horse_starts row (NULL for seed-only).
 CREATE VIEW IF NOT EXISTS v_entries_live AS
 SELECT
     e.entry_id,
@@ -507,13 +579,23 @@ SELECT
     e.workouts_30,
     e.gate_class,
     e.stamina_index,
-    e.pace_style
+    e.pace_style,
+    hs_last.field_size_last
 FROM  entries    e
 JOIN  race_cards rc  ON e.card_id    = rc.card_id
 JOIN  horses     h   ON e.horse_id   = h.horse_id
 LEFT JOIN people ptr ON e.trainer_id = ptr.person_id
 LEFT JOIN people pjk ON e.jockey_id  = pjk.person_id
 LEFT JOIN people pow ON e.owner_id   = pow.person_id
+LEFT JOIN (
+    SELECT hs.horse_id, hs.field_size_last
+    FROM   horse_starts hs
+    WHERE  hs.start_id = (
+        SELECT MAX(hs2.start_id)
+        FROM   horse_starts hs2
+        WHERE  hs2.horse_id = hs.horse_id
+    )
+) hs_last ON hs_last.horse_id = h.horse_id
 WHERE e.scratch_flag = 0;
 
 
@@ -582,6 +664,99 @@ WHERE w.synthetic = 0
   AND julianday('now') - julianday(w.workout_date) <= 30;
 
 
+-- race_review: one row per (race, score_run) joining race metadata,
+-- scoring run, and official results.  Operator and calibration layer;
+-- source tables remain the canonical truth.
+-- Scratch-aware: effective_tp is the highest-ranked non-scratched entry.
+CREATE VIEW IF NOT EXISTS race_review AS
+WITH ranked_live AS (
+    SELECT
+        es.run_id,
+        sr.card_id,
+        es.entry_id,
+        es.horse_name,
+        es.rank          AS model_rank,
+        es.win_probability,
+        es.value_score,
+        es.bet_tag,
+        COALESCE(rr.is_scratched, e.scratch_flag, 0) AS is_scratched,
+        ROW_NUMBER() OVER (
+            PARTITION BY es.run_id
+            ORDER BY
+                CASE WHEN COALESCE(rr.is_scratched, e.scratch_flag, 0) = 1 THEN 1 ELSE 0 END,
+                es.rank ASC
+        ) AS effective_live_rank
+    FROM entry_scores es
+    JOIN  score_runs    sr  ON sr.run_id   = es.run_id
+    JOIN  entries        e  ON e.entry_id  = es.entry_id
+    LEFT JOIN race_results rr
+           ON rr.entry_id = es.entry_id
+          AND rr.card_id  = sr.card_id
+),
+tops AS (
+    SELECT
+        rl.run_id,
+        rl.card_id,
+        MAX(CASE WHEN rl.model_rank = 1 THEN rl.horse_name  END)
+            AS original_tp,
+        MAX(CASE WHEN rl.model_rank = 1 THEN rl.is_scratched END)
+            AS original_tp_scratched,
+        MAX(CASE WHEN rl.effective_live_rank = 1 THEN rl.horse_name  END)
+            AS effective_tp,
+        MAX(CASE WHEN rl.effective_live_rank = 1 THEN rl.model_rank  END)
+            AS effective_tp_rank,
+        MAX(CASE WHEN rl.effective_live_rank = 1 THEN rr.finish_position END)
+            AS effective_tp_finish,
+        MAX(CASE WHEN rl.effective_live_rank = 1
+                  AND rr.official_finish = 1
+                  AND COALESCE(rr.is_disqualified, 0) = 0
+                 THEN 1 ELSE 0 END)
+            AS effective_tp_won
+    FROM ranked_live rl
+    LEFT JOIN race_results rr
+           ON rr.entry_id = rl.entry_id
+          AND rr.card_id  = rl.card_id
+    GROUP BY rl.run_id, rl.card_id
+)
+SELECT
+    rc.card_id,
+    rc.card_date                                                    AS race_date,
+    t.abbrev                                                        AS track,
+    rc.race_number,
+    rc.surface,
+    rc.distance_furlongs,
+    CASE WHEN rc.distance_furlongs < 8.5 THEN 'sprint' ELSE 'route' END
+                                                                    AS dist_category,
+    COALESCE(rc.field_size,
+        (SELECT COUNT(*) FROM entries e
+         WHERE e.card_id = rc.card_id AND e.scratch_flag = 0))     AS field_size,
+    rc.race_class,
+    sr.run_id,
+    sr.model_id,
+    sr.model_type,
+    sr.derby_override_active                                        AS chaos_active,
+    sr.quality_tier,
+    sr.run_timestamp,
+    tops.original_tp,
+    tops.original_tp_scratched,
+    tops.effective_tp,
+    tops.effective_tp_rank,
+    tops.effective_tp_finish,
+    tops.effective_tp_won,
+    winner_h.name                                                   AS actual_winner,
+    winner_rr.entry_id                                              AS actual_winner_entry_id
+FROM score_runs sr
+JOIN  race_cards rc        ON rc.card_id         = sr.card_id
+JOIN  tracks     t         ON t.track_id         = rc.track_id
+LEFT JOIN tops             ON tops.run_id        = sr.run_id
+LEFT JOIN race_results winner_rr
+       ON winner_rr.card_id                      = rc.card_id
+      AND winner_rr.official_finish              = 1
+      AND COALESCE(winner_rr.is_scratched,    0) = 0
+      AND COALESCE(winner_rr.is_disqualified, 0) = 0
+LEFT JOIN horses winner_h  ON winner_h.horse_id  = winner_rr.horse_id;
+
+
 -- v_connections_180: trainer-jockey pair stats over rolling 180 days.
 -- Derived purely from horse_starts and entries.
 -- NOTE: returns 0 rows for seed-only installs (horse_starts is empty).
@@ -609,3 +784,138 @@ JOIN  people      ptr ON e.trainer_id = ptr.person_id
 JOIN  people      pjk ON e.jockey_id  = pjk.person_id
 WHERE julianday('now') - julianday(rc.card_date) <= 180
 GROUP BY e.trainer_id, e.jockey_id;
+
+
+-- ============================================================
+-- 16. RACE_EVAL_LOG
+--     Race-level evaluation log imported from top-pick outcome
+--     CSV files.  One row per race per import batch.
+--     Not used for model training — operator/reporting layer only.
+-- ============================================================
+CREATE TABLE IF NOT EXISTS race_eval_log (
+    eval_id           INTEGER PRIMARY KEY AUTOINCREMENT,
+    source_file       TEXT    NOT NULL,
+    source_row_num    INTEGER NOT NULL,
+    import_batch_ts   TEXT    NOT NULL,
+    race_id           INTEGER,                    -- card_id when matched
+    race_date         TEXT    NOT NULL,
+    track_code        TEXT    NOT NULL,
+    race_number       INTEGER NOT NULL,
+    surface           TEXT,
+    distance_text     TEXT,
+    distance_f        REAL,
+    field_size        INTEGER,
+
+    orig_tp_raw       TEXT,
+    orig_tp_name      TEXT,
+    orig_tp_norm      TEXT,
+    orig_tp_scratched INTEGER NOT NULL DEFAULT 0,
+
+    eff_tp_raw        TEXT,
+    eff_tp_name       TEXT,
+    eff_tp_norm       TEXT,
+    eff_tp_finish_text TEXT,
+    eff_tp_finish_pos INTEGER,
+    eff_tp_won        INTEGER NOT NULL DEFAULT 0,
+
+    winner_raw        TEXT,
+    winner_name       TEXT,
+    winner_norm       TEXT,
+
+    chaos_raw         TEXT,
+    chaos_active      INTEGER NOT NULL DEFAULT 0,
+    tier_name         TEXT,
+
+    match_status      TEXT    NOT NULL DEFAULT 'UNMATCHED',
+    match_notes       TEXT,
+    created_ts        TEXT    NOT NULL DEFAULT (datetime('now')),
+
+    UNIQUE(source_file, source_row_num)
+);
+
+CREATE INDEX IF NOT EXISTS idx_race_eval_log_race_key
+    ON race_eval_log(race_date, track_code, race_number);
+CREATE INDEX IF NOT EXISTS idx_race_eval_log_race_id
+    ON race_eval_log(race_id);
+CREATE INDEX IF NOT EXISTS idx_race_eval_log_tier
+    ON race_eval_log(tier_name);
+CREATE INDEX IF NOT EXISTS idx_race_eval_log_surface
+    ON race_eval_log(surface);
+
+
+-- ============================================================
+-- VIEWS — race eval log reporting
+-- ============================================================
+
+-- v_race_eval_tool: flat view for TOOL/reporting queries.
+-- Returns every row in race_eval_log without joins to internal tables
+-- so it is safe to query even before any race cards are imported.
+CREATE VIEW IF NOT EXISTS v_race_eval_tool AS
+SELECT
+    rel.eval_id,
+    rel.source_file,
+    rel.import_batch_ts,
+    rel.race_id,
+    rel.race_date,
+    rel.track_code,
+    rel.race_number,
+    rel.surface,
+    rel.distance_text,
+    rel.distance_f,
+    rel.field_size,
+    rel.orig_tp_name,
+    rel.orig_tp_scratched,
+    rel.eff_tp_name,
+    rel.eff_tp_finish_text,
+    rel.eff_tp_finish_pos,
+    rel.eff_tp_won,
+    rel.winner_name,
+    rel.chaos_active,
+    rel.tier_name,
+    rel.match_status,
+    rel.match_notes
+FROM race_eval_log rel;
+
+
+-- v_race_eval_tool_enriched: joins race_eval_log to race_cards + tracks
+-- for rows where race_id was resolved.  Unmatched rows still appear
+-- (LEFT JOIN) with NULL enrichment columns.
+CREATE VIEW IF NOT EXISTS v_race_eval_tool_enriched AS
+SELECT
+    rel.eval_id,
+    rel.source_file,
+    rel.import_batch_ts,
+    rel.race_id,
+    rel.race_date,
+    rel.track_code,
+    rel.race_number,
+    rel.surface,
+    rel.distance_text,
+    rel.distance_f,
+    rel.field_size,
+    rel.orig_tp_name,
+    rel.orig_tp_scratched,
+    rel.eff_tp_name,
+    rel.eff_tp_finish_text,
+    rel.eff_tp_finish_pos,
+    rel.eff_tp_won,
+    rel.winner_name,
+    rel.chaos_active,
+    rel.tier_name,
+    rel.match_status,
+    rel.match_notes,
+    -- Enrichment from internal race_cards + tracks (NULL when unmatched)
+    t.name                 AS track_name_canonical,
+    rc.stakes_name,
+    rc.purse,
+    rc.race_class,
+    rc.distance_furlongs   AS rc_distance_furlongs,
+    rc.surface             AS rc_surface,
+    CASE
+        WHEN rc.distance_furlongs IS NOT NULL
+        THEN CASE WHEN rc.distance_furlongs < 8.5 THEN 'sprint' ELSE 'route' END
+        ELSE NULL
+    END                    AS dist_category
+FROM race_eval_log rel
+LEFT JOIN race_cards rc ON rc.card_id  = rel.race_id
+LEFT JOIN tracks     t  ON t.track_id  = rc.track_id;

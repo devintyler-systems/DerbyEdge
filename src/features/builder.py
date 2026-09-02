@@ -47,6 +47,10 @@ SIRE_ROUTE_SCORE: dict[str, float] = {
 }
 _DEFAULT_SIRE_ROUTE = 0.72   # field mean when sire not in table
 
+# Tier 1: empirical win-rate by layoff bucket (days since last race).
+# Buckets: 0=0-13d  1=14-27d  2=28-55d  3=56-119d  4=120+d
+_LAYOFF_WIN_RATE: dict[int, float] = {0: 0.18, 1: 0.21, 2: 0.23, 3: 0.17, 4: 0.12}
+
 # Pace style -> early-fraction commitment score (0 = pure closer, 1 = pure front)
 PACE_EARLY: dict[str, float] = {
     "front": 1.00, "presser": 0.70, "stalker": 0.40, "closer": 0.10
@@ -126,6 +130,19 @@ def _entry_features(row: pd.Series, field_df: pd.DataFrame) -> dict:
         except (TypeError, ValueError):
             layoff_days = None
 
+    # T1: layoff_bucket_encoded — map rest period to empirical win-rate shape
+    if layoff_days is not None:
+        _lbucket = pd.cut(
+            [layoff_days], bins=[-1, 13, 27, 55, 119, 9999], labels=[0, 1, 2, 3, 4]
+        )[0]
+        layoff_bucket_encoded: Optional[float] = (
+            _LAYOFF_WIN_RATE.get(int(_lbucket), 0.20)
+            if _lbucket is not None and not pd.isna(_lbucket)
+            else 0.20
+        )
+    else:
+        layoff_bucket_encoded = None
+
     cs = float(row.get("career_starts") or 0)
     cw = float(row.get("career_wins")   or 0)
     cp = float(row.get("career_places") or 0)
@@ -142,6 +159,7 @@ def _entry_features(row: pd.Series, field_df: pd.DataFrame) -> dict:
 
     # ── Class / field strength ─────────────────────────────────────────────
     career_earnings = float(row.get("career_earnings") or 0)
+    class_level     = round(np.log(career_earnings + 1), 4)   # T1: log-earnings proxy
     field_earn      = field_df["career_earnings"].dropna().astype(float)
     if len(field_earn) > 1 and field_earn.std() > 0:
         class_delta = round(
@@ -160,6 +178,15 @@ def _entry_features(row: pd.Series, field_df: pd.DataFrame) -> dict:
         )
     else:
         horses_beaten_pct_last = None
+
+    # T1: horses_beaten_pct_actual — uses real field_size_last when available
+    field_size_last = row.get("field_size_last")
+    if field_size_last is not None and last_finish is not None:
+        _fsz = int(field_size_last)
+        _hbp = (float(_fsz) - float(last_finish)) / max(_fsz - 1, 1)
+        horses_beaten_pct_actual = round(_clamp(_hbp, 0.0, 1.0), 4)
+    else:
+        horses_beaten_pct_actual = horses_beaten_pct_last   # fall back to degraded
 
     # DEGRADED: career starts proxy for large-field experience
     field_size_exp = round(_norm(cs, 1.0, 15.0), 4) if cs > 0 else None
@@ -263,6 +290,7 @@ def _entry_features(row: pd.Series, field_df: pd.DataFrame) -> dict:
 
     return {
         # identity
+        "_last_race_finish":           last_finish,   # passthrough for firstbet overlay; dropped before DB write
         "speed_last":                  speed_last,
         "speed_best":                  speed_best,
         "speed_avg":                   speed_avg,
@@ -273,11 +301,14 @@ def _entry_features(row: pd.Series, field_df: pd.DataFrame) -> dict:
         "finish_energy_proxy":         finish_energy_proxy,
         "form_cycle_idx":              form_cycle_idx,
         "layoff_days":                 layoff_days,
+        "layoff_bucket_encoded":       layoff_bucket_encoded,      # T1
         "career_win_pct":              career_win_pct,
         "career_itm_pct":              career_itm_pct,
         "class_delta":                 class_delta,
+        "class_level":                 class_level,                # T1 proxy
         "field_strength_last":         field_strength_last,
         "horses_beaten_pct_last":      horses_beaten_pct_last,
+        "horses_beaten_pct_actual":    horses_beaten_pct_actual,   # T1
         "field_size_exp":              field_size_exp,
         "works_30d":                   works_30d,
         "bullet_30d":                  bullet_30d,
@@ -297,10 +328,15 @@ def _entry_features(row: pd.Series, field_df: pd.DataFrame) -> dict:
         "traffic_resilience_proxy":    traffic_resilience_proxy,
         "early_intent":                early_intent,
         "run_style_bucket":            run_style_bucket,
+        "speed_fig_adj":               None,   # filled in second pass
+        "class_delta_v2":              None,   # filled in second pass
         "pace_pressure":               None,   # filled in second pass
+        "pace_pressure_tier":          None,   # filled in second pass
         "lone_speed_edge":             None,   # filled in second pass
         "collapse_risk":               None,   # filled in second pass
+        "collapse_risk_v2":            None,   # filled in second pass
         "pace_fit_score":              None,   # filled in second pass
+        "morning_line_delta":          None,   # filled in second pass
         "market_implied_prob":         market_implied_prob,
         "morning_line_rank":           None,   # filled in second pass
         "publicness_score":            publicness_score,
@@ -315,7 +351,11 @@ def _entry_features(row: pd.Series, field_df: pd.DataFrame) -> dict:
 # ---------------------------------------------------------------------------
 # Second pass: race-level features require full-field context
 # ---------------------------------------------------------------------------
-def _fill_race_level_features(df: pd.DataFrame) -> pd.DataFrame:
+def _fill_race_level_features(
+    df: pd.DataFrame,
+    *,
+    derby_active: bool,
+) -> pd.DataFrame:
     """Mutates df in place; returns it."""
 
     # morning_line_rank (1 = shortest price)
@@ -324,6 +364,14 @@ def _fill_race_level_features(df: pd.DataFrame) -> pd.DataFrame:
         .rank(ascending=False, method="min")
         .astype(int)
     )
+
+    # T1: speed_fig_adj — z-score of speed_last within field, clipped ±3
+    _sl = pd.to_numeric(df["speed_last"], errors="coerce")
+    if not _sl.isna().all():
+        _sl_std = max(float(_sl.std()), 1.0)
+        df["speed_fig_adj"] = ((_sl - float(_sl.mean())) / _sl_std).clip(-3, 3).round(4)
+    else:
+        df["speed_fig_adj"] = 0.0
 
     # pace shape counts
     front_count   = int((df["run_style_bucket"] == "front").sum())
@@ -334,14 +382,28 @@ def _fill_race_level_features(df: pd.DataFrame) -> pd.DataFrame:
     df["pace_pressure"] = pace_pressure
     df["collapse_risk"] = pace_pressure   # semantic alias
 
+    # T1: pace_pressure_tier and collapse_risk_v2
+    front_pct   = front_count / max(total, 1)
+    presser_pct = presser_count / max(total, 1)
+    if front_count == 1 and presser_pct < 0.15:
+        _tier = 0   # lone speed
+    elif front_pct < 0.15 and presser_pct < 0.20:
+        _tier = 1   # soft
+    elif front_pct <= 0.30:
+        _tier = 2   # moderate
+    else:
+        _tier = 3   # contested
+    df["pace_pressure_tier"] = _tier
+    df["collapse_risk_v2"]   = round(front_pct * 1.0 + presser_pct * 0.5, 4)
+
     df["lone_speed_edge"] = df["run_style_bucket"].apply(
         lambda s: 1 if s == "front" and front_count == 1 else 0
     )
 
-    def _pace_fit(row) -> Optional[float]:
+    def _pace_fit(row) -> float:
         style = row["run_style_bucket"]
         if not style:
-            return None
+            return 0.65   # neutral mid-field prior; no pace style in entries
         if style == "front":
             return 0.90 if front_count == 1 else 0.55
         if style == "presser":
@@ -352,7 +414,20 @@ def _fill_race_level_features(df: pd.DataFrame) -> pd.DataFrame:
             return 0.80 if pace_pressure >= 0.40 else 0.55
         return 0.65
 
-    df["pace_fit_score"] = df.apply(_pace_fit, axis=1).round(4)
+    df["pace_fit_score"] = (
+        pd.to_numeric(df.apply(_pace_fit, axis=1), errors="coerce")
+        .fillna(0.65)
+        .round(4)
+    )
+
+    n_pace_defaults = int(
+        (df["run_style_bucket"].isna() | (df["run_style_bucket"] == "")).sum()
+    )
+    if n_pace_defaults:
+        print(
+            f"[builder] pace_fit_score defaulted to 0.65 for {n_pace_defaults} "
+            f"row(s) — no pace style in entries (sparse/screenshot race)"
+        )
 
     # public underlay penalty: z-score of publicness_score within field, scaled 0-1
     ps = df["publicness_score"].dropna()
@@ -360,38 +435,262 @@ def _fill_race_level_features(df: pd.DataFrame) -> pd.DataFrame:
         ps_mean = float(ps.mean())
         ps_std  = float(ps.std())
 
-        def _underlay(row) -> Optional[float]:
-            if row["publicness_score"] is None or np.isnan(row["publicness_score"]):
-                return None
-            z = (row["publicness_score"] - ps_mean) / ps_std
+        def _underlay(row) -> float:
+            v = row["publicness_score"]
+            if v is None:
+                return 0.5   # neutral when publicness data absent
+            try:
+                if np.isnan(float(v)):
+                    return 0.5
+            except (TypeError, ValueError):
+                return 0.5
+            z = (float(v) - ps_mean) / ps_std
             return round(_clamp(z / 3.0 + 0.5), 4)
 
-        df["public_underlay_penalty"] = df.apply(_underlay, axis=1)
+        df["public_underlay_penalty"] = (
+            pd.to_numeric(df.apply(_underlay, axis=1), errors="coerce")
+            .fillna(0.5)
+        )
     else:
-        df["public_underlay_penalty"] = None
+        df["public_underlay_penalty"] = 0.5   # neutral numeric default
 
-    # derby_override_score: weighted composite of available proxies
-    def _derby_override(row) -> Optional[float]:
-        parts: list[tuple[float, float]] = []
-        if row["classic_distance_projection"] is not None:
-            parts.append((float(row["classic_distance_projection"]), 0.35))
-        if row["pedigree_route_proxy"] is not None:
-            parts.append((float(row["pedigree_route_proxy"]),        0.20))
-        if row["pace_fit_score"] is not None:
-            parts.append((float(row["pace_fit_score"]),              0.20))
-        if row["work_readiness_score"] is not None:
-            parts.append((float(row["work_readiness_score"]),        0.15))
-        if row["gate_reliability"] is not None:
-            parts.append((float(row["gate_reliability"]),            0.10))
-        if not parts:
-            return None
-        total_w = sum(w for _, w in parts)
-        score   = sum(v * w for v, w in parts) / total_w
-        return round(score, 4)
+    # Derby-only projections must never cross into an ordinary race model.
+    # Keep the schema stable, but persist these fields as NULL outside the
+    # narrowly defined Kentucky Derby context.
+    if not derby_active:
+        for col in (
+            "classic_distance_projection",
+            "churchill_readiness",
+            "jan_apr_improvement_curve",
+            "derby_override_score",
+        ):
+            df[col] = None
+    else:
+        # derby_override_score: weighted composite of available proxies
+        def _derby_override(row) -> Optional[float]:
+            parts: list[tuple[float, float]] = []
+            if row["classic_distance_projection"] is not None:
+                parts.append((float(row["classic_distance_projection"]), 0.35))
+            if row["pedigree_route_proxy"] is not None:
+                parts.append((float(row["pedigree_route_proxy"]),        0.20))
+            if row["pace_fit_score"] is not None:
+                parts.append((float(row["pace_fit_score"]),              0.20))
+            if row["work_readiness_score"] is not None:
+                parts.append((float(row["work_readiness_score"]),        0.15))
+            if row["gate_reliability"] is not None:
+                parts.append((float(row["gate_reliability"]),            0.10))
+            if not parts:
+                return None
+            total_w = sum(w for _, w in parts)
+            score   = sum(v * w for v, w in parts) / total_w
+            return round(score, 4)
 
-    df["derby_override_score"] = df.apply(_derby_override, axis=1)
+        df["derby_override_score"] = pd.to_numeric(
+            df.apply(_derby_override, axis=1), errors="coerce"
+        )
+
+    # T1: class_delta_v2 — z-score of log-earnings within field
+    if "class_level" in df.columns:
+        _le     = pd.to_numeric(df["class_level"], errors="coerce")
+        _le_std = max(float(_le.std()), 0.01)
+        df["class_delta_v2"] = ((_le - float(_le.mean())) / _le_std).round(4)
+
+    # T1: morning_line_delta — deviation of market_implied_prob from uniform prior
+    df["morning_line_delta"] = (df["market_implied_prob"] - 1.0 / len(df)).round(6)
 
     return df
+
+
+def _is_derby_context(conn, card_id: int) -> bool:
+    """True only for the Kentucky Derby profile that permits Derby features."""
+    row = conn.execute(
+        """
+        SELECT rc.surface, rc.distance_furlongs, rc.field_size, rc.stakes_name,
+               t.abbrev AS track_abbrev
+        FROM race_cards rc
+        JOIN tracks t ON t.track_id = rc.track_id
+        WHERE rc.card_id = ?
+        """,
+        (card_id,),
+    ).fetchone()
+    return bool(row) and (
+        str(row["surface"] or "").lower() == "dirt"
+        and float(row["distance_furlongs"] or 0) >= 9.5
+        and int(row["field_size"] or 0) >= 18
+        and "derby" in str(row["stakes_name"] or "").lower()
+        and str(row["track_abbrev"] or "").upper() == "CD"
+    )
+
+
+# ---------------------------------------------------------------------------
+# 1/ST BET enrichment overlay
+# Fills null feature cells from firstbet_career_stats / firstbet_pp_starts.
+# Never overwrites a non-null value; silently skips when tables are absent.
+# ---------------------------------------------------------------------------
+def _isnull(v) -> bool:
+    if v is None:
+        return True
+    try:
+        return bool(pd.isna(v))
+    except (TypeError, ValueError):
+        return False
+
+
+def _parse_furlongs(dist_text: str) -> Optional[float]:
+    """Convert PP distance text (e.g. '8.3F', '1M', '1 1/16M') to furlongs."""
+    s = str(dist_text).strip().upper()
+    try:
+        if s.endswith("F"):
+            return float(s[:-1])
+        if s.endswith("M"):
+            body = s[:-1].strip()
+            parts = body.split()
+            if len(parts) == 2:
+                whole = float(parts[0])
+                num, den = parts[1].split("/")
+                return (whole + float(num) / float(den)) * 8.0
+            return float(parts[0]) * 8.0
+    except (ValueError, IndexError, ZeroDivisionError):
+        pass
+    return None
+
+
+def _apply_firstbet_overlay(
+    feat_df: pd.DataFrame,
+    card_id: int,
+    conn,
+) -> tuple[pd.DataFrame, bool]:
+    """Fill null feature cells from firstbet_career_stats and firstbet_pp_starts.
+
+    Returns (updated feat_df copy, any_cells_filled: bool).
+    """
+    try:
+        cs_df = pd.read_sql(
+            "SELECT entry_id, career_win_pct, career_itm_pct "
+            "FROM firstbet_career_stats WHERE card_id=?",
+            conn, params=(card_id,),
+        )
+        pp_df = pd.read_sql(
+            "SELECT entry_id, start_rank, finish_position, field_size, "
+            "surface, distance_text "
+            "FROM firstbet_pp_starts WHERE card_id=? ORDER BY entry_id, start_rank",
+            conn, params=(card_id,),
+        )
+    except Exception:
+        return feat_df, False
+
+    if cs_df.empty and pp_df.empty:
+        return feat_df, False
+
+    try:
+        rc = conn.execute(
+            "SELECT distance_furlongs FROM race_cards WHERE card_id=?", (card_id,)
+        ).fetchone()
+        race_dist_f: Optional[float] = float(rc["distance_furlongs"]) if rc else None
+    except Exception:
+        race_dist_f = None
+
+    any_filled = False
+    feat_df = feat_df.copy()
+
+    for idx in feat_df.index:
+        eid = int(feat_df.at[idx, "entry_id"])
+
+        # ── Career stats overlay ───────────────────────────────────────────
+        cs_rows = cs_df[cs_df["entry_id"] == eid]
+        if not cs_rows.empty:
+            cs = cs_rows.iloc[0]
+
+            if _isnull(feat_df.at[idx, "career_win_pct"]):
+                val = cs.get("career_win_pct")
+                if not _isnull(val):
+                    feat_df.at[idx, "career_win_pct"] = round(float(val), 4)
+                    any_filled = True
+
+            if _isnull(feat_df.at[idx, "career_itm_pct"]):
+                val = cs.get("career_itm_pct")
+                if not _isnull(val):
+                    feat_df.at[idx, "career_itm_pct"] = round(float(val), 4)
+                    any_filled = True
+
+            # form_cycle_idx: recompute now that career_itm_pct may be filled
+            if _isnull(feat_df.at[idx, "form_cycle_idx"]):
+                cip = feat_df.at[idx, "career_itm_pct"]
+                lf  = feat_df.at[idx, "_last_race_finish"]
+                if not _isnull(cip) and not _isnull(lf):
+                    recency_adj = _clamp(1.0 - (float(lf) - 1.0) / 10.0)
+                    feat_df.at[idx, "form_cycle_idx"] = round(
+                        0.6 * float(cip) + 0.4 * recency_adj, 4
+                    )
+                    any_filled = True
+
+            # publicness_score: recompute now that career_win_pct may be filled
+            if _isnull(feat_df.at[idx, "publicness_score"]):
+                cwp = feat_df.at[idx, "career_win_pct"]
+                mip = feat_df.at[idx, "market_implied_prob"]
+                if not _isnull(cwp) and float(cwp) > 0 and not _isnull(mip):
+                    feat_df.at[idx, "publicness_score"] = round(
+                        float(mip) / float(cwp), 4
+                    )
+                    any_filled = True
+
+        # ── PP starts overlay ─────────────────────────────────────────────
+        horse_pp = pp_df[pp_df["entry_id"] == eid]
+        if horse_pp.empty:
+            continue
+
+        # surface_fit: wins on dirt / dirt starts (replaces entries.dirt_wins=0 default)
+        dirt_mask = horse_pp["surface"].str.lower().str.startswith("dirt", na=False)
+        dirt_pp   = horse_pp[dirt_mask]
+        if len(dirt_pp) > 0:
+            dirt_wins_pp = int((dirt_pp["finish_position"] == 1).sum())
+            new_sf = round(_safe_div(dirt_wins_pp, len(dirt_pp)), 4)
+            cur_sf = feat_df.at[idx, "surface_fit"]
+            if _isnull(cur_sf) or float(cur_sf) == 0.0:
+                feat_df.at[idx, "surface_fit"] = new_sf
+                any_filled = True
+
+        # distance_fit: wins at matching distance / dist starts from PP data
+        if race_dist_f is not None and _isnull(feat_df.at[idx, "distance_fit"]):
+            dist_wins_pp  = 0
+            dist_total_pp = 0
+            for _, prow in horse_pp.iterrows():
+                f = _parse_furlongs(str(prow.get("distance_text") or ""))
+                if f is not None and abs(f - race_dist_f) <= 1.0:
+                    dist_total_pp += 1
+                    if int(prow.get("finish_position") or 99) == 1:
+                        dist_wins_pp += 1
+            if dist_total_pp > 0:
+                dfit = round(_safe_div(dist_wins_pp, dist_total_pp), 4)
+                feat_df.at[idx, "distance_fit"]    = dfit
+                feat_df.at[idx, "route_progression"] = dfit
+                any_filled = True
+
+        # horses_beaten_pct_last: use actual field size from most recent PP start
+        lf = feat_df.at[idx, "_last_race_finish"]
+        if not _isnull(lf):
+            recent_pp = horse_pp[horse_pp["start_rank"] == 1]
+            if not recent_pp.empty:
+                fsz = recent_pp.iloc[0].get("field_size")
+                if not _isnull(fsz) and int(fsz) > 1:
+                    n = int(fsz)
+                    feat_df.at[idx, "horses_beaten_pct_last"] = round(
+                        _clamp((n - float(lf)) / max(n - 1, 1), -0.2, 1.0), 4
+                    )
+                    any_filled = True
+
+    n_filled = sum(
+        1 for col in [
+            "career_win_pct", "career_itm_pct", "form_cycle_idx",
+            "surface_fit", "distance_fit", "publicness_score",
+        ]
+        for idx in feat_df.index
+        if not _isnull(feat_df.at[idx, col])
+    )
+    if any_filled:
+        print(f"[builder] firstbet overlay: {n_filled} feature cells now non-null for card_id={card_id}")
+
+    return feat_df, any_filled
 
 
 # ---------------------------------------------------------------------------
@@ -424,6 +723,8 @@ def build_features(card_id: Optional[int] = None) -> pd.DataFrame:
         conn.close()
         raise RuntimeError(f"No entries for card_id={card_id} — run ingest first.")
 
+    derby_active = _is_derby_context(conn, card_id)
+
     build_ts = datetime.datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ")
 
     rows = []
@@ -438,7 +739,18 @@ def build_features(card_id: Optional[int] = None) -> pd.DataFrame:
         rows.append(feats)
 
     feat_df = pd.DataFrame(rows)
-    feat_df  = _fill_race_level_features(feat_df)
+
+    try:
+        feat_df, _ = _apply_firstbet_overlay(feat_df, card_id, conn)
+    except Exception as exc:
+        print(f"[builder] firstbet overlay skipped: {exc}")
+
+    feat_df = _fill_race_level_features(feat_df, derby_active=derby_active)
+
+    # Drop helper columns that are not in feature_store schema
+    _drop = [c for c in feat_df.columns if c.startswith("_")]
+    if _drop:
+        feat_df = feat_df.drop(columns=_drop)
 
     conn.execute("DELETE FROM feature_store WHERE card_id = ?", (card_id,))
     feat_df.to_sql("feature_store", conn, if_exists="append", index=False)

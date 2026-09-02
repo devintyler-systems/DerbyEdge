@@ -7,24 +7,38 @@ Bet-tag thresholds:
   underlay: model_edge <  -0.015
   neutral : -0.015 <= model_edge < +0.025
 
-Confidence tiers (seed-only install):
-  medium : dist_starts >= 2 AND all model features non-null
-  low    : dist_starts <= 1 (distance_fit based on stamina_index only)
-  high   : not possible until horse_starts table is populated
+Confidence tiers (4-component scored system — see src/models/confidence.py):
+  high   : score >= 0.70
+  medium : 0.45 <= score < 0.70
+  low    : score < 0.45
 
-Missing-data flags are per-horse text labels combining:
-  - Global (every horse in seed-only install): the 5 most impactful PLACEHOLDERs
-  - Per-horse: dist_fit_single_start when dist_starts <= 1
+Score = 0.35*A(horse evidence) + 0.25*B(race evidence)
+      + 0.30*C(model certainty) + 0.10*D(calibration)
+
+Sparse distance history alone no longer forces LOW when other signals are strong.
+Missing-data flags are per-horse text labels (CRITICAL_MISSING + dist_fit_single_start).
 """
 
 import datetime
+import json
+import os
+import sqlite3
 import uuid
 from pathlib import Path
 from typing import Optional
 
+from src.utils.horse_norm import normalize_horse_name as _norm_horse
+from src.utils.run_assets import card_run_key, run_dir_for_card
+
 import numpy as np
 import pandas as pd
 
+from src.models.confidence import (
+    compute_horse_confidence,
+    legacy_missing_flags,
+    CRITICAL_MISSING,
+    DERBY_EXTRA_MISSING,
+)
 from src.models.trainer import (
     ModelArtifact,
     TRAIN_CONFIGS,
@@ -36,25 +50,21 @@ from src.models.trainer import (
     train_or_build,
     build_seed_baseline,
 )
-from src.utils.db import get_connection, get_derby_card_id
+from src.utils.db import (
+    get_connection,
+    get_derby_card_id,
+    ensure_entry_scores_columns,
+)
+from src.models.policy import (
+    bucket_field_size,
+    choose_tier,
+    default_chaos as policy_default_chaos,
+    normalize_surface as _policy_norm_surface,
+    normalize_dist_category as _policy_norm_dist,
+)
 
 ROOT       = Path(__file__).resolve().parents[2]
 OUTPUT_DIR = ROOT / "output"
-
-# Critical PLACEHOLDER features (most impactful if they were available)
-CRITICAL_MISSING = [
-    "no_race_splits",       # pace_early_mean_3 / pace_mid_mean_3
-    "no_workout_detail",    # bullet_30d / days_since_last_work
-    "no_connections_stats", # trainer_jockey_itm_cond / jockey_route_cond
-    "no_track_form",        # churchill_readiness
-    "no_post_bias",         # post_win_bias
-]
-
-# Derby-specific PLACEHOLDER flags (added on top of CRITICAL_MISSING)
-DERBY_EXTRA_MISSING = [
-    "no_jan_apr_curve",       # jan_apr_improvement_curve: sequential speed progression
-    "no_churchill_readiness", # churchill_readiness: Churchill Downs specific form
-]
 
 # Derby context detection criteria
 _DERBY_CRITERIA = {
@@ -76,6 +86,411 @@ _FEATURE_TIER = {
     "trainer_intent_proxy": "DEGRADED", "horses_beaten_pct_last": "DEGRADED",
     "career_win_pct": "IMPLEMENTED", "finish_energy_proxy": "DEGRADED",
 }
+
+
+_DERBY_DEFAULT_CHAOS_INDEX = 0.85   # default for scorer; UI slider default matches
+
+try:
+    from training.win_model_loader import (
+        load_best_model as _load_best_model,
+        score_dataframe as _ml_score_dataframe,
+    )
+    _ML_LOADER_AVAILABLE = True
+except ImportError:
+    _ML_LOADER_AVAILABLE = False
+
+
+def _resolve_serving_mode() -> str:
+    """Return canonical serving mode from DERBYEDGE_ML_MODE env var.
+
+    Values: 'off' (default) | 'shadow' | 'live'
+    Any unrecognized value defaults to 'off'.
+    """
+    mode = os.getenv("DERBYEDGE_ML_MODE", "off").lower().strip()
+    return mode if mode in ("off", "shadow", "live") else "off"
+
+
+def _load_ml_win_probs(
+    feat_df: pd.DataFrame,
+    entries_df: pd.DataFrame,
+    heuristic_probs: np.ndarray,
+    market_probs: np.ndarray,
+    race_type_key: str,
+    dist_furlongs: float,
+    surface: str,
+) -> Optional[np.ndarray]:
+    """Return ML-model win probabilities (normalized, same shape as heuristic_probs).
+
+    Builds an inference DataFrame from scorer's live feat_df/entries_df and the
+    already-computed heuristic probabilities (used as pred_win_prob feature).
+    Returns None when no artifact is available or scoring fails — the caller
+    falls back to the heuristic silently.
+    """
+    if not _ML_LOADER_AVAILABLE:
+        return None
+
+    import logging
+    _mlog = logging.getLogger(__name__)
+
+    try:
+        model, cal, feat_cols = _load_best_model(race_type_key)
+        if model is None:
+            _mlog.debug("_load_ml_win_probs: no artifact for segment %s", race_type_key)
+            return None
+
+        # Temporary rank from heuristic — used as pred_rank feature.
+        temp_rank = (
+            pd.Series(heuristic_probs)
+            .rank(ascending=False, method="first")
+            .astype(int)
+            .values
+        )
+
+        # Merge morning_line_odds from entries onto feat_df by entry_id.
+        ent_sub = (
+            entries_df[["entry_id", "morning_line_odds"]]
+            .copy()
+            .assign(entry_id=entries_df["entry_id"].astype(int))
+        )
+        merged = (
+            feat_df.copy()
+            .assign(entry_id=feat_df["entry_id"].astype(int))
+            .merge(ent_sub, on="entry_id", how="left")
+            .reset_index(drop=True)
+        )
+
+        n = len(merged)
+        inf_df = pd.DataFrame({
+            "post":              pd.to_numeric(merged["post_position"], errors="coerce"),
+            "ml_odds":           pd.to_numeric(merged["morning_line_odds"], errors="coerce"),
+            "pred_win_prob":     heuristic_probs,
+            "pred_rank":         temp_rank,
+            "edge":              heuristic_probs - market_probs,
+            "pace_fit":          pd.to_numeric(merged.get("pace_fit_score"),  errors="coerce"),
+            "form_score":        pd.to_numeric(merged.get("form_cycle_idx"),  errors="coerce"),
+            "sudist_fit":        pd.to_numeric(merged.get("distance_fit"),    errors="coerce"),
+            "chaos_pct":         np.full(n, np.nan),
+            "field_size":        float(n),
+            "distance_furlongs": dist_furlongs,
+            "distance_bucket":   "sprint" if dist_furlongs < 8.5 else "route",
+            "surface":           surface,
+        })
+
+        scored   = _ml_score_dataframe(inf_df, model, cal, feat_cols)
+        ml_probs = scored["model_win_prob"].to_numpy(dtype=float)
+
+        if not np.isfinite(ml_probs).all() or ml_probs.sum() <= 0:
+            _mlog.warning("_load_ml_win_probs: non-finite output — falling back to heuristic")
+            return None
+
+        return ml_probs / ml_probs.sum()
+
+    except Exception as exc:
+        _mlog.warning("_load_ml_win_probs: scoring failed — %s", exc)
+        return None
+
+
+def _decide_served_probs(
+    mode: str,
+    derby_override: bool,
+    heuristic_probs: np.ndarray,
+    ml_probs,
+) -> tuple[np.ndarray, bool]:
+    """Return (served_probs, ml_loaded_flag).
+
+    Derby override always returns heuristic regardless of mode.
+    off    → heuristic served; ML never run.
+    shadow → ML scored and logged, but heuristic is served.
+    live   → ML served if loaded; heuristic fallback on ML failure.
+    """
+    ml_loaded = ml_probs is not None
+    if derby_override or mode == "off":
+        return heuristic_probs.copy(), ml_loaded
+    if mode == "shadow":
+        return heuristic_probs.copy(), ml_loaded
+    return (ml_probs.copy() if ml_loaded else heuristic_probs.copy()), ml_loaded
+
+
+def _emit_shadow_log(
+    card_id: int,
+    race_meta: dict,
+    entries_df: pd.DataFrame,
+    heuristic_probs: np.ndarray,
+    ml_probs,
+    served_probs: np.ndarray,
+    ml_loaded_flag: bool,
+    mode: str,
+    model_version: str,
+    dist_furlongs: float,
+    surface: str,
+    derby_override: bool,
+    segment: str,
+    scored_at: str,
+    policy_surface: str = "",
+    policy_dist_category: str = "",
+    policy_field_size_bucket: str = "",
+    policy_tier_selected: str = "",
+    policy_tier_reason: str = "",
+    policy_chaos_selected: int = 0,
+    policy_chaos_reason: str = "",
+) -> None:
+    """Append one row per starter to output/shadow_log.csv."""
+    import logging as _logging
+    _slog = _logging.getLogger(__name__)
+    n = len(entries_df)
+    if n == 0:
+        return
+
+    def _rank_arr(probs):
+        if probs is None:
+            return [None] * n
+        return (
+            pd.Series(probs)
+            .rank(ascending=False, method="first")
+            .astype(int)
+            .tolist()
+        )
+
+    h_ranks = _rank_arr(heuristic_probs)
+    m_ranks = _rank_arr(ml_probs)
+    s_ranks = _rank_arr(served_probs)
+
+    rows = []
+    for i, (_, erow) in enumerate(entries_df.iterrows()):
+        rows.append({
+            "race_id":             card_id,
+            "race_date":           race_meta.get("race_date", ""),
+            "track":               race_meta.get("track", ""),
+            "race_no":             race_meta.get("race_no", ""),
+            "horse":               erow["horse_name"],
+            "horse_norm":          _norm_horse(erow["horse_name"]),
+            "post":                int(erow["post_position"]),
+            "field_size":          n,
+            "segment":             segment,
+            "heuristic_win_prob":  round(float(heuristic_probs[i]), 6),
+            "ml_win_prob":         round(float(ml_probs[i]), 6) if ml_probs is not None else None,
+            "served_win_prob":     round(float(served_probs[i]), 6),
+            "heuristic_rank":      h_ranks[i],
+            "ml_rank":             m_ranks[i],
+            "served_rank":         s_ranks[i],
+            "ml_loaded_flag":      int(ml_loaded_flag),
+            "serving_mode":        mode,
+            "model_version":       model_version,
+            "distance_furlongs":   dist_furlongs,
+            "surface":             surface,
+            "derby_override_flag":        int(derby_override),
+            "scored_at":                  scored_at,
+            "policy_surface":             policy_surface,
+            "policy_dist_category":       policy_dist_category,
+            "policy_field_size_bucket":   policy_field_size_bucket,
+            "policy_tier_selected":       policy_tier_selected,
+            "policy_tier_reason":         policy_tier_reason,
+            "policy_chaos_selected":      policy_chaos_selected,
+            "policy_chaos_reason":        policy_chaos_reason,
+        })
+
+    log_path = OUTPUT_DIR / "shadow_log.csv"
+    df_new = pd.DataFrame(rows)
+    if log_path.exists():
+        df_new.to_csv(log_path, mode="a", header=False, index=False)
+    else:
+        OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+        df_new.to_csv(log_path, mode="w", header=True, index=False)
+
+    _slog.info("_emit_shadow_log: %d rows appended  mode=%s  card_id=%s", n, mode, card_id)
+
+
+# ---------------------------------------------------------------------------
+# Schema introspection
+# ---------------------------------------------------------------------------
+
+def _get_table_columns(conn: sqlite3.Connection, table: str) -> set[str]:
+    """Return the set of column names present in *table* via PRAGMA table_info."""
+    return {row[1] for row in conn.execute(f"PRAGMA table_info({table})").fetchall()}
+
+
+def _fetch_race_meta(
+    conn: sqlite3.Connection,
+    card_id: int,
+    *,
+    fallback_surface: str = "",
+    fallback_dist: "float | None" = None,
+) -> dict:
+    """Fetch race-card metadata for shadow-log emission.
+
+    Builds the SELECT list from whichever race_cards columns actually exist so
+    the query never references an absent column.  Missing fields are filled from
+    already-computed fallback values or empty-string defaults.
+
+    Column name mapping (priority order):
+        race_date         → rc2.race_date   else rc2.card_date   else ""
+        race_no           → rc2.race_no     else rc2.race_number  else ""
+        distance_furlongs → rc2.distance_furlongs (generated col) else fallback_dist
+        surface           → rc2.surface     else fallback_surface
+    """
+    cols = _get_table_columns(conn, "race_cards")
+
+    date_col = (
+        "race_date"   if "race_date"   in cols else
+        "card_date"   if "card_date"   in cols else None
+    )
+    rno_col = (
+        "race_no"     if "race_no"     in cols else
+        "race_number" if "race_number" in cols else None
+    )
+    dist_col    = "distance_furlongs" if "distance_furlongs" in cols else None
+    surface_col = "surface"           if "surface"           in cols else None
+
+    parts = ["t.abbrev AS track"]
+    if date_col:
+        parts.append(f"rc2.{date_col} AS race_date")
+    if rno_col:
+        parts.append(f"CAST(rc2.{rno_col} AS TEXT) AS race_no")
+    if dist_col:
+        parts.append(f"rc2.{dist_col} AS distance_furlongs")
+    if surface_col:
+        parts.append(f"rc2.{surface_col} AS surface")
+
+    row = conn.execute(
+        f"SELECT {', '.join(parts)}"
+        " FROM race_cards rc2"
+        " LEFT JOIN tracks t ON rc2.track_id = t.track_id"
+        " WHERE rc2.card_id = ?",
+        (card_id,),
+    ).fetchone()
+
+    d = dict(row) if row else {}
+    return {
+        "race_date":         str(d.get("race_date") or ""),
+        "track":             str(d.get("track")     or ""),
+        "race_no":           str(d.get("race_no")   or ""),
+        "distance_furlongs": float(d["distance_furlongs"]) if "distance_furlongs" in d else fallback_dist,
+        "surface":           str(d.get("surface")   or fallback_surface),
+    }
+
+
+# ---------------------------------------------------------------------------
+# Schema guards — add new columns if missing (idempotent, called before writes)
+# ---------------------------------------------------------------------------
+def _ensure_chaos_columns(conn: sqlite3.Connection) -> None:
+    for stmt in (
+        "ALTER TABLE score_runs   ADD COLUMN chaos_active        INTEGER NOT NULL DEFAULT 0",
+        "ALTER TABLE score_runs   ADD COLUMN chaos_intensity     REAL",
+        "ALTER TABLE score_runs   ADD COLUMN field_entropy_score REAL",
+        "ALTER TABLE entry_scores ADD COLUMN chaos_score         REAL",
+        "ALTER TABLE entry_scores ADD COLUMN chaos_boost         REAL",
+        "ALTER TABLE entry_scores ADD COLUMN chaos_tier          TEXT",
+        "ALTER TABLE entry_scores ADD COLUMN chaos_eligible      INTEGER NOT NULL DEFAULT 0",
+    ):
+        try:
+            conn.execute(stmt)
+        except Exception:
+            pass
+    conn.commit()
+
+
+def _ensure_policy_columns(conn: sqlite3.Connection) -> None:
+    for table, col in [
+        ("score_runs",   "policy_surface"),
+        ("score_runs",   "policy_dist_category"),
+        ("score_runs",   "policy_field_size_bucket"),
+        ("score_runs",   "policy_tier_selected"),
+        ("score_runs",   "policy_tier_reason"),
+        ("score_runs",   "policy_chaos_selected"),
+        ("score_runs",   "policy_chaos_reason"),
+        ("entry_scores", "policy_surface"),
+        ("entry_scores", "policy_dist_category"),
+        ("entry_scores", "policy_field_size_bucket"),
+        ("entry_scores", "policy_tier_selected"),
+        ("entry_scores", "policy_tier_reason"),
+        ("entry_scores", "policy_chaos_selected"),
+        ("entry_scores", "policy_chaos_reason"),
+    ]:
+        defn = "INTEGER" if col == "policy_chaos_selected" else "TEXT"
+        try:
+            conn.execute(f"ALTER TABLE {table} ADD COLUMN {col} {defn}")
+        except Exception:
+            pass
+    conn.commit()
+
+
+# ---------------------------------------------------------------------------
+# Chaos pipeline — maps scorer arrays to chaos patch inputs, returns per-entry
+# outputs.  Returns zero-impact values when derby_active=False or patch fails.
+# ---------------------------------------------------------------------------
+def _chaos_outputs_for_run(
+    entries_df:    pd.DataFrame,
+    feat_df:       pd.DataFrame,
+    win_probs:     np.ndarray,
+    form_arr:      np.ndarray,
+    surf_dist_arr: np.ndarray,
+    derby_active:  bool,
+    chaos_index:   float = _DERBY_DEFAULT_CHAOS_INDEX,
+) -> tuple[np.ndarray, np.ndarray, list, np.ndarray, bool, float]:
+    """Return (chaos_score, chaos_boost, chaos_tier_list, chaos_eligible,
+               chaos_was_applied, chaos_intensity).
+    chaos_score = WinProb_final per entry (equals win_probs when inactive)
+    chaos_boost = WinProb_final − WinProb_base (0.0 when inactive)
+    """
+    n = len(win_probs)
+    _zero = (win_probs.copy(), np.zeros(n), ["none"] * n,
+             np.zeros(n, dtype=int), False, 0.0)
+    if not derby_active or n == 0:
+        return _zero
+
+    def _col(df: pd.DataFrame, name: str, default: float) -> np.ndarray:
+        if name in df.columns:
+            return pd.to_numeric(df[name], errors="coerce").fillna(default).values
+        return np.full(n, default, dtype=float)
+
+    ch = pd.DataFrame(index=range(n))
+    ch["WinProb_base"]       = win_probs
+    ch["PaceFit_score"]      = _col(feat_df, "pace_fit_score",    0.5) * 10.0
+    ch["DevCurve_score"]     = form_arr * 10.0
+    ch["FinishEnergy_score"] = form_arr * 10.0
+    ch["DistanceProj_score"] = surf_dist_arr * 10.0
+
+    eq  = 1.0 / max(n, 1)
+    mkt = _col(feat_df, "market_implied_prob", eq)
+    ch["Publicness_score"] = np.clip(
+        5.0 + 2.5 * np.log2(np.maximum(mkt / eq, 1e-6)), 0.0, 10.0
+    )
+
+    last_spd = _col(feat_df, "last_speed_fig", 0.0)
+    avg_spd  = _col(feat_df, "avg_speed_fig",  0.0)
+    std_spd  = float(np.std(last_spd)) if np.std(last_spd) > 0 else 1.0
+    ch["late_fig_z"] = (last_spd - avg_spd) / std_spd
+
+    ps_arr = (
+        entries_df["pace_style"].fillna("stalker").values
+        if "pace_style" in entries_df.columns
+        else np.full(n, "stalker")
+    )
+    pp_arr = _col(entries_df, "post_position", 10.0)
+    med_pp = float(np.median(pp_arr))
+    ch["FavRailCloserFlag"]    = (ps_arr == "closer").astype(int)
+    ch["FavTacticalInnerFlag"] = np.array(
+        [1 if (ps_arr[i] == "presser" and pp_arr[i] <= med_pp) else 0 for i in range(n)]
+    )
+    ch["FavTacticalOuterFlag"] = np.array(
+        [1 if (ps_arr[i] == "front" or (ps_arr[i] == "presser" and pp_arr[i] > med_pp))
+         else 0 for i in range(n)]
+    )
+
+    try:
+        from src.derbyedge.chaos_patch import apply_derby_chaos_patch, realloc_target
+        patched = apply_derby_chaos_patch(ch, chaos_index=chaos_index)
+        return (
+            patched["WinProb_final"].values,
+            (patched["WinProb_final"] - patched["WinProb_base"]).values,
+            patched["DarkHorseTier"].tolist(),
+            patched["DarkHorseFlag"].astype(int).values,
+            True,
+            float(realloc_target(chaos_index)),
+        )
+    except Exception as exc:
+        print(f"  [scorer]   chaos patch skipped: {exc!r}")
+        return _zero
 
 
 # ---------------------------------------------------------------------------
@@ -126,96 +541,8 @@ def _bet_tag(edge: float, bet_threshold: float, underlay_threshold: float) -> st
     return "neutral"
 
 
-def _model_confidence(
-    dist_starts: int,
-    career_starts: int,
-    has_null_model_feat: bool,
-    derby_override: bool = False,
-    pedigree_route_proxy: Optional[float] = None,
-) -> str:
-    """
-    Confidence tiers for seed-only mode.
-    'high' is not possible until horse_starts is populated.
-
-    Derby tightening (derby_override=True):
-      - dist_starts <= 1: always low
-      - dist_starts == 2: low unless pedigree_route_proxy >= 0.75
-      - dist_starts >= 3: medium (if model features present)
-    """
-    if has_null_model_feat:
-        return "low"
-    if dist_starts <= 1:
-        return "low"
-    if derby_override and dist_starts == 2:
-        if pedigree_route_proxy is None or pedigree_route_proxy < 0.75:
-            return "low"   # limited route experience, weak pedigree
-    return "medium"
-
-
-def _missing_flags(dist_starts: int, derby_override: bool = False) -> str:
-    flags = list(CRITICAL_MISSING)
-    if derby_override:
-        flags.extend(DERBY_EXTRA_MISSING)
-    if dist_starts <= 1:
-        flags.append("dist_fit_single_start")
-    return ",".join(flags)
-
-
-def _compute_confidence_and_flags(
-    feat_df:        pd.DataFrame,
-    entries_df:     pd.DataFrame,
-    model_features: list[str],
-    derby_override: bool = False,
-) -> pd.DataFrame:
-    """
-    Return DataFrame with entry_id, model_confidence, missing_data_flags,
-    confidence_flag (0/1 for DB).
-    """
-    check_cols = [c for c in model_features if c in feat_df.columns]
-
-    rows = []
-    for _, erow in entries_df.iterrows():
-        eid  = int(erow["entry_id"])
-        frow = feat_df[feat_df["entry_id"] == eid]
-        if frow.empty:
-            base_flags = CRITICAL_MISSING + (DERBY_EXTRA_MISSING if derby_override else [])
-            rows.append({"entry_id": eid, "model_confidence": "low",
-                         "missing_data_flags": ",".join(base_flags),
-                         "confidence_flag": 0})
-            continue
-
-        fr = frow.iloc[0]
-        has_null = any(
-            fr.get(c) is None or (isinstance(fr.get(c), float) and np.isnan(fr.get(c)))
-            for c in check_cols
-        )
-        def _int_or_zero(v):
-            return 0 if (v is None or (isinstance(v, float) and np.isnan(v))) else int(v)
-        dist_starts   = _int_or_zero(erow.get("dist_starts"))
-        career_starts = _int_or_zero(erow.get("career_starts"))
-        ped_proxy     = fr.get("pedigree_route_proxy")
-        if ped_proxy is not None:
-            try:
-                ped_proxy = float(ped_proxy)
-            except (TypeError, ValueError):
-                ped_proxy = None
-
-        confidence = _model_confidence(
-            dist_starts, career_starts, has_null,
-            derby_override=derby_override,
-            pedigree_route_proxy=ped_proxy,
-        )
-        flags     = _missing_flags(dist_starts, derby_override=derby_override)
-        conf_flag = 1 if confidence == "medium" else 0
-
-        rows.append({
-            "entry_id":           eid,
-            "model_confidence":   confidence,
-            "missing_data_flags": flags,
-            "confidence_flag":    conf_flag,
-        })
-
-    return pd.DataFrame(rows)
+pass  # _model_confidence / _missing_flags / _compute_confidence_and_flags
+# removed — replaced by src.models.confidence.compute_horse_confidence
 
 
 # ---------------------------------------------------------------------------
@@ -270,8 +597,10 @@ def _write_board(
     artifact:    ModelArtifact,
     metrics:     dict,
     score_ts:    str,
+    race_meta:   dict,
+    run_dir:     Path,
 ) -> None:
-    OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+    run_dir.mkdir(parents=True, exist_ok=True)
 
     # ── CSV ────────────────────────────────────────────────────────────────
     csv_cols = [
@@ -283,7 +612,7 @@ def _write_board(
         "value_score", "bet_tag", "low_conf_bet_block",
         "model_confidence", "missing_data_flags",
     ]
-    board[csv_cols].to_csv(OUTPUT_DIR / "derby_2026_board.csv", index=False)
+    board[csv_cols].to_csv(run_dir / "board.csv", index=False)
 
     # ── Markdown ───────────────────────────────────────────────────────────
     bet_horses = board[board["bet_tag"] == "bet"]["horse_name"].tolist()
@@ -302,7 +631,7 @@ def _write_board(
                      if "low_conf_bet_block" in board.columns else []
 
     lines = [
-        "# DerbyEdge Engine — 2026 Kentucky Derby Board",
+        f"# DerbyEdge Engine — {race_meta['track']} {race_meta['race_date']} Race {race_meta['race_no']} Board",
         "",
         "## Board Summary",
         "",
@@ -312,7 +641,7 @@ def _write_board(
         f"| Version | `{artifact.version}` |",
         f"| Score timestamp | {score_ts} |",
         f"| Model ID | {model_id} |",
-        f"| Race | 2026 Kentucky Derby (G1) · Churchill Downs · 2026-05-02 |",
+        f"| Race | {race_meta['track']} · {race_meta['race_date']} · Race {race_meta['race_no']} |",
         f"| Total horses | {len(board)} |",
         f"| Bet-tagged | {metrics['bet_count']} ({bet_str}) |",
         f"| Underlay-tagged | {metrics['underlay_count']} ({ul_str}) |",
@@ -325,7 +654,7 @@ def _write_board(
         f"| Kendall tau vs market | {metrics['kendall_tau_vs_ml']:.4f} |",
         f"| Mean abs edge | {metrics['mean_edge_abs']:.4f} |",
         f"| Low-confidence entries | {low_conf} of {len(board)} "
-        f"(dist_starts <= 1; distance_fit unreliable) |",
+        f"(score < 0.45 — see confidence_reasons per entry) |",
         "",
         "---",
         "",
@@ -355,27 +684,26 @@ def _write_board(
             f"| {conf_str} |"
         )
 
-    # ── Missing-data detail ────────────────────────────────────────────────
+    # ── Low-confidence detail ─────────────────────────────────────────────
     low_conf_horses = board[board["model_confidence"] == "low"]
     if not low_conf_horses.empty:
         lines += [
             "",
             "### Low-Confidence Entries",
             "",
-            "These horses have `dist_starts <= 1`; their distance_fit score is based on "
-            "`stamina_index` alone (no race history at 1.25 miles).",
+            "These horses scored < 0.45 on the 4-component confidence system "
+            "(horse evidence × 0.35, race evidence × 0.25, model certainty × 0.30, "
+            "calibration × 0.10).",
             "",
-            "| Horse | Post | Dist Starts | Additional Missing Flags |",
-            "|-------|------|-------------|--------------------------|",
+            "| Horse | Post | Score | Reasons |",
+            "|-------|------|-------|---------|",
         ]
         for _, r in low_conf_horses.iterrows():
-            flags = r['missing_data_flags'].replace(
-                ",".join(CRITICAL_MISSING) + ",", ""
-            ).replace(",".join(CRITICAL_MISSING), "")
+            score   = r.get("confidence_score", 0.0)
+            reasons = r.get("confidence_reasons", "—")
             lines.append(
                 f"| {r['horse_name']} | {int(r['post_position'])} "
-                f"| {int(r.get('dist_starts_raw') or 0) if not (isinstance(r.get('dist_starts_raw'), float) and np.isnan(r.get('dist_starts_raw') or 0)) else 0} "
-                f"| dist_fit_single_start |"
+                f"| {score:.3f} | {reasons} |"
             )
 
     # ── Diagnostic footer ──────────────────────────────────────────────────
@@ -435,8 +763,9 @@ def _write_board(
         "> To elevate after manual review, override the bet_tag in the database directly.",
     ]
 
-    (OUTPUT_DIR / "derby_2026_board.md").write_text("\n".join(lines), encoding="utf-8")
-    print(f"  [board]    board written -> {OUTPUT_DIR / 'derby_2026_board.md'}")
+    board_path = run_dir / "board.md"
+    board_path.write_text("\n".join(lines), encoding="utf-8")
+    print(f"  [board]    board written -> {board_path}")
 
 
 def _write_eval_report(
@@ -444,10 +773,11 @@ def _write_eval_report(
     artifact:  ModelArtifact,
     board:     pd.DataFrame,
     model_id:  int,
+    run_dir:   Path,
 ) -> None:
-    OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+    run_dir.mkdir(parents=True, exist_ok=True)
     race_type = metrics["race_type_key"]
-    path      = OUTPUT_DIR / f"model_evaluation_{race_type}.md"
+    path      = run_dir / "model_evaluation.md"
 
     quality = (
         "SEED-ONLY BASELINE — principled weighted composite from 46-feature "
@@ -599,6 +929,11 @@ def score_race(card_id: Optional[int] = None) -> pd.DataFrame:
         raise RuntimeError("No Kentucky Derby card found — run ingest first.")
 
     # ── Load data ──────────────────────────────────────────────────────────
+    entries_df = pd.read_sql(
+        "SELECT * FROM v_entries_live WHERE card_id=? ORDER BY post_position",
+        conn, params=(card_id,),
+    )
+
     feat_df = pd.read_sql(
         "SELECT * FROM feature_store WHERE card_id=? ORDER BY post_position",
         conn, params=(card_id,),
@@ -607,10 +942,19 @@ def score_race(card_id: Optional[int] = None) -> pd.DataFrame:
         conn.close()
         raise RuntimeError(f"No features for card_id={card_id} — run build_features first.")
 
-    entries_df = pd.read_sql(
-        "SELECT * FROM v_entries_live WHERE card_id=? ORDER BY post_position",
-        conn, params=(card_id,),
+    # Filter feat_df to live (non-scratched) entries only.
+    # v_entries_live already excludes scratches; we must align feat_df so
+    # positional array indexing (win_probs[i], feat_df.iloc[i]) stays in sync.
+    _live_eids = set(entries_df["entry_id"].astype(int))
+    feat_df = (
+        feat_df[feat_df["entry_id"].astype(int).isin(_live_eids)]
+        .reset_index(drop=True)
     )
+    if feat_df.empty:
+        conn.close()
+        raise RuntimeError(
+            f"All entries are scratched or missing features for card_id={card_id}."
+        )
 
     rc = conn.execute(
         "SELECT surface, distance_furlongs FROM race_cards WHERE card_id=?",
@@ -619,6 +963,30 @@ def score_race(card_id: Optional[int] = None) -> pd.DataFrame:
     surface       = rc["surface"] if rc else "dirt"
     dist_furlongs = float(rc["distance_furlongs"]) if rc else 10.0
     race_type_key = f"{surface}_{'sprint' if dist_furlongs < 8.5 else 'route'}"
+
+    # ── Policy layer ──────────────────────────────────────────────────────
+    _policy_dist_cat        = "sprint" if dist_furlongs < 8.5 else "route"
+    _policy_field_size      = len(entries_df)
+    _policy_surf_norm       = _policy_norm_surface(surface)
+    policy_field_bucket     = bucket_field_size(_policy_field_size)
+    policy_tier, policy_tier_reason   = choose_tier(surface, _policy_dist_cat, _policy_field_size)
+    policy_chaos_default, policy_chaos_reason = policy_default_chaos(
+        surface, _policy_dist_cat, _policy_field_size
+    )
+
+    # Cache race metadata for shadow log (must read while conn is open).
+    # Uses _fetch_race_meta so the query adapts to whichever column names
+    # exist on this DB — older schemas use card_date/race_number rather than
+    # race_date/race_no, and distance_furlongs may be absent as a generated col.
+    _race_meta = _fetch_race_meta(
+        conn, card_id,
+        fallback_surface=surface,
+        fallback_dist=dist_furlongs,
+    )
+    run_dir = run_dir_for_card(card_id, conn=conn)
+    run_key = card_run_key(
+        _race_meta["track"], _race_meta["race_date"], _race_meta["race_no"]
+    )
 
     # ── Derby override detection ───────────────────────────────────────────
     derby_active = is_derby_context(conn, card_id)
@@ -639,9 +1007,46 @@ def score_race(card_id: Optional[int] = None) -> pd.DataFrame:
         )
     config = artifact.config
 
+    # ── Sanitize win_probs — final gate before all downstream math ─────────
+    _n_entries = len(feat_df)
+    _n_nonfinite = int((~np.isfinite(win_probs)).sum())
+    if _n_nonfinite or win_probs.sum() <= 0:
+        print(
+            f"[scorer] win_probs defaulted to uniform prior for {_n_entries} entries "
+            f"due to non-finite model output ({_n_nonfinite} non-finite value(s))"
+        )
+        win_probs = np.full(_n_entries, 1.0 / _n_entries)
+    else:
+        win_probs = win_probs / win_probs.sum()   # normalize away any fp drift
+
     # ── Market probs (overround-adjusted) ─────────────────────────────────
-    ml_implied   = feat_df["market_implied_prob"].astype(float).values
-    market_probs = ml_implied / ml_implied.sum()
+    ml_implied = pd.to_numeric(
+        feat_df["market_implied_prob"], errors="coerce"
+    ).fillna(0.0).values
+    ml_sum = ml_implied.sum()
+    if ml_sum <= 0:
+        market_probs = np.full(_n_entries, 1.0 / _n_entries)
+    else:
+        market_probs = ml_implied / ml_sum
+
+    # ── ML serving pipeline ───────────────────────────────────────────────
+    _serving_mode    = _resolve_serving_mode()
+    _heuristic_probs = win_probs.copy()
+    _ml_win_probs    = None
+
+    if not derby_active and _serving_mode in ("shadow", "live"):
+        _ml_win_probs = _load_ml_win_probs(
+            feat_df, entries_df, win_probs, market_probs,
+            race_type_key, dist_furlongs, surface,
+        )
+
+    win_probs, _ml_loaded = _decide_served_probs(
+        _serving_mode, derby_active, _heuristic_probs, _ml_win_probs
+    )
+    print(
+        f"  [scorer]   mode={_serving_mode}  ml_loaded={_ml_loaded}  "
+        f"derby_override={derby_active}"
+    )
 
     # ── Derived scoring ────────────────────────────────────────────────────
     fair_odds          = np.round(1.0 / np.maximum(win_probs, 1e-9) - 1.0, 2)
@@ -651,40 +1056,58 @@ def score_race(card_id: Optional[int] = None) -> pd.DataFrame:
     bet_thr  = config["bet_edge_threshold"]
     ul_thr   = config["underlay_edge_threshold"]
     bet_tags = [_bet_tag(e, bet_thr, ul_thr) for e in model_edge]
-    rank_arr = pd.Series(win_probs).rank(ascending=False, method="first").astype(int).values
+    rank_arr = (
+        pd.to_numeric(pd.Series(win_probs), errors="coerce")
+        .fillna(0.0)
+        .rank(ascending=False, method="first")
+        .astype(int)
+        .values
+    )
 
     # ── Group scores for board columns ─────────────────────────────────────
     group_scores     = compute_group_scores(feat_df, config)
     form_arr         = group_scores.get("form_class",      np.zeros(len(feat_df)))
     surf_dist_arr    = group_scores.get("distance_surface", np.zeros(len(feat_df)))
 
-    # ── Confidence + missing flags ─────────────────────────────────────────
+    # ── Confidence scoring (4-component scored system) ────────────────────
     model_feats = [
         f for g in config["feature_groups"].values()
         for f in g["features"]
     ]
-    conf_df = _compute_confidence_and_flags(feat_df, entries_df, model_feats,
-                                             derby_override=derby_active)
+    conf_df = compute_horse_confidence(
+        feat_df, entries_df, win_probs, market_probs,
+        model_feats, derby_override=derby_active,
+    )
 
     # ── Low-confidence BET guardrail ──────────────────────────────────────
-    # LOW-conf entries owe their raw BET edge purely to the odds-floor vs the
-    # market probability gap, not to real model signal.  Force them to neutral
-    # and record the block so operators can manually elevate after review.
-    _conf_by_eid = {
-        int(r["entry_id"]): r["model_confidence"]
+    # LOW-bucket entries: edge may be artefact of odds-floor vs market gap,
+    # not genuine model signal.  Force to neutral and record the block.
+    _bucket_by_eid = {
+        int(r["entry_id"]): r["confidence_bucket"]
         for _, r in conf_df.iterrows()
     }
     final_bet_tags     = []
     low_conf_bet_block = []
     for i, (_, erow) in enumerate(entries_df.iterrows()):
         raw_tag = bet_tags[i]
-        conf    = _conf_by_eid.get(int(erow["entry_id"]), "low")
-        if conf == "low" and raw_tag == "bet":
+        bucket  = _bucket_by_eid.get(int(erow["entry_id"]), "LOW")
+        if bucket == "LOW" and raw_tag == "bet":
             final_bet_tags.append("neutral")
             low_conf_bet_block.append(1)
         else:
             final_bet_tags.append(raw_tag)
             low_conf_bet_block.append(0)
+
+    # ── Chaos pipeline ────────────────────────────────────────────────────
+    (chaos_scores, chaos_boosts, chaos_tiers, chaos_eligs,
+     chaos_applied, chaos_intensity) = _chaos_outputs_for_run(
+        entries_df, feat_df, win_probs, form_arr, surf_dist_arr,
+        derby_active=derby_active, chaos_index=_DERBY_DEFAULT_CHAOS_INDEX,
+    )
+    field_entropy = float(-np.sum(win_probs * np.log(np.maximum(win_probs, 1e-9))))
+    if chaos_applied:
+        print(f"  [scorer]   chaos applied  intensity={chaos_intensity:.3f}  "
+              f"entropy={field_entropy:.3f}")
 
     # ── Metrics ───────────────────────────────────────────────────────────
     metrics = _compute_metrics(win_probs, market_probs, artifact)
@@ -698,24 +1121,50 @@ def score_race(card_id: Optional[int] = None) -> pd.DataFrame:
     print(f"  [scorer]   model_id={model_id}  artifact={artifact_path.name}")
 
     # ── DB writes ──────────────────────────────────────────────────────────
+    _ensure_chaos_columns(conn)
+    _ensure_policy_columns(conn)
+    ensure_entry_scores_columns(conn)
     run_id = str(uuid.uuid4())[:8]
+
+    quality_tier = "seed_only"
+    try:
+        n_pp = conn.execute(
+            "SELECT COUNT(*) FROM firstbet_pp_starts WHERE card_id=?", (card_id,)
+        ).fetchone()[0]
+        if n_pp > 0:
+            quality_tier = "enriched_proxy"
+    except Exception:
+        pass
+
     conn.execute(
-        "INSERT INTO score_runs (run_id, card_id, model_id, model_type, derby_override_active) "
-        "VALUES (?,?,?,?,?)",
-        (run_id, card_id, model_id, artifact.model_type, int(derby_active)),
+        "INSERT INTO score_runs "
+        "(run_id, card_id, model_id, model_type, derby_override_active, quality_tier, "
+        " chaos_active, chaos_intensity, field_entropy_score,"
+        " policy_surface, policy_dist_category, policy_field_size_bucket,"
+        " policy_tier_selected, policy_tier_reason,"
+        " policy_chaos_selected, policy_chaos_reason) "
+        "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        (run_id, card_id, model_id, artifact.model_type, int(derby_active), quality_tier,
+         int(chaos_applied), round(chaos_intensity, 4), round(field_entropy, 4),
+         _policy_surf_norm, _policy_dist_cat, policy_field_bucket,
+         policy_tier, policy_tier_reason,
+         int(policy_chaos_default), policy_chaos_reason),
     )
 
-    # Purge stale runs for this card (keep only latest)
-    conn.execute(
-        "DELETE FROM entry_scores WHERE run_id IN "
-        "(SELECT run_id FROM score_runs WHERE card_id=? AND run_id != ?)",
-        (card_id, run_id),
-    )
+    # Keep prior run rows: the app's card-scoped selector supports audit and
+    # comparison, and no score run should erase a previous score artifact.
 
     for i, (_, erow) in enumerate(entries_df.iterrows()):
         eid = int(erow["entry_id"])
-        conf_row  = conf_df[conf_df["entry_id"] == eid]
-        conf_flag = int(conf_row["confidence_flag"].iloc[0]) if not conf_row.empty else 0
+        conf_row    = conf_df[conf_df["entry_id"] == eid]
+        if not conf_row.empty:
+            cr = conf_row.iloc[0]
+            conf_flag   = int(cr["confidence_flag"])
+            conf_score  = float(cr["confidence_score"])
+            conf_bucket = str(cr["confidence_bucket"])
+            conf_reasons= str(cr["confidence_reasons"])
+        else:
+            conf_flag, conf_score, conf_bucket, conf_reasons = 0, 0.25, "LOW", "no feature data"
         conn.execute(
             """
             INSERT INTO entry_scores (
@@ -724,8 +1173,13 @@ def score_race(card_id: Optional[int] = None) -> pd.DataFrame:
                 pace_fit_score, form_score, surface_dist_fit, value_score,
                 market_implied_prob, bet_tag,
                 confidence_flag, missing_data_flag, low_conf_bet_block, rank,
-                trainer_name, jockey_name
-            ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                trainer_name, jockey_name,
+                chaos_score, chaos_boost, chaos_tier, chaos_eligible,
+                confidence_score, confidence_bucket, confidence_reasons,
+                policy_surface, policy_dist_category, policy_field_size_bucket,
+                policy_tier_selected, policy_tier_reason,
+                policy_chaos_selected, policy_chaos_reason
+            ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
             """,
             (
                 run_id, eid, erow["horse_name"], int(erow["post_position"]),
@@ -745,6 +1199,16 @@ def score_race(card_id: Optional[int] = None) -> pd.DataFrame:
                 int(rank_arr[i]),
                 erow.get("trainer", ""),
                 erow.get("jockey", ""),
+                round(float(chaos_scores[i]), 6) if chaos_applied else None,
+                round(float(chaos_boosts[i]), 6) if chaos_applied else None,
+                chaos_tiers[i]                   if chaos_applied else None,
+                int(chaos_eligs[i]),
+                conf_score,
+                conf_bucket,
+                conf_reasons,
+                _policy_surf_norm, _policy_dist_cat, policy_field_bucket,
+                policy_tier, policy_tier_reason,
+                int(policy_chaos_default), policy_chaos_reason,
             ),
         )
 
@@ -768,24 +1232,93 @@ def score_race(card_id: Optional[int] = None) -> pd.DataFrame:
     board["form_score"]         = np.round(form_arr,      4)
     board["surface_dist_fit"]   = np.round(surf_dist_arr, 4)
     board["pace_fit_score"]     = feat_df["pace_fit_score"].values
+    if chaos_applied:
+        board["chaos_score"]    = np.round(chaos_scores, 6)
+        board["chaos_boost"]    = np.round(chaos_boosts, 6)
+        board["chaos_tier"]     = chaos_tiers
+        board["chaos_eligible"] = chaos_eligs
     board["rank"]               = rank_arr
 
+    # ── Policy observability columns (race-level, repeated per row) ────────
+    board["policy_surface"]           = _policy_surf_norm
+    board["policy_dist_category"]     = _policy_dist_cat
+    board["policy_field_size_bucket"] = policy_field_bucket
+    board["policy_tier_selected"]     = policy_tier
+    board["policy_tier_reason"]       = policy_tier_reason
+    board["policy_chaos_selected"]    = int(policy_chaos_default)
+    board["policy_chaos_reason"]      = policy_chaos_reason
+
     # Merge confidence columns
-    conf_merge = conf_df[["entry_id", "model_confidence", "missing_data_flags"]]
+    conf_merge = conf_df[[
+        "entry_id", "model_confidence", "missing_data_flags",
+        "confidence_score", "confidence_bucket", "confidence_reasons",
+    ]]
     board = board.merge(conf_merge, on="entry_id", how="left")
     board["dist_starts_raw"] = board["dist_starts"]  # for low-conf table
 
     board = board.sort_values("rank").reset_index(drop=True)
 
     # ── Write outputs ──────────────────────────────────────────────────────
-    _write_board(board, run_id, model_id, artifact, metrics, score_ts)
-    _write_eval_report(metrics, artifact, board, model_id)
+    _write_board(
+        board, run_id, model_id, artifact, metrics, score_ts,
+        race_meta=_race_meta, run_dir=run_dir,
+    )
+    _write_eval_report(metrics, artifact, board, model_id, run_dir=run_dir)
+    metadata_path = run_dir / "metadata.json"
+    metadata_path.write_text(
+        json.dumps(
+            {
+                "run_id": run_id,
+                "run_key": run_key,
+                "card_id": card_id,
+                "track_abbrev": _race_meta["track"],
+                "card_date": _race_meta["race_date"],
+                "race_number": int(_race_meta["race_no"]),
+                "surface": surface,
+                "distance_furlongs": dist_furlongs,
+                "model_name": artifact.model_name,
+                "model_family": artifact.config["model_family"],
+                "derby_override_active": derby_active,
+                "scored_at": score_ts,
+            },
+            indent=2,
+            sort_keys=True,
+        ) + "\n",
+        encoding="utf-8",
+    )
+    print(f"  [output]   run assets -> {run_dir}")
 
     low_conf_n = int((board["model_confidence"] == "low").sum())
     blocked_n = metrics.get("blocked_bet_count", 0)
     print(f"  [scorer]   run_id={run_id}  sum_win_prob={metrics['sum_win_prob']:.6f}  "
           f"bets={metrics['bet_count']}  blocked={blocked_n}  "
           f"underlays={metrics['underlay_count']}  low_conf={low_conf_n}")
+
+    # ── Shadow log ─────────────────────────────────────────────────────────
+    if _serving_mode in ("shadow", "live"):
+        _emit_shadow_log(
+            card_id=card_id,
+            race_meta=_race_meta,
+            entries_df=entries_df,
+            heuristic_probs=_heuristic_probs,
+            ml_probs=_ml_win_probs,
+            served_probs=win_probs,
+            ml_loaded_flag=_ml_loaded,
+            mode=_serving_mode,
+            model_version=artifact.version,
+            dist_furlongs=dist_furlongs,
+            surface=surface,
+            derby_override=derby_active,
+            segment=race_type_key,
+            scored_at=score_ts,
+            policy_surface=_policy_surf_norm,
+            policy_dist_category=_policy_dist_cat,
+            policy_field_size_bucket=policy_field_bucket,
+            policy_tier_selected=policy_tier,
+            policy_tier_reason=policy_tier_reason,
+            policy_chaos_selected=int(policy_chaos_default),
+            policy_chaos_reason=policy_chaos_reason,
+        )
 
     return board
 

@@ -11,6 +11,7 @@ After running, query live entries via:
 """
 
 import argparse
+import json
 import sys
 from pathlib import Path
 
@@ -30,6 +31,11 @@ def main() -> int:
         help="Source CSV (default: data/seeds/derby_2026_field.csv)",
     )
     ap.add_argument(
+        "--meta",
+        metavar="PATH",
+        help="Race metadata JSON; defaults to Derby 2026 metadata",
+    )
+    ap.add_argument(
         "--skip-validate",
         action="store_true",
         help="Skip post-load validation checks",
@@ -37,6 +43,9 @@ def main() -> int:
     args = ap.parse_args()
 
     csv_path = Path(args.csv) if args.csv else None
+    meta = None
+    if args.meta:
+        meta = json.loads(Path(args.meta).read_text(encoding="utf-8"))
 
     print("\nDerbyEdge ingest")
     print("=" * 44)
@@ -44,7 +53,7 @@ def main() -> int:
     conn = get_connection()
 
     # ── load ─────────────────────────────────────────────────────────────────
-    result = load_derby_seed(csv_path=csv_path, conn=conn)
+    result = load_derby_seed(csv_path=csv_path, conn=conn, meta=meta)
     conn.commit()
 
     print(f"  [loader]  Source : {result.csv_path}")
@@ -63,6 +72,7 @@ def main() -> int:
             card_id=result.card_id,
             csv_path=Path(result.csv_path),
             load_result=result,
+            expected_field=meta["expected_field"] if meta else 20,
         )
         fails = [c for c in src_checks + db_checks if c.status == "FAIL"]
         if fails:
