@@ -31,10 +31,20 @@ Requires: pip install pdfplumber
 """
 from __future__ import annotations
 
+from datetime import datetime, timezone
+import hashlib
 import io
 import logging
+from pathlib import Path
 import re
 from typing import Any
+
+from src.ingest.draftkings_pdf import (
+    is_draftkings_pdf,
+    parse_draftkings_pdf,
+    to_dk_legacy_race_result,
+    DebugContainer,
+)
 
 _log = logging.getLogger(__name__)
 
@@ -1347,8 +1357,12 @@ def _parse_results_1stbet(text: str, warnings: list[str]) -> dict:
 
 # ── Public API ────────────────────────────────────────────────────────────────
 
-def parse_race_pdf(pdf_bytes: bytes) -> dict[str, Any]:
-    """Parse a pre-race PDF (1/ST BET race detail, Equibase, DRF, sportsbook).
+def parse_race_pdf(
+    pdf_bytes: bytes,
+    filename: str | None = None,
+    stored_path: str | None = None,
+) -> dict[str, Any]:
+    """Parse a pre-race PDF (DraftKings Horse, 1/ST BET race detail, Equibase, DRF, sportsbook).
 
     Returns:
         ok, error, warnings,
@@ -1356,8 +1370,19 @@ def parse_race_pdf(pdf_bytes: bytes) -> dict[str, Any]:
         distance_text, surface, race_type, purse_usd, field_size,
         runners  — list of runner dicts (see _runner_dict)
         is_1stbet — True when the 1/ST BET-specific parser was used
+        is_draftkings — True when the DraftKings-specific parser was used
+        upload, parser, race_resolution, race — standard diagnostic payload
     """
     warnings: list[str] = []
+
+    # 0. Early DraftKings detection by filename
+    if filename and is_draftkings_pdf(filename=filename):
+        dk_parsed = parse_draftkings_pdf(
+            pdf_bytes,
+            filename=filename,
+            stored_path=stored_path,
+        )
+        return to_dk_legacy_race_result(dk_parsed)
 
     try:
         text = _extract_text(pdf_bytes)
@@ -1375,6 +1400,15 @@ def parse_race_pdf(pdf_bytes: bytes) -> dict[str, Any]:
             ),
             "warnings": [], "runners": [],
         }
+
+    # 1. Content-based DraftKings detection
+    if is_draftkings_pdf(text=text, filename=filename, pdf_bytes=pdf_bytes):
+        dk_parsed = parse_draftkings_pdf(
+            pdf_bytes,
+            filename=filename or "SAR_DK_Horse_R9_9-2-26.pdf",
+            stored_path=stored_path,
+        )
+        return to_dk_legacy_race_result(dk_parsed)
 
     detected_1stbet = _is_1stbet(text)
     _log.debug(
@@ -1496,10 +1530,47 @@ def parse_race_pdf(pdf_bytes: bytes) -> dict[str, Any]:
         "parse_source":           _parse_source,
     }
 
+    upload_dict = DebugContainer({
+        "original_filename": filename or "unknown.pdf",
+        "stored_path": stored_path or filename or "unknown.pdf",
+        "size_bytes": len(pdf_bytes),
+        "sha256": hashlib.sha256(pdf_bytes).hexdigest(),
+        "uploaded_at": datetime.now(timezone.utc).isoformat(),
+    })
+    parser_dict = DebugContainer({
+        "adapter_selected": "firstbet_pdf" if detected_1stbet else "generic_pdf",
+        "adapter_version": "1.0.0",
+        "raw_text_sha256": hashlib.sha256(text.encode("utf-8")).hexdigest(),
+        "first_500_chars": text[:500],
+        "page_count": len(text.split("\x0c")) if "\x0c" in text else 1,
+        "raw_text": text,
+    })
+    race_res_dict = DebugContainer({
+        "filename_race_number": None,
+        "header_race_number": race_number,
+        "selected_race_number": race_number,
+        "track_candidates": [track_code] if track_code else [],
+        "race_candidates": [race_number] if race_number else [],
+        "header_pages_scanned": [1],
+    })
+    race_dict = {
+        "track_code": track_code,
+        "race_date": race_date,
+        "race_number": race_number,
+        "distance_text": distance_text,
+        "surface": surface,
+        "runners_count": len(runners),
+        "runners": runners,
+    }
+
     return {
         "ok":            True,
         "error":         None,
         "warnings":      warnings,
+        "upload":        upload_dict,
+        "parser":        parser_dict,
+        "race_resolution": race_res_dict,
+        "race":          race_dict,
         "track_code":    track_code,
         "track_name":    track_name,
         "race_date":     race_date,
@@ -1514,6 +1585,7 @@ def parse_race_pdf(pdf_bytes: bytes) -> dict[str, Any]:
         "runners_primary":  runners_primary,
         "runners_fallback": runners_fallback,
         "is_1stbet":        detected_1stbet,
+        "is_draftkings":    False,
         "raw_text":         text,
         "parse_debug":      parse_debug,
         # resolver enrichment — never overwrites the raw parsed fields above
