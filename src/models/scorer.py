@@ -73,7 +73,7 @@ from src.services.run_mode import (
     get_card_run_state,
     quality_with_verified_features,
 )
-from src.services.odds_intake import load_live_odds_by_pp
+from src.services.odds_intake import load_live_odds_by_pp, market_eligibility
 from src.services.model_independence import (
     detect_market_prior_collapse,
     pre_market_signal_probabilities,
@@ -574,6 +574,14 @@ def _complete_live_market_probs(
     """Return a normalized live-market vector only for a complete exact snapshot."""
     live_by_pp = load_live_odds_by_pp(conn, card_id)
     try:
+        post_row = conn.execute(
+            "SELECT scheduled_post_time_utc FROM race_cards WHERE card_id=?",
+            (card_id,),
+        ).fetchone()
+        scheduled_post = post_row[0] if post_row else None
+    except Exception:
+        scheduled_post = None
+    try:
         posts = [int(value) for value in entries_df["post_position"]]
         entry_ids = [int(value) for value in entries_df["entry_id"]]
     except (KeyError, TypeError, ValueError):
@@ -590,6 +598,11 @@ def _complete_live_market_probs(
         except (KeyError, TypeError, ValueError):
             return None
         if quote_entry_id != entry_id or not np.isfinite(decimal) or decimal <= 1.0:
+            return None
+        eligible, _reason = market_eligibility(
+            quote.get("odds_type", "unknown"), quote.get("captured_at"), scheduled_post
+        )
+        if not eligible:
             return None
         decimals.append(decimal)
     raw = 1.0 / np.asarray(decimals, dtype=float)
@@ -621,11 +634,20 @@ def _compute_metrics(
         win_probs * np.log(np.maximum(win_probs / np.maximum(market_probs, 1e-9), 1e-9))
     ))
 
+    calibration = artifact.calibration_audit or {}
     return {
         "model_type":        artifact.model_type,
         "race_type_key":     artifact.race_type_key,
         "training_rows":     artifact.training_rows,
         "temperature":       artifact.temperature,
+        "uncalibrated_entropy": calibration.get("uncalibrated_entropy"),
+        "calibrated_entropy": calibration.get("calibrated_entropy"),
+        "selected_temperature": calibration.get("selected_temperature", artifact.temperature),
+        "temperature_adjustment_status": calibration.get("temperature_adjustment_status"),
+        "morning_line_available": calibration.get("morning_line_available", False),
+        "market_prior_source": calibration.get("market_prior_source", "uniform"),
+        "divergence_from_morning_line": calibration.get("divergence_from_morning_line"),
+        "calibration_status": calibration.get("calibration_status"),
         "sum_win_prob":      round(float(win_probs.sum()), 6),
         "kendall_tau_vs_ml": round(float(tau), 4),
         "kl_div_vs_ml":      round(kl, 4),
@@ -665,6 +687,8 @@ def _write_board(
         "morning_line_odds",
         "model_win_prob_pct", "fair_odds",
         "pace_fit_score", "form_score", "surface_dist_fit",
+        "form_class_coverage", "distance_surface_coverage", "readiness_coverage",
+        "dk_history_start_count", "dk_workout_count", "feature_source_mix",
         "value_score", "bet_tag", "low_conf_bet_block",
         "model_confidence", "missing_data_flags",
     ]
@@ -838,7 +862,7 @@ def _write_eval_report(
     path      = run_dir / "model_evaluation.md"
 
     quality = (
-        "SEED-ONLY BASELINE — principled weighted composite from 46-feature "
+        "SEED-ONLY BASELINE — principled weighted composite from the versioned feature "
         "catalog; no historical training data; probabilities are model-informed "
         "estimates, not calibrated predictions"
     )
@@ -865,8 +889,14 @@ def _write_eval_report(
         "",
         "| Criterion | Status |",
         "|-----------|--------|",
-        f"| Training rows | {metrics['training_rows']} (need >= 50 for XGBoost) |",
-        f"| Calibration | temperature-scaled softmax (T={metrics['temperature']}) |",
+        f"| Training rows | {metrics['training_rows']} (production gate: >=4,000 starters / >=500 races) |",
+        f"| Calibration | bounded temperature-scaled softmax (T={metrics['selected_temperature']}) |",
+        f"| Temperature adjustment | {metrics['temperature_adjustment_status']} |",
+        f"| Calibration status | {metrics['calibration_status']} |",
+        f"| Morning line available | {metrics['morning_line_available']} |",
+        f"| Market-prior source | {metrics['market_prior_source']} |",
+        f"| JS divergence from morning line | {metrics['divergence_from_morning_line']} |",
+        f"| Entropy (uncalibrated / calibrated) | {metrics['uncalibrated_entropy']} / {metrics['calibrated_entropy']} |",
         f"| Calibration target | overround-adjusted morning line |",
         f"| Bet threshold | edge >= +{artifact.config['bet_edge_threshold']:.3f} |",
         f"| Underlay threshold | edge < {artifact.config['underlay_edge_threshold']:.3f} |",
@@ -949,9 +979,10 @@ def _write_eval_report(
         "",
         "- **Seed-only**: no access to race-by-race speed splits, real workout records,",
         "  conditioned trainer/jockey stats, track bias, or trip flags.",
-        "- 12/46 features are PLACEHOLDER (null for all entries).",
-        "- 12/46 features are DEGRADED (proxy formulas from aggregate seed data).",
-        "- Calibration is temperature-scaled softmax tuned to morning line spread;",
+        "- Source-dependent features remain explicit placeholders when unavailable.",
+        "- Proxy formulas remain labeled DEGRADED in the feature catalog.",
+        "- Calibration is bounded temperature-scaled softmax softly anchored to morning-line spread, not outcomes;",
+        "- XGBoost requires 500 completed family races, 4,000 labeled starters, 12 rolling OOF folds, coverage and metric gates;",
         "  NOT isotonic regression against actual race outcomes.",
         "- **Do not use for real-money wagering without historical validation.**",
     ]
@@ -1298,6 +1329,13 @@ def score_race(card_id: Optional[int] = None) -> pd.DataFrame:
             quality_tier = "enriched_proxy"
     except Exception:
         pass
+    dk_evidence = sum(
+        float(pd.to_numeric(feat_df[col], errors="coerce").fillna(0).sum())
+        for col in ("dk_history_start_count", "dk_workout_count")
+        if col in feat_df.columns
+    )
+    if dk_evidence > 0:
+        quality_tier = "enriched_proxy"
 
     conn.execute(
         "INSERT INTO score_runs "
@@ -1305,10 +1343,13 @@ def score_race(card_id: Optional[int] = None) -> pd.DataFrame:
         " chaos_active, chaos_intensity, field_entropy_score,"
         " effective_run_mode, model_collapse_status, max_abs_model_ml_delta,"
         " mean_abs_model_ml_delta, displayed_model_assigned_from_market,"
+        " uncalibrated_entropy, calibrated_entropy, selected_temperature,"
+        " morning_line_available, market_prior_source, divergence_from_morning_line,"
+        " calibration_status, dispatcher_mode, dispatcher_reason_codes,"
         " policy_surface, policy_dist_category, policy_field_size_bucket,"
         " policy_tier_selected, policy_tier_reason,"
         " policy_chaos_selected, policy_chaos_reason) "
-        "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
         (run_id, card_id, model_id, artifact.model_type, int(derby_active), quality_tier,
          int(chaos_applied), round(chaos_intensity, 4), round(field_entropy, 4),
          effective_run_mode.value,
@@ -1316,6 +1357,11 @@ def score_race(card_id: Optional[int] = None) -> pd.DataFrame:
          _collapse.max_abs_delta if _collapse else None,
          _collapse.mean_abs_delta if _collapse else None,
          0,
+         metrics.get("uncalibrated_entropy"), metrics.get("calibrated_entropy"),
+         metrics.get("selected_temperature"), int(bool(metrics.get("morning_line_available"))),
+         metrics.get("market_prior_source"), metrics.get("divergence_from_morning_line"),
+         metrics.get("calibration_status"), artifact.dispatcher_audit.get("mode"),
+         json.dumps(artifact.dispatcher_audit.get("reason_codes", [])),
          _policy_surf_norm, _policy_dist_cat, policy_field_bucket,
          policy_tier, policy_tier_reason,
          int(policy_chaos_default), policy_chaos_reason),
@@ -1407,6 +1453,15 @@ def score_race(card_id: Optional[int] = None) -> pd.DataFrame:
     board["form_score"]         = np.round(form_arr,      4)
     board["surface_dist_fit"]   = np.round(surf_dist_arr, 4)
     board["pace_fit_score"]     = feat_df["pace_fit_score"].values
+    for audit_col in (
+        "form_class_coverage", "distance_surface_coverage", "readiness_coverage",
+        "dk_history_start_count", "dk_workout_count", "feature_source_mix",
+        "market_implied_prob_source",
+    ):
+        board[audit_col] = (
+            feat_df[audit_col].values if audit_col in feat_df.columns
+            else ("source_neutral" if audit_col == "feature_source_mix" else None)
+        )
     if chaos_applied:
         board["chaos_score"]    = np.round(chaos_scores, 6)
         board["chaos_boost"]    = np.round(chaos_boosts, 6)
@@ -1458,6 +1513,8 @@ def score_race(card_id: Optional[int] = None) -> pd.DataFrame:
                 "model_collapse_status": _collapse.status if _collapse else None,
                 "max_abs_model_ml_delta": _collapse.max_abs_delta if _collapse else None,
                 "mean_abs_model_ml_delta": _collapse.mean_abs_delta if _collapse else None,
+                "calibration_audit": artifact.calibration_audit,
+                "dispatcher_audit": artifact.dispatcher_audit,
                 "scored_at": score_ts,
             },
             indent=2,

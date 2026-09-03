@@ -2373,7 +2373,7 @@ with tab3:
     st.markdown(
         '<div class="info-banner">ℹ Seed-only install: horse_starts, workouts, '
         "track_bias, and trip_flags are intentionally empty. "
-        "12 of 46 features are null (PLACEHOLDER) until historical data is loaded.</div>",
+        "Unavailable source-dependent features remain explicit placeholders.</div>",
         unsafe_allow_html=True,
     )
 
@@ -2382,7 +2382,7 @@ with tab3:
         "workouts":     (db_stats.get("workouts", 0),     "Bullet counts, days-since-work"),
         "track_bias":   (db_stats.get("track_bias", 0),   "Post bias, rail position"),
         "trip_flags":   (db_stats.get("trip_flags", 0),   "Trip trouble, recovery proxy"),
-        "feature_store":(db_stats.get("feature_store", 0),"Computed features (46 per entry)"),
+        "feature_store":(db_stats.get("feature_store", 0),"Versioned computed features per entry"),
         "entry_scores": (db_stats.get("entry_scores", 0), "Model output scores"),
     }
     src_df = pd.DataFrame(
@@ -2404,7 +2404,7 @@ with tab3:
                 ("Model family",   meta.get("model_family")),
                 ("Version",        meta.get("version")),
                 ("Model type",     meta.get("model_type")),
-                ("Training rows",  f"{meta.get('training_rows', 0)} (need ≥50 for XGBoost)"),
+                ("Labeled starters",  f"{meta.get('training_rows', 0)} (promotion requires ≥4,000)"),
                 ("Run ID",         meta.get("run_id")),
                 ("Scored at",      str(meta.get("run_timestamp", ""))[:19]),
             ]:
@@ -2419,6 +2419,7 @@ with tab3:
                 for k, v in [
                     ("Calibration method", "Temperature-scaled softmax"),
                     ("Temperature (T)",    artifact.temperature),
+                    ("Temperature adjustment", artifact.calibration_audit.get("temperature_adjustment_status", "n/a")),
                     ("Calibration target", "Overround-adjusted morning line"),
                 ]:
                     st.markdown(
@@ -2458,12 +2459,12 @@ with tab3:
 
         st.divider()
 
-        # ── Derby override weight comparison ───────────────────────────────────
+        # ── Dirt-route weight contract ─────────────────────────────────────────
         if meta and meta.get("derby_override_active") and artifact is not None:
-            st.subheader("🏇 Derby Override — Weight Shifts vs Base dirt_route")
+            st.subheader("🏇 Dirt-route Weight Contract")
             st.caption(
-                "Confidence tightened: medium requires dist_starts ≥ 3, "
-                "or dist_starts = 2 with pedigree_route_proxy ≥ 0.75"
+                "The Derby context activates its governed feature, but does not change "
+                "the dirt-route top-level group totals."
             )
             from src.models.trainer import TRAIN_CONFIGS
             base_groups  = TRAIN_CONFIGS["dirt_route"]["feature_groups"]
@@ -2542,9 +2543,21 @@ with tab3:
 with tab4:
     st.subheader("How the Baseline Works")
     st.markdown("""
-This model is a **seed-only weighted baseline** — a principled composite of
-46 features from the feature catalog, calibrated to the morning line spread.
-It is not a trained statistical model; it has no access to historical race outcomes.
+This engine remains a **seed-only weighted baseline**. The dirt-route composite
+keeps these governed top-level weights: speed quality 25%, form/class 18%,
+distance/surface 17%, race shape 15%, readiness 13%, Derby override 7%, and
+market prior 5%. It is not outcome-trained.
+
+DraftKings expands pre-race historical-start and workout coverage. It does not
+replace verified speed figures, pace calls, sectional fractions, or trip data.
+DK editorial labels (including Hot Trainer, Hot Jockey, Top Pick, Key Trainer,
+and Clocker Special) are provenance only and never model inputs. Historical or
+off odds remain historical context and never become the current market price.
+
+Sparse start and workout observations are blended toward the neutral 0.50 prior
+before group aggregation. Form coverage is capped at five usable recent starts;
+distance/surface coverage reaches full depth at four matching starts; readiness
+coverage reaches full depth at three valid workouts in 60 days.
     """)
 
     st.subheader("Feature Group Weights (dirt_route family)")
@@ -2569,14 +2582,14 @@ is applied:
 win_prob[i] = exp(score[i] * T) / sum(exp(score[j] * T))
 ```
 
-The temperature `T` is found by minimizing mean-squared error between the
-model's probability distribution and the overround-adjusted morning line —
-a soft calibration that anchors probability spread to market norms without
-fully collapsing to the public's opinion.
+The bounded temperature `T` (0.25 to 4.00) may soften or sharpen the weighted
+composite's probability spread while softly anchoring it to the
+overround-adjusted morning line and enforcing a near-collapse warning/guard.
+Morning line is a weak publicness prior, not live tote and not a
+wagering-market substitute.
 
 **This is not isotonic regression calibrated against actual outcomes.**
-Post-race calibration will become available when race results are loaded
-into `horse_starts`.
+This is market-anchored soft calibration, not post-race outcome calibration.
     """)
 
     st.subheader("Bet Tags and Edge Thresholds")
@@ -2594,23 +2607,25 @@ into `horse_starts`.
 
     st.subheader("When XGBoost Activates")
     st.markdown("""
-The dispatcher in `train_or_build()` automatically switches from the weighted
-baseline to an XGBoost ranker when `horse_starts` contains ≥ 50 rows for the
-target `race_type_key` (e.g. `dirt_route`).
+XGBoost does not activate from 50 `horse_starts`. The weighted baseline remains
+production until the exact race family has at least 500 completed races, 4,000
+labeled starters, 12 rolling chronological race-level validation folds, at least
+80% core non-market feature coverage, valid race groups/outcomes, and a clean
+pre-race leakage audit.
 
-When that happens:
-- Features will be computed from `horse_starts` race-by-race (replacing DEGRADED proxies)
-- Validation uses **rolling time splits** (never random row splits) to prevent data leakage
-- Calibration switches to **isotonic regression** on out-of-fold predictions
-- Model artifacts are versioned and registered in `model_registry`
-- Post-race metrics (log_loss, Brier, top-1 hit rate) become available
+Until then a candidate may be shadow-only and cannot drive probabilities,
+rankings, fair odds, value, or bet tags. Promotion additionally requires rolling
+OOF Brier improvement of at least 2%, log-loss improvement of at least 1%,
+acceptable probability-bucket calibration, no material field-size regression,
+and a registered/versioned artifact, schema, family, time window, metrics, and
+OOF calibration artifact.
     """)
 
     st.subheader("Pipeline Commands")
     st.code(
         "python scripts/init_db.py        # 1. Create V1 schema\n"
         "python scripts/ingest.py         # 2. Load Derby seed CSV\n"
-        "python scripts/build_features.py # 3. Compute 46-feature store\n"
+        "python scripts/build_features.py # 3. Compute versioned feature store\n"
         "python scripts/score.py          # 4. Score field + write board\n"
         "streamlit run src/app/app.py     # 5. Launch operator console",
         language="bash",
@@ -2620,8 +2635,8 @@ When that happens:
     st.subheader("Model Limitations")
     st.markdown(
         """
-> This baseline uses seed-aggregate features and has not been validated on
-> historical Derby preps. Fair odds and value scores are **directional only**.
+> This baseline has not demonstrated an outcome-backed accuracy improvement
+> from DraftKings enrichment. Fair odds and value scores are **directional only**.
 > The following features are unavailable until real historical data is loaded:
 > race-by-race speed splits, bullet workout counts, trainer/jockey conditioned
 > stats, Churchill Downs track form, post-position win bias, trip trouble flags.
@@ -4202,7 +4217,7 @@ with tab7:
                         st.caption(
                             "Exclude scratched and DQ horses from calibration. "
                             "Accumulate rows across multiple finished races (different card_ids) "
-                            "then retrain once horse_starts has ≥ 50 rows."
+                            "then evaluate only after the completed-race rolling-OOF gate is met."
                         )
 
         # ── Danger zone: clear results ─────────────────────────────────────────

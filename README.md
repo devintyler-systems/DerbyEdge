@@ -40,6 +40,38 @@ python scripts/score.py
 streamlit run src/app/app.py
 ```
 
+## Controlled baseline methodology
+
+The production scorer is a seed-only weighted composite followed by bounded
+temperature-scaled softmax. Temperature is bounded from 0.25 to 4.00 and may
+soften or sharpen the weighted composite's probability spread. Dirt-route
+top-level weights are fixed at:
+speed quality 25%, form/class 18%, distance/surface 17%, race shape 15%,
+readiness 13%, Derby override 7%, and morning-line market prior 5%.
+
+DraftKings adds auditable pre-race historical starts and workouts. It does not
+provide verified speed figures, pace calls, sectional fractions, or trip data;
+its editorial labels are provenance only and never features. Historical/off
+odds support a separately labeled, shrunk `prior_publicness` diagnostic and can
+never replace current-race market evidence. Morning line remains a weak spread
+anchor, not outcome calibration and not a live-tote substitute. Timestamped
+live tote is eligible only when capture is proven to precede scheduled post.
+
+Sparse evidence is blended toward the neutral 0.50 prior before aggregation.
+Form coverage is `min(1, usable field-adjusted finishes in 180d / 5)`,
+distance/surface coverage is `min(1, matching starts / 4)`, and readiness
+coverage is `min(1, valid timed workouts in 60d / 3)`.
+
+XGBoost does not activate from 50 `horse_starts`. Production promotion requires
+500 completed exact-family races, 4,000 labeled starters, 12 chronological
+rolling race-level OOF folds, at least 80% core non-market feature coverage,
+valid groups/outcomes, and a clean leakage audit. It must also improve OOF Brier
+score by at least 2% and log loss by at least 1%, pass probability-bucket
+calibration and field-size regression checks, and register the model artifact,
+feature schema, family, training window, metrics, and OOF calibration artifact.
+Until then, any candidate is shadow-only and cannot drive board ranks,
+probabilities, fair odds, value, or bet tags.
+
 ---
 
 ## V1 Schema (13 tables)

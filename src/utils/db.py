@@ -71,6 +71,15 @@ def ensure_score_runs_columns(conn: sqlite3.Connection) -> None:
         _add_col_if_missing(conn, "score_runs", "mean_abs_model_ml_delta", "REAL", cols),
         _add_col_if_missing(conn, "score_runs", "displayed_model_assigned_from_market",
                             "INTEGER NOT NULL DEFAULT 0", cols),
+        _add_col_if_missing(conn, "score_runs", "uncalibrated_entropy", "REAL", cols),
+        _add_col_if_missing(conn, "score_runs", "calibrated_entropy", "REAL", cols),
+        _add_col_if_missing(conn, "score_runs", "selected_temperature", "REAL", cols),
+        _add_col_if_missing(conn, "score_runs", "morning_line_available", "INTEGER", cols),
+        _add_col_if_missing(conn, "score_runs", "market_prior_source", "TEXT", cols),
+        _add_col_if_missing(conn, "score_runs", "divergence_from_morning_line", "REAL", cols),
+        _add_col_if_missing(conn, "score_runs", "calibration_status", "TEXT", cols),
+        _add_col_if_missing(conn, "score_runs", "dispatcher_mode", "TEXT", cols),
+        _add_col_if_missing(conn, "score_runs", "dispatcher_reason_codes", "TEXT", cols),
     ])
     if changed:
         conn.commit()
@@ -192,9 +201,79 @@ def ensure_starter_observations(conn: sqlite3.Connection) -> None:
 
 
 def ensure_horse_starts_columns(conn: sqlite3.Connection) -> None:
-    """Idempotent: add field_size_last to horse_starts if absent."""
+    """Idempotently add canonical pre-race history/provenance columns."""
     cols = _table_cols(conn, "horse_starts")
-    if _add_col_if_missing(conn, "horse_starts", "field_size_last", "INTEGER", cols):
+    additions = [
+        ("field_size_last", "INTEGER"),
+        ("start_date", "TEXT"),
+        ("track_code", "TEXT"),
+        ("race_class_raw", "TEXT"),
+        ("distance_furlongs", "REAL"),
+        ("surface", "TEXT"),
+        ("historical_odds_raw", "TEXT"),
+        ("historical_odds_type", "TEXT"),
+        ("is_scratch", "INTEGER NOT NULL DEFAULT 0"),
+        ("source_provider", "TEXT"),
+        ("source_document_id", "TEXT"),
+        ("source_row_id", "TEXT"),
+    ]
+    changed = False
+    for name, kind in additions:
+        changed = _add_col_if_missing(conn, "horse_starts", name, kind, cols) or changed
+    if changed:
+        conn.commit()
+
+
+def ensure_workouts_columns(conn: sqlite3.Connection) -> None:
+    """Idempotently add workout provenance and source-rank columns."""
+    cols = _table_cols(conn, "workouts")
+    additions = [
+        ("location_label", "TEXT"),
+        ("source_rank", "INTEGER"),
+        ("source_provider", "TEXT"),
+        ("source_document_id", "TEXT"),
+        ("source_row_id", "TEXT"),
+    ]
+    changed = False
+    for name, kind in additions:
+        changed = _add_col_if_missing(conn, "workouts", name, kind, cols) or changed
+    if changed:
+        conn.commit()
+
+
+def ensure_race_cards_columns(conn: sqlite3.Connection) -> None:
+    """Idempotently add an optional UTC post time for market validation."""
+    cols = _table_cols(conn, "race_cards")
+    if _add_col_if_missing(
+        conn, "race_cards", "scheduled_post_time_utc", "TEXT", cols
+    ):
+        conn.commit()
+
+
+def ensure_model_registry_columns(conn: sqlite3.Connection) -> None:
+    """Idempotently add dispatcher/promotion audit metadata."""
+    cols = _table_cols(conn, "model_registry")
+    additions = [
+        ("dispatcher_mode", "TEXT"),
+        ("dispatcher_reason_codes", "TEXT"),
+        ("completed_races", "INTEGER"),
+        ("labeled_starters", "INTEGER"),
+        ("rolling_validation_folds", "INTEGER"),
+        ("core_feature_coverage", "REAL"),
+        ("feature_schema_version", "TEXT"),
+        ("calibration_artifact_path", "TEXT"),
+        ("baseline_log_loss", "REAL"),
+        ("baseline_brier_score", "REAL"),
+        ("calibration_acceptable", "INTEGER"),
+        ("field_size_regression_acceptable", "INTEGER"),
+        ("target_race_type_key", "TEXT"),
+        ("training_window_start", "TEXT"),
+        ("training_window_end", "TEXT"),
+    ]
+    changed = False
+    for name, kind in additions:
+        changed = _add_col_if_missing(conn, "model_registry", name, kind, cols) or changed
+    if changed:
         conn.commit()
 
 
@@ -216,6 +295,37 @@ def ensure_feature_store_columns(conn: sqlite3.Connection) -> None:
         ("classified_runner_count",  "INTEGER"),
         ("active_runner_count",      "INTEGER"),
         ("pace_state",               "TEXT"),
+        ("recent_finish_percentile_w", "REAL"),
+        ("recent_finish_evidence_count", "INTEGER"),
+        ("starts_last_90d", "INTEGER"),
+        ("form_class_coverage", "REAL"),
+        ("class_delta_last_to_today", "REAL"),
+        ("class_delta_confidence", "TEXT"),
+        ("last_class_label_raw", "TEXT"),
+        ("today_class_label_raw", "TEXT"),
+        ("distance_fit_eb", "REAL"),
+        ("surface_fit_eb", "REAL"),
+        ("surface_distance_finish_percentile_w", "REAL"),
+        ("distance_fit_n", "INTEGER"),
+        ("surface_fit_n", "INTEGER"),
+        ("surface_distance_start_count", "INTEGER"),
+        ("distance_surface_coverage", "REAL"),
+        ("days_since_last_workout", "INTEGER"),
+        ("workout_cadence_30d", "INTEGER"),
+        ("workout_count_30d", "INTEGER"),
+        ("workout_readiness_score_v2", "REAL"),
+        ("readiness_coverage", "REAL"),
+        ("workout_time_normalization_available", "INTEGER"),
+        ("workout_data_source", "TEXT"),
+        ("historical_scratch_rate", "REAL"),
+        ("historical_scratch_n", "INTEGER"),
+        ("historical_scratch_confidence", "TEXT"),
+        ("prior_publicness", "REAL"),
+        ("prior_publicness_n", "INTEGER"),
+        ("dk_history_start_count", "INTEGER"),
+        ("dk_workout_count", "INTEGER"),
+        ("feature_source_mix", "TEXT"),
+        ("market_implied_prob_source", "TEXT"),
     ]
     changed = False
     for col_name, col_type in t1_cols:
@@ -386,7 +496,10 @@ def _migrate_db() -> None:
     ensure_entry_scores_columns(conn)
     ensure_starter_observations(conn)
     ensure_horse_starts_columns(conn)
+    ensure_workouts_columns(conn)
+    ensure_race_cards_columns(conn)
     ensure_feature_store_columns(conn)
+    ensure_model_registry_columns(conn)
     ensure_v_entries_live(conn)
     ensure_race_eval_log(conn)
     conn.close()

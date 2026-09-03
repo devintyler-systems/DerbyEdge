@@ -233,6 +233,16 @@ class TestEnsureScoreRunsColumns:
         ensure_score_runs_columns(conn)  # must not raise
         assert "chaos_active" in _col_names(conn, "score_runs")
 
+    def test_adds_calibration_and_dispatcher_audit_columns(self):
+        conn = _old_score_runs_conn()
+        ensure_score_runs_columns(conn)
+        assert {
+            "uncalibrated_entropy", "calibrated_entropy", "selected_temperature",
+            "morning_line_available", "market_prior_source",
+            "divergence_from_morning_line", "calibration_status",
+            "dispatcher_mode", "dispatcher_reason_codes",
+        }.issubset(_col_names(conn, "score_runs"))
+
 
 # ---------------------------------------------------------------------------
 # entry_scores_cols helper

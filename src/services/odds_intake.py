@@ -39,6 +39,42 @@ TEMPLATE_COLS = [
     "decimal_odds", "american_odds", "morning_line", "is_scratched",
 ]
 
+ODDS_TYPES = {"morning_line", "live_tote", "off_odds", "unknown"}
+
+
+def market_eligibility(
+    odds_type: str,
+    capture_timestamp: str | None,
+    scheduled_post_timestamp: str | None = None,
+) -> tuple[bool, str]:
+    """Apply the current-market evidence contract.
+
+    Morning line is eligible only as a weak prior. Live tote requires both a
+    timestamp and a known scheduled post timestamp, with capture strictly no
+    later than post. Historical off odds and unknown values are never eligible.
+    """
+    normalized = (odds_type or "unknown").strip().lower()
+    if normalized not in ODDS_TYPES:
+        normalized = "unknown"
+    if normalized == "morning_line":
+        return True, "morning_line_prior"
+    if normalized in {"off_odds", "unknown"}:
+        return False, f"{normalized}_not_current_market"
+    if not capture_timestamp:
+        return False, "live_tote_missing_timestamp"
+    if not scheduled_post_timestamp:
+        return False, "live_tote_post_time_unavailable"
+    try:
+        capture = datetime.fromisoformat(capture_timestamp.replace("Z", "+00:00"))
+        post = datetime.fromisoformat(scheduled_post_timestamp.replace("Z", "+00:00"))
+        if capture.tzinfo is None or post.tzinfo is None:
+            return False, "live_tote_timestamp_not_utc"
+    except (TypeError, ValueError):
+        return False, "live_tote_invalid_timestamp"
+    if capture > post:
+        return False, "live_tote_after_post"
+    return True, "live_tote_pre_post"
+
 
 def _now_utc() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
@@ -96,6 +132,13 @@ def ingest_odds_csv(
     giving a clean current-state snapshot. replace=False (default): append as
     a new historical snapshot batch for drift tracking.
     """
+    try:
+        columns = {row[1] for row in conn.execute("PRAGMA table_info(live_odds)").fetchall()}
+        if columns and "odds_type" not in columns:
+            conn.execute("ALTER TABLE live_odds ADD COLUMN odds_type TEXT NOT NULL DEFAULT 'live_tote'")
+            conn.commit()
+    except sqlite3.DatabaseError:
+        pass
     f = io.StringIO(csv_bytes.decode("utf-8", errors="replace"))
     reader = csv.DictReader(f)
     cols = set(reader.fieldnames or [])
@@ -118,18 +161,22 @@ def ingest_odds_csv(
             continue
 
         dec: float | None = None
+        odds_type = "unknown"
         if r.get("decimal_odds"):
             try:
                 dec = float(r["decimal_odds"])
+                odds_type = "live_tote"
             except ValueError:
                 pass
         if dec is None and r.get("american_odds"):
             try:
                 dec = american_to_decimal(int(r["american_odds"]))
+                odds_type = "live_tote"
             except (ValueError, TypeError):
                 pass
         if dec is None and r.get("morning_line"):
             dec = morningline_to_decimal(r["morning_line"])
+            odds_type = "morning_line"
 
         if dec is None:
             skip_odds.append(r.get("post_position"))
@@ -155,7 +202,8 @@ def ingest_odds_csv(
             "decimal_odds": dec,
             "american_odds": decimal_to_american(dec),
             "is_scratched": int(r.get("is_scratched") or 0),
-            "is_morning_line": 0,
+            "is_morning_line": int(odds_type == "morning_line"),
+            "odds_type": odds_type,
         })
 
     if replace:
@@ -163,17 +211,21 @@ def ingest_odds_csv(
 
     cur = conn.cursor()
     for rw in kept:
+        has_type = "odds_type" in {
+            row[1] for row in conn.execute("PRAGMA table_info(live_odds)").fetchall()
+        }
         cur.execute(
             """INSERT INTO live_odds
                (captured_at, book_id, card_id, entry_id, post_position,
-                decimal_odds, american_odds, is_scratched, is_morning_line)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                decimal_odds, american_odds, is_scratched, is_morning_line"""
+            + (", odds_type" if has_type else "")
+            + ") VALUES (" + ",".join("?" for _ in range(10 if has_type else 9)) + ")",
             (
                 rw["captured_at"], rw["book_id"], rw["card_id"],
                 rw["entry_id"], rw["post_position"],
                 rw["decimal_odds"], rw["american_odds"],
                 rw["is_scratched"], rw["is_morning_line"],
-            ),
+            ) + ((rw["odds_type"],) if has_type else ()),
         )
     conn.commit()
 
@@ -212,12 +264,16 @@ def load_live_odds_by_pp(conn: sqlite3.Connection, card_id: int) -> dict[int, di
 
     # Fetch that batch — try progressively simpler WHERE clauses
     rows = []
+    has_type = "odds_type" in {
+        row[1] for row in conn.execute("PRAGMA table_info(live_odds)").fetchall()
+    }
+    type_select = ", odds_type" if has_type else ""
     for _q in [
-        ("SELECT entry_id, post_position, decimal_odds, book_id, captured_at FROM live_odds "
+        (f"SELECT entry_id, post_position, decimal_odds, book_id, captured_at{type_select} FROM live_odds "
          "WHERE card_id=? AND is_scratched=0 AND is_morning_line=0 AND captured_at=?"),
-        ("SELECT entry_id, post_position, decimal_odds, book_id, captured_at FROM live_odds "
+        (f"SELECT entry_id, post_position, decimal_odds, book_id, captured_at{type_select} FROM live_odds "
          "WHERE card_id=? AND is_scratched=0 AND captured_at=?"),
-        ("SELECT entry_id, post_position, decimal_odds, book_id, captured_at FROM live_odds "
+        (f"SELECT entry_id, post_position, decimal_odds, book_id, captured_at{type_select} FROM live_odds "
          "WHERE card_id=? AND captured_at=?"),
     ]:
         try:
@@ -239,6 +295,7 @@ def load_live_odds_by_pp(conn: sqlite3.Connection, card_id: int) -> dict[int, di
             "decimal_odds": r[2],
             "book_id": r[3],
             "captured_at": r[4],
+            "odds_type": r[5] if has_type else "live_tote",
         }
     return result
 

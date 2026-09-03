@@ -41,6 +41,7 @@ CREATE TABLE IF NOT EXISTS race_cards (
     age_restriction   TEXT,                        -- e.g. 3YO, 3UP
     conditions        TEXT,
     field_size        INTEGER,
+    scheduled_post_time_utc TEXT,                    -- optional ISO-8601; required to validate live-tote pre-post eligibility
     created_at        TEXT    NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
     UNIQUE(track_id, card_date, race_number)
 );
@@ -140,6 +141,17 @@ CREATE TABLE IF NOT EXISTS horse_starts (
     beyer_figure       INTEGER,
     earned_purse       INTEGER,
     field_size_last    INTEGER,   -- number of starters in this race (written by ingest)
+    start_date         TEXT,      -- source race date; required for pre-race feature cutoffs
+    track_code         TEXT,
+    race_class_raw     TEXT,
+    distance_furlongs  REAL,
+    surface            TEXT,
+    historical_odds_raw TEXT,     -- historical/off odds only; never current market evidence
+    historical_odds_type TEXT,
+    is_scratch         INTEGER NOT NULL DEFAULT 0 CHECK(is_scratch IN (0,1)),
+    source_provider    TEXT,
+    source_document_id TEXT,
+    source_row_id      TEXT,
     created_at         TEXT    NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
 );
 
@@ -160,6 +172,11 @@ CREATE TABLE IF NOT EXISTS workouts (
     surface           TEXT    NOT NULL DEFAULT 'dirt',
     hand_timed        INTEGER NOT NULL DEFAULT 0 CHECK(hand_timed IN (0,1)),
     synthetic         INTEGER NOT NULL DEFAULT 0 CHECK(synthetic IN (0,1)),
+    location_label    TEXT,
+    source_rank       INTEGER,
+    source_provider   TEXT,
+    source_document_id TEXT,
+    source_row_id     TEXT,
     created_at        TEXT    NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
 );
 
@@ -249,6 +266,21 @@ CREATE TABLE IF NOT EXISTS model_registry (
     calibration_error REAL,
     top1_hit_rate     REAL,
     edge_roi          REAL,
+    dispatcher_mode   TEXT,
+    dispatcher_reason_codes TEXT,
+    completed_races   INTEGER,
+    labeled_starters  INTEGER,
+    rolling_validation_folds INTEGER,
+    core_feature_coverage REAL,
+    feature_schema_version TEXT,
+    calibration_artifact_path TEXT,
+    baseline_log_loss REAL,
+    baseline_brier_score REAL,
+    calibration_acceptable INTEGER,
+    field_size_regression_acceptable INTEGER,
+    target_race_type_key TEXT,
+    training_window_start TEXT,
+    training_window_end TEXT,
     created_at        TEXT    NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
 );
 
@@ -275,6 +307,15 @@ CREATE TABLE IF NOT EXISTS score_runs (
     mean_abs_model_ml_delta REAL,
     displayed_model_assigned_from_market INTEGER NOT NULL DEFAULT 0
                               CHECK(displayed_model_assigned_from_market IN (0,1)),
+    uncalibrated_entropy REAL,
+    calibrated_entropy REAL,
+    selected_temperature REAL,
+    morning_line_available INTEGER,
+    market_prior_source TEXT,
+    divergence_from_morning_line REAL,
+    calibration_status TEXT,
+    dispatcher_mode TEXT,
+    dispatcher_reason_codes TEXT,
     created_at            TEXT    NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
 );
 
@@ -424,6 +465,38 @@ CREATE TABLE IF NOT EXISTS feature_store (
     pace_pressure_tier          INTEGER,-- T1: 0=lone_speed 1=soft 2=moderate 3=contested
     collapse_risk_v2            REAL,   -- T1: front_pct + 0.5*presser_pct
     morning_line_delta          REAL,   -- T1: market_implied_prob minus 1/field_size
+    -- Evidence-aware pre-race methodology upgrade
+    recent_finish_percentile_w  REAL,
+    recent_finish_evidence_count INTEGER,
+    starts_last_90d             INTEGER,
+    form_class_coverage         REAL,
+    class_delta_last_to_today   REAL,
+    class_delta_confidence      TEXT,
+    last_class_label_raw        TEXT,
+    today_class_label_raw       TEXT,
+    distance_fit_eb             REAL,
+    surface_fit_eb              REAL,
+    surface_distance_finish_percentile_w REAL,
+    distance_fit_n              INTEGER,
+    surface_fit_n               INTEGER,
+    surface_distance_start_count INTEGER,
+    distance_surface_coverage   REAL,
+    days_since_last_workout     INTEGER,
+    workout_cadence_30d         INTEGER,
+    workout_count_30d           INTEGER,
+    workout_readiness_score_v2  REAL,
+    readiness_coverage          REAL,
+    workout_time_normalization_available INTEGER,
+    workout_data_source         TEXT,
+    historical_scratch_rate     REAL,
+    historical_scratch_n        INTEGER,
+    historical_scratch_confidence TEXT,
+    prior_publicness            REAL,
+    prior_publicness_n          INTEGER,
+    dk_history_start_count      INTEGER,
+    dk_workout_count            INTEGER,
+    feature_source_mix          TEXT,
+    market_implied_prob_source  TEXT,
     UNIQUE(card_id, entry_id)
 );
 
