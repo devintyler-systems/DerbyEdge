@@ -106,6 +106,15 @@ _FEATURE_TIER = {
 
 _DERBY_DEFAULT_CHAOS_INDEX = 0.85   # default for scorer; UI slider default matches
 
+
+def _finite_or_none(value) -> float | None:
+    """Persist unavailable numeric diagnostics as SQL NULL, never NaN/defaults."""
+    try:
+        numeric = float(value)
+    except (TypeError, ValueError):
+        return None
+    return numeric if np.isfinite(numeric) else None
+
 try:
     from training.win_model_loader import (
         load_best_model as _load_best_model,
@@ -715,6 +724,8 @@ def _write_board(
 
     for _, r in board.iterrows():
         edge_str = f"+{r['value_score']:.3f}" if r['value_score'] > 0 else f"{r['value_score']:.3f}"
+        pace_value = _finite_or_none(r.get("pace_fit_score"))
+        pace_str = f"{pace_value:.3f}" if pace_value is not None else "—"
         conf_str = conf_icons.get(r['model_confidence'], r['model_confidence'])
         tag_str  = "--[B]" if r.get("low_conf_bet_block", 0) else tag_icons.get(r['bet_tag'], r['bet_tag'])
         lines.append(
@@ -723,7 +734,7 @@ def _write_board(
             f"| {r['morning_line_odds']:.0f}-1 "
             f"| {r['model_win_prob_pct']:.1f}% "
             f"| {r['fair_odds']:.1f}-1 "
-            f"| {r['pace_fit_score']:.3f} "
+            f"| {pace_str} "
             f"| {r['form_score']:.3f} "
             f"| {r['surface_dist_fit']:.3f} "
             f"| {edge_str} "
@@ -1330,7 +1341,11 @@ def score_race(card_id: Optional[int] = None) -> pd.DataFrame:
             None if collapsed_to_ml else round(float(analysis_probs[i]), 6),
             None if collapsed_to_ml else round(float(place_probs[i]), 6),
             None if collapsed_to_ml else round(float(show_probs[i]), 6),
-            round(float(feat_df.iloc[i]["pace_fit_score"]) if feat_df.iloc[i]["pace_fit_score"] is not None else 0.0, 4),
+            (
+                round(pace_fit, 4)
+                if (pace_fit := _finite_or_none(feat_df.iloc[i]["pace_fit_score"])) is not None
+                else None
+            ),
             round(float(form_arr[i]), 4),
             round(float(surf_dist_arr[i]), 4),
             round(float(model_edge[i]), 4) if np.isfinite(model_edge[i]) else None,

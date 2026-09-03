@@ -11,6 +11,7 @@ Feature tiers used throughout this module and in feature_catalog.csv:
 """
 
 import datetime
+import re
 from pathlib import Path
 from typing import Optional
 
@@ -55,6 +56,64 @@ _LAYOFF_WIN_RATE: dict[int, float] = {0: 0.18, 1: 0.21, 2: 0.23, 3: 0.17, 4: 0.1
 PACE_EARLY: dict[str, float] = {
     "front": 1.00, "presser": 0.70, "stalker": 0.40, "closer": 0.10
 }
+
+# 1/ST comments are unstructured prose, so the classification needs to be both
+# deliberately small and deterministic.  A runner receives the style with the
+# most corroborating terms across its available comments; ties use this order
+# rather than whichever substring happened to occur first in the source text.
+_RUN_STYLE_TIE_ORDER = ("front", "presser", "stalker", "closer")
+_RUN_STYLE_TERMS: dict[str, tuple[re.Pattern[str], ...]] = {
+    "front": (
+        re.compile(r"\bset\s+pace\b", re.I), re.compile(r"\bled\b", re.I),
+        re.compile(r"\bclear\s+pace\b", re.I), re.compile(r"\bquick\s+lead\b", re.I),
+        re.compile(r"\btook\s+over\b", re.I),
+    ),
+    "presser": (
+        re.compile(r"\bpressed\b", re.I), re.compile(r"\bdueled\b", re.I),
+        re.compile(r"\bvied\b", re.I), re.compile(r"\bprompted\b", re.I),
+        re.compile(r"\bchased\s+pace\b", re.I),
+    ),
+    "stalker": (
+        re.compile(r"\btracked\b", re.I), re.compile(r"\bchased\b", re.I),
+        re.compile(r"\bwell\s+placed\b", re.I), re.compile(r"\bsettled\s+close\b", re.I),
+    ),
+    "closer": (
+        re.compile(r"\brallied\b", re.I), re.compile(r"\bran\s+on\b", re.I),
+        re.compile(r"\bgained\b", re.I), re.compile(r"\bbelatedly\b", re.I),
+        re.compile(r"\blate\s+kick\b", re.I),
+    ),
+}
+
+_PACE_PRESSURE: dict[str, float] = {
+    "front": 1.00, "presser": 0.70, "stalker": 0.35, "closer": 0.10,
+}
+_PACE_FIT_MATRIX: dict[str, dict[str, float]] = {
+    "front": {"low": 0.78, "moderate": 0.60, "high": 0.38},
+    "presser": {"low": 0.65, "moderate": 0.68, "high": 0.55},
+    "stalker": {"low": 0.52, "moderate": 0.64, "high": 0.72},
+    "closer": {"low": 0.38, "moderate": 0.55, "high": 0.75},
+}
+
+
+def classify_1stbet_trip_comments(comments: list[object]) -> tuple[str | None, int]:
+    """Return the stable 1/ST run style and its supporting term count.
+
+    This is intentionally an ordered score, not a first-match classifier: all
+    supplied PP comments are counted and deterministic tie-breaking makes the
+    same source text yield the same style on every build.
+    """
+    text = "\n".join(str(comment) for comment in comments if comment)
+    if not text:
+        return None, 0
+    counts = {
+        style: sum(len(pattern.findall(text)) for pattern in patterns)
+        for style, patterns in _RUN_STYLE_TERMS.items()
+    }
+    best_count = max(counts.values(), default=0)
+    if best_count <= 0:
+        return None, 0
+    style = next(style for style in _RUN_STYLE_TIE_ORDER if counts[style] == best_count)
+    return style, best_count
 
 
 # ---------------------------------------------------------------------------
@@ -328,9 +387,15 @@ def _entry_features(row: pd.Series, field_df: pd.DataFrame) -> dict:
         "traffic_resilience_proxy":    traffic_resilience_proxy,
         "early_intent":                early_intent,
         "run_style_bucket":            run_style_bucket,
+        "run_style_evidence_count":    0,
+        "run_style_source":            None,
         "speed_fig_adj":               None,   # filled in second pass
         "class_delta_v2":              None,   # filled in second pass
         "pace_pressure":               None,   # filled in second pass
+        "pace_band":                   None,   # filled in second pass
+        "classified_runner_count":     None,   # filled in second pass
+        "active_runner_count":         None,   # filled in second pass
+        "pace_state":                  None,   # filled in second pass
         "pace_pressure_tier":          None,   # filled in second pass
         "lone_speed_edge":             None,   # filled in second pass
         "collapse_risk":               None,   # filled in second pass
@@ -373,61 +438,83 @@ def _fill_race_level_features(
     else:
         df["speed_fig_adj"] = 0.0
 
-    # pace shape counts
-    front_count   = int((df["run_style_bucket"] == "front").sum())
-    presser_count = int((df["run_style_bucket"] == "presser").sum())
-    total         = len(df)
-    pace_pressure = round((front_count + presser_count) / max(total, 1), 4)
+    # Pace is calculated strictly from active runner classifications. Unknown
+    # runners are excluded from the pressure denominator rather than assigned
+    # a neutral style or a universal runner-specific-looking score.
+    active_runner_count = len(df)
+    styles = df["run_style_bucket"].where(
+        df["run_style_bucket"].isin(PACE_EARLY), None
+    )
+    classified_runner_count = int(styles.notna().sum())
+    classified_ratio = classified_runner_count / max(active_runner_count, 1)
+    pressure_values = styles.map(_PACE_PRESSURE).dropna()
+    pace_pressure = (
+        round(float(pressure_values.mean()), 4) if not pressure_values.empty else None
+    )
+    if pace_pressure is None:
+        pace_band = None
+    elif pace_pressure < 0.40:
+        pace_band = "low"
+    elif pace_pressure < 0.65:
+        pace_band = "moderate"
+    else:
+        pace_band = "high"
 
     df["pace_pressure"] = pace_pressure
+    df["pace_band"] = pace_band
+    df["classified_runner_count"] = classified_runner_count
+    df["active_runner_count"] = active_runner_count
     df["collapse_risk"] = pace_pressure   # semantic alias
 
-    # T1: pace_pressure_tier and collapse_risk_v2
-    front_pct   = front_count / max(total, 1)
-    presser_pct = presser_count / max(total, 1)
-    if front_count == 1 and presser_pct < 0.15:
-        _tier = 0   # lone speed
-    elif front_pct < 0.15 and presser_pct < 0.20:
-        _tier = 1   # soft
-    elif front_pct <= 0.30:
-        _tier = 2   # moderate
+    front_count = int((styles == "front").sum())
+    presser_count = int((styles == "presser").sum())
+    front_pct = front_count / max(classified_runner_count, 1)
+    presser_pct = presser_count / max(classified_runner_count, 1)
+    if pace_band == "low":
+        _tier = 1
+    elif pace_band == "moderate":
+        _tier = 2
+    elif pace_band == "high":
+        _tier = 3
     else:
-        _tier = 3   # contested
+        _tier = None
     df["pace_pressure_tier"] = _tier
-    df["collapse_risk_v2"]   = round(front_pct * 1.0 + presser_pct * 0.5, 4)
-
+    df["collapse_risk_v2"] = (
+        round(front_pct + 0.5 * presser_pct, 4) if classified_runner_count else None
+    )
     df["lone_speed_edge"] = df["run_style_bucket"].apply(
-        lambda s: 1 if s == "front" and front_count == 1 else 0
+        lambda style: 1 if style == "front" and front_count == 1 else 0
     )
 
-    def _pace_fit(row) -> float:
-        style = row["run_style_bucket"]
-        if not style:
-            return 0.65   # neutral mid-field prior; no pace style in entries
-        if style == "front":
-            return 0.90 if front_count == 1 else 0.55
-        if style == "presser":
-            return 0.75 if pace_pressure < 0.35 else 0.65
-        if style == "stalker":
-            return 0.70 if pace_pressure >= 0.30 else 0.60
-        if style == "closer":
-            return 0.80 if pace_pressure >= 0.40 else 0.55
-        return 0.65
+    def _pace_fit(style: object) -> float | None:
+        if not pace_band or style not in _PACE_FIT_MATRIX:
+            return None
+        return _PACE_FIT_MATRIX[str(style)][pace_band]
 
-    df["pace_fit_score"] = (
-        pd.to_numeric(df.apply(_pace_fit, axis=1), errors="coerce")
-        .fillna(0.65)
-        .round(4)
-    )
-
-    n_pace_defaults = int(
-        (df["run_style_bucket"].isna() | (df["run_style_bucket"] == "")).sum()
-    )
-    if n_pace_defaults:
+    df["pace_fit_score"] = pd.to_numeric(
+        styles.apply(_pace_fit), errors="coerce"
+    ).round(4)
+    distinct_pace_scores = int(df["pace_fit_score"].nunique(dropna=True))
+    if classified_ratio < 0.40 or distinct_pace_scores <= 1:
+        pace_state = "PACE_UNAVAILABLE"
+        # Post-feature safety check: even apparently classified fields cannot
+        # present a constant pace number as runner-specific compatibility.
+        df["pace_fit_score"] = np.nan
         print(
-            f"[builder] pace_fit_score defaulted to 0.65 for {n_pace_defaults} "
-            f"row(s) — no pace style in entries (sparse/screenshot race)"
+            "[builder] PACE_UNAVAILABLE: pace excluded from forecast "
+            f"({classified_runner_count}/{active_runner_count} classified; "
+            f"{distinct_pace_scores} distinct pace-fit value(s))."
         )
+    elif classified_ratio >= 0.70:
+        pace_state = "PACE_READY"
+    else:
+        pace_state = "PACE_PARTIAL"
+        print(
+            "[builder] PACE_PARTIAL: only "
+            f"{classified_runner_count}/{active_runner_count} active runners classified; "
+            "unknown runners retain null pace fit."
+        )
+    df["pace_state"] = pace_state
 
     # public underlay penalty: z-score of publicness_score within field, scaled 0-1
     ps = df["publicness_score"].dropna()
@@ -572,7 +659,7 @@ def _apply_firstbet_overlay(
         )
         pp_df = pd.read_sql(
             "SELECT entry_id, start_rank, finish_position, field_size, "
-            "surface, distance_text "
+            "surface, distance_text, notes "
             "FROM firstbet_pp_starts WHERE card_id=? ORDER BY entry_id, start_rank",
             conn, params=(card_id,),
         )
@@ -678,6 +765,21 @@ def _apply_firstbet_overlay(
                         _clamp((n - float(lf)) / max(n - 1, 1), -0.2, 1.0), 4
                     )
                     any_filled = True
+
+        # ── 1/ST trip comments → stable run style ─────────────────────────
+        # The PP table is already scoped to active entries by the caller's
+        # v_entries_live frame.  A present but unclassifiable comment remains
+        # explicit evidence of unknown style, never a fabricated neutral fit.
+        comments = [
+            value for value in horse_pp.get("notes", pd.Series(dtype=object)).tolist()
+            if isinstance(value, str) and value.strip()
+        ]
+        if comments:
+            style, evidence_count = classify_1stbet_trip_comments(comments)
+            feat_df.at[idx, "run_style_bucket"] = style
+            feat_df.at[idx, "early_intent"] = PACE_EARLY.get(style)
+            feat_df.at[idx, "run_style_evidence_count"] = evidence_count
+            feat_df.at[idx, "run_style_source"] = "1stbet_trip_comment"
 
     n_filled = sum(
         1 for col in [

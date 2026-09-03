@@ -164,6 +164,14 @@ def test_stacked_saratoga_r9_attaches_and_verifies_active_entries_only(
         check_conn.close()
 
     assert len(feat_df) == 10
+    assert feat_df["post_position"].tolist() == list(range(1, 11))
     assert verification.entry_coverage_complete is True
     assert verification.passed is True
     assert verification.pp_backed_features_nonconstant is True
+    assert set(feat_df["pace_state"]) == {"PACE_READY"}
+    assert (feat_df["run_style_source"] == "1stbet_trip_comment").all()
+    assert feat_df["run_style_bucket"].nunique(dropna=True) >= 2
+    assert feat_df["pace_fit_score"].nunique(dropna=True) >= 2
+    assert not feat_df["pace_fit_score"].eq(0.650).all()
+    unknown_styles = feat_df[feat_df["run_style_bucket"].isna()]
+    assert unknown_styles["pace_fit_score"].isna().all()

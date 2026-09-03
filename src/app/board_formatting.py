@@ -27,6 +27,15 @@ def morning_line_str(value: object) -> str:
     return f"{numeric:.0f}-1" if math.isfinite(numeric) else "—"
 
 
+def pace_fit_str(value: object) -> str:
+    """Render pace fit only when it is genuinely runner-specific evidence."""
+    try:
+        numeric = float(value)
+    except (TypeError, ValueError):
+        return "—"
+    return f"{numeric:.3f}" if math.isfinite(numeric) else "—"
+
+
 def prepare_probability_display_columns(
     table: pd.DataFrame,
     *,
@@ -44,6 +53,8 @@ def prepare_probability_display_columns(
     out["ML-Implied %"] = (
         pd.to_numeric(out["market_implied_prob"], errors="coerce") * 100
     ).round(2)
+    if "pace_fit_score" in out.columns:
+        out["Pace Fit"] = out["pace_fit_score"].apply(pace_fit_str)
     if show_edge:
         out["Edge"] = out["value_score"].apply(_edge_str)
     return out

@@ -60,6 +60,18 @@ def get_card_run_state(
         quality, verification.core_rows
     )
     reasons = list(dict.fromkeys(reasons + list(verification.warnings)))
+    # Ingest artifacts remain immutable.  Publish the post-feature pace result
+    # alongside the source audit for board diagnostics without rewriting the
+    # original parser audit on disk.
+    if audit and verification.pace_state:
+        audit = dict(audit)
+        audit["post_feature_pace"] = {
+            "pace_state": verification.pace_state,
+            "warnings": [
+                warning for warning in verification.warnings
+                if warning.startswith("PACE_")
+            ],
+        }
     return CardRunState(mode, reasons, audit, quality, verification)
 
 

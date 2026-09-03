@@ -1630,6 +1630,31 @@ with tab1:
         else:
             st.caption(LIVE_ODDS_UNAVAILABLE)
 
+        # ── Pace evidence state ───────────────────────────────────────────────
+        # Read the feature frame rather than infer a pace state from a rendered
+        # score column: null Pace Fit is an intentional data-quality outcome.
+        if not feat_df.empty and "pace_state" in feat_df.columns:
+            _pace_row = feat_df.iloc[0]
+            _pace_state = _pace_row.get("pace_state")
+            _pace_classified = _pace_row.get("classified_runner_count")
+            _pace_active = _pace_row.get("active_runner_count")
+            _pace_band = _pace_row.get("pace_band")
+            if _pace_state == "PACE_READY":
+                st.caption(
+                    f"Pace: READY — {_pace_classified}/{_pace_active} classified — "
+                    f"{_pace_band} pressure"
+                )
+            elif _pace_state == "PACE_PARTIAL":
+                st.warning(
+                    f"Pace: PARTIAL — {_pace_classified}/{_pace_active} classified; "
+                    "unknown runners have no pace fit and confidence is reduced."
+                )
+            elif _pace_state == "PACE_UNAVAILABLE":
+                st.warning(
+                    f"Pace: UNAVAILABLE — {_pace_classified}/{_pace_active} classified; "
+                    "pace excluded from forecast."
+                )
+
         # ── Build display frame ────────────────────────────────────────────────
         base_cols = [
             "rank", "horse_name", "post_position",
@@ -1666,7 +1691,7 @@ with tab1:
             "ML":              "Morning Line",
             "Win%":            "Win %",
             "Conf":            "Conf",
-            "pace_fit_score":  "Pace Fit",
+            "Pace Fit":        "Pace Fit",
             "form_score":      "Form",
             "surface_dist_fit":"SuDist",
         }
@@ -1712,7 +1737,6 @@ with tab1:
                 "ML-Implied %": st.column_config.NumberColumn("ML-Implied %", format="%.2f"),
                 "Chaos%":    st.column_config.NumberColumn("Chaos%",    format="%.2f"),
                 "Fair Odds": st.column_config.NumberColumn("Fair Odds", format="%.1f"),
-                "Pace Fit":  st.column_config.NumberColumn("Pace Fit",  format="%.3f"),
                 "Form":      st.column_config.NumberColumn("Form",      format="%.3f"),
                 "SuDist":    st.column_config.NumberColumn("SuDist",    format="%.3f"),
             },

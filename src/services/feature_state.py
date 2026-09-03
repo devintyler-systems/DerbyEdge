@@ -31,6 +31,7 @@ class FeatureVerification:
     warnings: tuple[str, ...]
     pp_backed_features_required: bool = False
     pp_backed_features_nonconstant: bool = False
+    pace_state: str | None = None
 
     @property
     def passed(self) -> bool:
@@ -112,6 +113,19 @@ def verify_feature_frame(
             f"Feature rows cover {len(feat_df)} of {expected or 0} parsed entries."
         )
     warnings.extend(feature_degeneracy_warnings(core_rows, CORE_FEATURE_NAMES))
+    pace_states = (
+        feat_df.get("pace_state", pd.Series(dtype=object))
+        .dropna().astype(str).unique().tolist()
+    )
+    pace_state = pace_states[0] if len(pace_states) == 1 else None
+    if pace_state == "PACE_UNAVAILABLE":
+        warnings.append(
+            "PACE_UNAVAILABLE: pace_fit_score is null for the active field and excluded from the forecast."
+        )
+    elif pace_state == "PACE_PARTIAL":
+        warnings.append(
+            "PACE_PARTIAL: only classified runners retain pace fit; confidence is reduced for unknown styles."
+        )
     pp_backed_nonconstant = any(
         name in feat_df.columns
         and pd.to_numeric(feat_df[name], errors="coerce").nunique(dropna=True) > 1
@@ -129,6 +143,7 @@ def verify_feature_frame(
         warnings=tuple(warnings),
         pp_backed_features_required=require_pp_backed_features,
         pp_backed_features_nonconstant=pp_backed_nonconstant,
+        pace_state=pace_state,
     )
 
 
