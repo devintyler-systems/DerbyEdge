@@ -88,6 +88,22 @@ def step_apply_schema(conn):
     sql = SCHEMA_PATH.read_text(encoding="utf-8")
     conn.executescript(sql)
     conn.commit()
+    from src.utils.db import (
+        ensure_entry_scores_columns,
+        ensure_feature_store_columns,
+        ensure_horse_starts_columns,
+        ensure_race_eval_log,
+        ensure_score_runs_columns,
+        ensure_starter_observations,
+        ensure_v_entries_live,
+    )
+    ensure_score_runs_columns(conn)
+    ensure_entry_scores_columns(conn)
+    ensure_starter_observations(conn)
+    ensure_horse_starts_columns(conn)
+    ensure_feature_store_columns(conn)
+    ensure_v_entries_live(conn)
+    ensure_race_eval_log(conn)
     print("  [schema]  V1 DDL applied.")
 
 
