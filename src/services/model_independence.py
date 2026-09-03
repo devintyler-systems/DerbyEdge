@@ -51,6 +51,18 @@ def is_market_derived_feature(name: str) -> bool:
     )
 
 
+def _pace_group_is_unavailable(feat_df: pd.DataFrame) -> bool:
+    """Return whether pace is explicitly unavailable for this active field."""
+    if "pace_state" in feat_df.columns:
+        states = set(feat_df["pace_state"].dropna().astype(str))
+        if "PACE_UNAVAILABLE" in states:
+            return True
+    if "pace_fit_score" not in feat_df.columns:
+        return True
+    values = pd.to_numeric(feat_df["pace_fit_score"], errors="coerce")
+    return int(values.nunique(dropna=True)) <= 1
+
+
 def pre_market_signal_probabilities(
     feat_df: pd.DataFrame,
     config: Mapping[str, object],
@@ -70,6 +82,7 @@ def pre_market_signal_probabilities(
     if not isinstance(feature_groups, Mapping):
         return np.full(n_entries, np.nan, dtype=float)
 
+    pace_unavailable = _pace_group_is_unavailable(feat_df)
     group_rows: list[tuple[float, np.ndarray]] = []
     for group_def in feature_groups.values():
         if not isinstance(group_def, Mapping):
@@ -80,6 +93,11 @@ def pre_market_signal_probabilities(
         except (TypeError, ValueError):
             group_weight = 0.0
         if not isinstance(features, Mapping) or group_weight <= 0:
+            continue
+        # A null/constant pace field is not runner-specific pace evidence.
+        # Exclude the entire race-shape group and renormalize the remaining
+        # non-market groups below, rather than retaining a neutral 0.5 prior.
+        if pace_unavailable and "pace_fit_score" in features:
             continue
 
         permitted = [

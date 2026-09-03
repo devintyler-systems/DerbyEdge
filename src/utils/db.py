@@ -199,7 +199,7 @@ def ensure_horse_starts_columns(conn: sqlite3.Connection) -> None:
 
 
 def ensure_feature_store_columns(conn: sqlite3.Connection) -> None:
-    """Idempotent: add Tier 1 feature columns to feature_store if absent."""
+    """Idempotent: add post-schema feature observability columns if absent."""
     cols = _table_cols(conn, "feature_store")
     t1_cols: list[tuple[str, str]] = [
         ("speed_fig_adj",            "REAL"),
@@ -210,6 +210,12 @@ def ensure_feature_store_columns(conn: sqlite3.Connection) -> None:
         ("pace_pressure_tier",       "INTEGER"),
         ("collapse_risk_v2",         "REAL"),
         ("morning_line_delta",       "REAL"),
+        ("run_style_evidence_count", "INTEGER"),
+        ("run_style_source",         "TEXT"),
+        ("pace_band",                "TEXT"),
+        ("classified_runner_count",  "INTEGER"),
+        ("active_runner_count",      "INTEGER"),
+        ("pace_state",               "TEXT"),
     ]
     changed = False
     for col_name, col_type in t1_cols:

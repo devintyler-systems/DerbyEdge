@@ -6,6 +6,7 @@ import pandas as pd
 from src.app.board_formatting import (
     _edge_str,
     morning_line_str,
+    pace_fit_str,
     prepare_probability_display_columns,
 )
 from src.app.board_state import race_board_contract
@@ -18,6 +19,7 @@ def _table(value_score: object, morning_line_odds: object = 8.0) -> pd.DataFrame
         "morning_line_odds": [morning_line_odds],
         "market_implied_prob": [0.36],
         "value_score": [value_score],
+        "pace_fit_score": [None],
     })
 
 
@@ -36,6 +38,7 @@ def test_limited_board_does_not_format_or_create_edge_without_live_odds():
     assert not contract.show_stakes
     assert "Edge" not in rendered.columns
     assert rendered.loc[0, "ML"] == "8-1"
+    assert rendered.loc[0, "Pace Fit"] == "—"
 
 
 def test_edge_formatter_returns_unavailable_for_null_or_nonfinite_values():
@@ -60,3 +63,9 @@ def test_morning_line_formatter_handles_missing_odds():
     assert morning_line_str(None) == "—"
     assert morning_line_str(np.nan) == "—"
     assert morning_line_str("bad") == "—"
+
+
+def test_pace_fit_formatter_handles_unavailable_pace():
+    assert pace_fit_str(None) == "—"
+    assert pace_fit_str(np.nan) == "—"
+    assert pace_fit_str(0.72) == "0.720"

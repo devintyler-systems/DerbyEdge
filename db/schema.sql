@@ -395,7 +395,13 @@ CREATE TABLE IF NOT EXISTS feature_store (
     -- Race shape (computed across full field)
     early_intent                REAL,   -- IMPLEMENTED: pace_style -> 0-1 scale
     run_style_bucket            TEXT,   -- IMPLEMENTED: pace_style pass-through
+    run_style_evidence_count    INTEGER,-- 1/ST trip-comment terms supporting style
+    run_style_source            TEXT,   -- e.g. 1stbet_trip_comment
     pace_pressure               REAL,   -- IMPLEMENTED: (front+presser)/field_size
+    pace_band                   TEXT,   -- low | moderate | high
+    classified_runner_count     INTEGER,-- active runners with classified style
+    active_runner_count         INTEGER,-- active field size used for pace
+    pace_state                  TEXT,   -- PACE_READY | PACE_PARTIAL | PACE_UNAVAILABLE
     lone_speed_edge             INTEGER,-- IMPLEMENTED: 1 if only front-runner
     collapse_risk               REAL,   -- IMPLEMENTED: pace_pressure alias
     pace_fit_score              REAL,   -- IMPLEMENTED: style x field shape matrix

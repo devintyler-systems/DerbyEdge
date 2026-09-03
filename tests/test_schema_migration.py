@@ -12,6 +12,7 @@ import pytest
 
 from src.utils.db import (
     ensure_entry_scores_columns,
+    ensure_feature_store_columns,
     ensure_score_runs_columns,
     entry_scores_cols,
 )
@@ -38,6 +39,10 @@ CREATE TABLE IF NOT EXISTS score_runs (
 );
 """
 
+_FEATURE_STORE_BASE = """
+CREATE TABLE feature_store (feature_id INTEGER PRIMARY KEY, card_id INTEGER);
+"""
+
 
 def _old_entry_scores_conn() -> sqlite3.Connection:
     """In-memory DB with the V1 entry_scores schema (no confidence_* columns)."""
@@ -54,8 +59,27 @@ def _old_score_runs_conn() -> sqlite3.Connection:
     return conn
 
 
+def _old_feature_store_conn() -> sqlite3.Connection:
+    conn = sqlite3.connect(":memory:")
+    conn.executescript(_FEATURE_STORE_BASE)
+    return conn
+
+
 def _col_names(conn: sqlite3.Connection, table: str) -> set[str]:
     return {row[1] for row in conn.execute(f"PRAGMA table_info({table})").fetchall()}
+
+
+# ---------------------------------------------------------------------------
+# ensure_feature_store_columns
+# ---------------------------------------------------------------------------
+
+def test_feature_store_migration_adds_pace_observability_columns():
+    conn = _old_feature_store_conn()
+    ensure_feature_store_columns(conn)
+    assert {
+        "run_style_evidence_count", "run_style_source", "pace_band",
+        "classified_runner_count", "active_runner_count", "pace_state",
+    }.issubset(_col_names(conn, "feature_store"))
 
 
 # ---------------------------------------------------------------------------

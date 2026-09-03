@@ -49,6 +49,7 @@ import pandas as pd
 # Thresholds — match spec exactly
 LOW_THRESHOLD    = 0.45
 HIGH_THRESHOLD   = 0.70
+PACE_UNAVAILABLE_CONFIDENCE_PENALTY = 0.05
 
 # Missing-data flags kept for backward compat (board CSV / markdown output)
 CRITICAL_MISSING = [
@@ -242,6 +243,10 @@ def compute_horse_confidence(
     d_score, _          = _component_d()
 
     check_cols = [c for c in model_features if c in feat_df.columns]
+    pace_unavailable = bool(
+        "pace_state" in feat_df.columns
+        and feat_df["pace_state"].dropna().astype(str).eq("PACE_UNAVAILABLE").any()
+    )
 
     rows: list[dict] = []
     for _, erow in entries_df.iterrows():
@@ -281,9 +286,18 @@ def compute_horse_confidence(
 
         # Aggregate
         raw_score = W_A * a_score + W_B * b_score + W_C * c_score + W_D * d_score
+        if pace_unavailable:
+            # This is a data-quality confidence adjustment, not a model or
+            # wagering-threshold change.  A field-wide absent pace signal must
+            # be visible even when other missing features already triggered the
+            # legacy binary null-feature flag.
+            raw_score = max(0.0, raw_score - PACE_UNAVAILABLE_CONFIDENCE_PENALTY)
 
         # Prioritise per-horse (A) reasons first; append race-level where space allows
-        all_reasons = a_reasons + b_reasons + c_reasons
+        all_reasons = (
+            (["pace unavailable"] if pace_unavailable else [])
+            + a_reasons + b_reasons + c_reasons
+        )
         top_reasons = all_reasons[:3]
         reasons_str = "; ".join(top_reasons) if top_reasons else "sufficient evidence"
 
