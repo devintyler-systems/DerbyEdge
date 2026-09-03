@@ -92,16 +92,22 @@ def step_apply_schema(conn):
         ensure_entry_scores_columns,
         ensure_feature_store_columns,
         ensure_horse_starts_columns,
+        ensure_model_registry_columns,
+        ensure_race_cards_columns,
         ensure_race_eval_log,
         ensure_score_runs_columns,
         ensure_starter_observations,
         ensure_v_entries_live,
+        ensure_workouts_columns,
     )
     ensure_score_runs_columns(conn)
     ensure_entry_scores_columns(conn)
     ensure_starter_observations(conn)
     ensure_horse_starts_columns(conn)
+    ensure_workouts_columns(conn)
+    ensure_race_cards_columns(conn)
     ensure_feature_store_columns(conn)
+    ensure_model_registry_columns(conn)
     ensure_v_entries_live(conn)
     ensure_race_eval_log(conn)
     print("  [schema]  V1 DDL applied.")

@@ -96,6 +96,8 @@ class DraftKingsStartRecord:
     source_row_id: str
     raw_text: str
     parse_confidence: float
+    field_size: int | None = None
+    field_size: int | None = None
 
 
 @dataclass
@@ -649,7 +651,10 @@ def parse_draftkings_pdf(
                     odds_type=odds_type,
                     odds_capture_timestamp=captured_at,
                     odds_source_label_raw="ODDS",
-                    is_market_eligible=False if is_post_race else True,
+                    # The PDF has no authoritative scheduled-post timestamp to
+                    # prove this capture is pre-post. Retain it, but do not
+                    # promote it to live current-market evidence here.
+                    is_market_eligible=False,
                     source_page_number=p_idx + 1,
                     source_row_id=f"{doc_id}:p{p_idx+1}:other_odds:{post_pos}",
                     raw_text=other_odds_raw,

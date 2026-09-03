@@ -532,6 +532,14 @@ EXPECTED_FEATURE_COLUMNS = {
     "career_starts", "career_wins",
     "pre_race_starts_count", "pre_race_workouts_count",
     "target_race_records_excluded", "scoring_as_of_timestamp",
+    "recent_finish_evidence_count", "form_class_coverage",
+    "distance_fit_eb", "surface_fit_eb", "distance_fit_n", "surface_fit_n",
+    "distance_surface_coverage", "workout_count_30d",
+    "workout_readiness_score_v2", "readiness_coverage",
+    "workout_time_normalization_available", "workout_data_source",
+    "historical_scratch_n", "historical_scratch_confidence",
+    "prior_publicness_n", "market_implied_prob_source",
+    "dk_history_start_count", "dk_workout_count", "feature_source_mix",
 }
 
 

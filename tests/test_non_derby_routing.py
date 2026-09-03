@@ -53,8 +53,19 @@ def test_non_derby_feature_values_are_null():
     assert result[derby_only].isna().all().all()
 
 
-def test_ordinary_dirt_route_config_excludes_derby_override():
+def test_ordinary_dirt_route_config_preserves_governed_group_totals():
     config = TRAIN_CONFIGS["dirt_route"]
     assert config["model_family"] == "dirt_route_stakes_v1"
     assert config["model_name"] == "dirt_route_stakes_v1"
-    assert "derby_override" not in config["feature_groups"]
+    assert {
+        name: group["group_weight"]
+        for name, group in config["feature_groups"].items()
+    } == {
+        "speed_quality": 0.25,
+        "form_class": 0.18,
+        "distance_surface": 0.17,
+        "race_shape": 0.15,
+        "readiness": 0.13,
+        "derby_override": 0.07,
+        "market_prior": 0.05,
+    }

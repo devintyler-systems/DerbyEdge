@@ -36,6 +36,7 @@ from typing import Any, Optional
 import pandas as pd
 
 from src.utils.db import ensure_feature_store_columns
+from src.utils.db import ensure_horse_starts_columns, ensure_workouts_columns
 from src.ingest.draftkings_pdf import (
     DraftKingsEntryRecord,
     DraftKingsParsedRace,
@@ -43,6 +44,7 @@ from src.ingest.draftkings_pdf import (
     DraftKingsWorkoutRecord,
 )
 from src.utils.horse_norm import horse_key
+from src.services.odds_intake import market_eligibility
 
 
 # ── Staging DDL ────────────────────────────────────────────────────────────────
@@ -125,6 +127,7 @@ CREATE TABLE IF NOT EXISTS dk_staging_starts (
     program_post          TEXT,
     odds_raw              TEXT,
     finish_position       INTEGER,
+    field_size            INTEGER,
     is_scratch            INTEGER NOT NULL DEFAULT 0,
     raw_text              TEXT,
     parse_confidence      REAL NOT NULL DEFAULT 1.0,
@@ -213,7 +216,14 @@ CREATE TABLE IF NOT EXISTS horse_source_identities (
 def ensure_draftkings_staging_tables(conn: sqlite3.Connection) -> None:
     """Create append-only staging tables and provenance columns if absent."""
     conn.executescript(_STAGING_DDL)
-    # Ensure source_document_id and source_row_id exist on canonical horse_starts & workouts
+    ensure_horse_starts_columns(conn)
+    ensure_workouts_columns(conn)
+    staging_start_cols = {
+        row[1] for row in conn.execute("PRAGMA table_info(dk_staging_starts)").fetchall()
+    }
+    if "field_size" not in staging_start_cols:
+        conn.execute("ALTER TABLE dk_staging_starts ADD COLUMN field_size INTEGER")
+    # Entries retain only provenance; editorial angles stay in staging tables.
     for tbl in ("horse_starts", "workouts", "entries"):
         cur = conn.execute(f"PRAGMA table_info({tbl})")
         existing_cols = {row[1] for row in cur.fetchall()}
@@ -387,8 +397,9 @@ def ingest_draftkings_to_canonical(
                    (doc_id, source_page_number, source_row_id, horse_name, horse_source_key,
                     start_date, is_target_race, track_code, track_name, race_class,
                     distance_text, distance_furlongs, surface, surface_condition,
-                    program_post, odds_raw, finish_position, is_scratch, raw_text, parse_confidence)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                    program_post, odds_raw, finish_position, field_size, is_scratch,
+                    raw_text, parse_confidence)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 (
                     parsed.source_document_id,
                     s.source_page_number,
@@ -407,6 +418,7 @@ def ingest_draftkings_to_canonical(
                     s.program_post,
                     s.odds_raw,
                     s.finish_position,
+                    s.field_size,
                     1 if s.is_scratch else 0,
                     s.raw_text,
                     s.parse_confidence,
@@ -468,6 +480,9 @@ def ingest_draftkings_to_canonical(
 
         # Append staging odds
         for od in parsed.odds_records:
+            eligible, _eligibility_reason = market_eligibility(
+                od.odds_type, od.odds_capture_timestamp, None
+            )
             conn.execute(
                 """INSERT INTO dk_staging_odds
                    (doc_id, source_page_number, source_row_id, horse_name, odds_value_raw,
@@ -483,7 +498,7 @@ def ingest_draftkings_to_canonical(
                     od.odds_type,
                     od.odds_capture_timestamp,
                     od.odds_source_label_raw,
-                    1 if od.is_market_eligible else 0,
+                    1 if eligible else 0,
                     od.raw_text,
                     od.parse_confidence,
                 ),
@@ -602,10 +617,11 @@ def ingest_draftkings_to_canonical(
 
         entry_id_by_name[e.horse_name] = eid
 
-    # Pre-race canonical horse_starts and workouts:
+    # Pre-race canonical horse_starts and workouts. Historical scratches are
+    # retained as entered-start evidence but excluded by all performance features.
     # Strictly where record_date < target_race_date (conservative anti-leakage contract)
     for s in parsed.starts:
-        if s.start_date >= parsed.target_race_date or s.is_target_race or s.is_scratch:
+        if s.start_date >= parsed.target_race_date or s.is_target_race:
             continue
         hid = horse_id_by_name.get(s.horse_name)
         eid = entry_id_by_name.get(s.horse_name)
@@ -621,13 +637,24 @@ def ingest_draftkings_to_canonical(
             conn.execute(
                 """INSERT INTO horse_starts
                    (entry_id, horse_id, card_id, finish_position, lengths_behind,
-                    speed_figure, field_size_last, source_document_id, source_row_id)
-                   VALUES (?, ?, ?, ?, 0.0, NULL, 10, ?, ?)""",
-                (eid, hid, card_id, s.finish_position, parsed.source_document_id, s.source_row_id),
+                    speed_figure, field_size_last, start_date, track_code,
+                    race_class_raw, distance_furlongs, surface,
+                    historical_odds_raw, historical_odds_type, is_scratch,
+                    source_provider, source_document_id, source_row_id)
+                   VALUES (?, ?, ?, ?, 0.0, NULL, ?, ?, ?, ?, ?, ?, ?, 'off_odds',
+                           ?, 'draftkings', ?, ?)""",
+                (
+                    eid, hid, card_id, s.finish_position, s.field_size,
+                    s.start_date.isoformat(), s.track_code, s.race_class,
+                    s.distance_furlongs, s.surface, s.odds_raw,
+                    1 if s.is_scratch else 0,
+                    parsed.source_document_id, s.source_row_id,
+                ),
             )
 
     for w in parsed.workouts:
-        if w.workout_date >= parsed.target_race_date or w.is_target_race:
+        if (w.workout_date >= parsed.target_race_date or w.is_target_race
+                or w.distance_furlongs is None or w.time_seconds is None):
             continue
         hid = horse_id_by_name.get(w.horse_name)
         if not hid:
@@ -641,15 +668,18 @@ def ingest_draftkings_to_canonical(
             conn.execute(
                 """INSERT INTO workouts
                    (horse_id, workout_date, distance_furlongs, time_seconds,
-                    work_grade, surface, source_document_id, source_row_id)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+                    work_grade, surface, location_label, source_rank,
+                    source_provider, source_document_id, source_row_id)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'draftkings', ?, ?)""",
                 (
                     hid,
                     w.workout_date.isoformat(),
-                    w.distance_furlongs or 4.0,
-                    w.time_seconds or 48.0,
+                    w.distance_furlongs,
+                    w.time_seconds,
                     w.work_grade[:1] if w.work_grade in ('B', 'F', 'G', 'N') else 'N',
                     w.surface or 'dirt',
+                    w.track_name or w.track_code,
+                    w.rank,
                     parsed.source_document_id,
                     w.source_row_id,
                 ),
@@ -669,14 +699,55 @@ _CLASS_RANKS: dict[str, int] = {
 }
 
 
-def _class_score(cls_text: str | None) -> int:
+def _class_score(cls_text: str | None) -> int | None:
     if not cls_text:
-        return 45
+        return None
     c_up = cls_text.upper().replace(" ", "")
     for k, score in _CLASS_RANKS.items():
         if k in c_up:
             return score
-    return 45
+    return None
+
+
+def _finish_percentile(start: DraftKingsStartRecord) -> float | None:
+    """Return exact field-adjusted finish percentile, or unavailable."""
+    finish = start.finish_position
+    field_size = start.field_size
+    if (
+        start.is_scratch
+        or finish is None
+        or field_size is None
+        or field_size < 2
+        or finish < 1
+        or finish > field_size
+    ):
+        return None
+    return 1.0 - ((finish - 1) / (field_size - 1))
+
+
+def _parse_historical_implied(raw: str | None) -> float | None:
+    if not raw:
+        return None
+    try:
+        if "/" in raw:
+            num, den = raw.split("/", 1)
+            decimal = float(num) / float(den) + 1.0
+        else:
+            decimal = float(raw) + 1.0
+        return max(0.0, min(1.0, 1.0 / max(decimal, 1.01)))
+    except (TypeError, ValueError, ZeroDivisionError):
+        return None
+
+
+def _surface_key(value: str | None) -> str:
+    text = (value or "").strip().lower()
+    if text in {"aw", "all weather", "all_weather", "synthetic"}:
+        return "synthetic"
+    if text.startswith("turf") or text in {"tr.t", "training turf"}:
+        return "turf"
+    if text.startswith("dirt") or text in {"tr.d", "training dirt"}:
+        return "dirt"
+    return text
 
 
 def generate_dk_pre_race_features(
@@ -692,9 +763,10 @@ def generate_dk_pre_race_features(
     - Zero records with is_target_race or record_date == target_race_date enter features.
     """
     target_date = parsed.target_race_date
-    today_surface = (parsed.surface or "turf").lower()
+    today_surface = _surface_key(parsed.surface)
     today_is_route = (parsed.distance_furlongs or 8.5) >= 8.0
     today_class_score = _class_score(parsed.race_class)
+    today_track_code = (parsed.header_track_code or parsed.filename_track_code or "").upper()
 
     rows = []
 
@@ -714,6 +786,10 @@ def generate_dk_pre_race_features(
             and w.workout_date < target_date
             and not w.is_target_race
         ]
+        valid_entry_workouts = [
+            w for w in entry_workouts
+            if w.distance_furlongs is not None and w.time_seconds is not None
+        ]
 
         # Non-scratch valid starts
         valid_starts = [s for s in entry_starts if not s.is_scratch]
@@ -725,13 +801,25 @@ def generate_dk_pre_race_features(
             most_recent_start = max(s.start_date for s in valid_starts)
             days_since_last_start = (target_date - most_recent_start).days
             last_start_record = next(s for s in valid_starts if s.start_date == most_recent_start)
-            last_finish = last_start_record.finish_position or 5
+            last_finish = last_start_record.finish_position
             last_class_score = _class_score(last_start_record.race_class)
-            class_delta_last_to_today = last_class_score - today_class_score
+            class_is_conditioned = bool(
+                last_class_score is not None
+                and today_class_score is not None
+                and last_start_record.track_code.upper() == today_track_code
+            )
+            class_delta_last_to_today = (
+                round((last_class_score - today_class_score) / 100.0, 4)
+                if class_is_conditioned else 0.0
+            )
+            class_delta_confidence = "conditioned_same_circuit" if class_is_conditioned else "low"
+            last_class_label_raw = last_start_record.race_class
         else:
             days_since_last_start = None
             last_finish = None
             class_delta_last_to_today = 0
+            class_delta_confidence = "low"
+            last_class_label_raw = None
 
         # Feature: starts_last_90d
         starts_last_90d = sum(
@@ -739,27 +827,38 @@ def generate_dk_pre_race_features(
             if 0 <= (target_date - s.start_date).days <= 90
         )
 
-        # Feature: recent_finish_percentile_w
-        # Exponential decay w_i = exp(-0.01 * delta_days), finish percentile p_i = (N - f) / (N - 1)
+        # Form coverage uses usable field-adjusted finishes in the last 180 days,
+        # capped at five: min(1, n / 5). Sparse observed values are blended to 0.50.
         w_sum = 0.0
         p_sum = 0.0
+        usable_recent = 0
         for s in valid_starts:
             delta_days = (target_date - s.start_date).days
+            p_i = _finish_percentile(s)
+            if p_i is None:
+                continue
             w_i = math.exp(-0.01 * max(delta_days, 0))
-            f_i = s.finish_position or 5
-            n_i = 10  # default typical field size
-            p_i = max(0.0, min(1.0, (n_i - f_i) / max(n_i - 1, 1)))
             w_sum += w_i
             p_sum += w_i * p_i
+            if delta_days <= 180:
+                usable_recent += 1
 
-        recent_finish_percentile_w = round(p_sum / w_sum, 4) if w_sum > 0 else 0.50
+        form_class_coverage = min(1.0, usable_recent / 5.0)
+        observed_finish = p_sum / w_sum if w_sum > 0 else 0.50
+        recent_finish_percentile_w = round(
+            form_class_coverage * observed_finish
+            + (1.0 - form_class_coverage) * 0.50,
+            4,
+        )
 
         # Feature: surface_distance_start_count & surface_distance_finish_percentile_w
         # Empirical Bayes smoothing with pseudo-count M = 2.0 toward prior 0.50
         sd_starts = []
         for s in valid_starts:
-            surf_match = today_surface in s.surface.lower()
-            dist_f = s.distance_furlongs or 8.0
+            surf_match = _surface_key(s.surface) == today_surface
+            dist_f = s.distance_furlongs
+            if dist_f is None:
+                continue
             route_match = (dist_f >= 8.0) == today_is_route
             if surf_match and route_match:
                 sd_starts.append(s)
@@ -770,9 +869,9 @@ def generate_dk_pre_race_features(
         for s in sd_starts:
             delta_days = (target_date - s.start_date).days
             w_i = math.exp(-0.01 * max(delta_days, 0))
-            f_i = s.finish_position or 5
-            n_i = 10
-            p_i = max(0.0, min(1.0, (n_i - f_i) / max(n_i - 1, 1)))
+            p_i = _finish_percentile(s)
+            if p_i is None:
+                continue
             sd_w_sum += w_i
             sd_p_sum += w_i * p_i
 
@@ -782,63 +881,134 @@ def generate_dk_pre_race_features(
             (sd_p_sum + M * 0.50) / (sd_w_sum + M), 4
         )
 
+        distance_starts = [
+            s for s in valid_starts
+            if s.distance_furlongs is not None
+            and parsed.distance_furlongs is not None
+            and abs(s.distance_furlongs - parsed.distance_furlongs) <= 1.0
+            and s.finish_position is not None
+        ]
+        surface_starts = [
+            s for s in valid_starts
+            if _surface_key(s.surface) == today_surface and s.finish_position is not None
+        ]
+        distance_fit_n = len(distance_starts)
+        surface_fit_n = len(surface_starts)
+        distance_fit_eb = round(
+            (sum(s.finish_position == 1 for s in distance_starts) + M * 0.50)
+            / (distance_fit_n + M), 4
+        )
+        surface_fit_eb = round(
+            (sum(s.finish_position == 1 for s in surface_starts) + M * 0.50)
+            / (surface_fit_n + M), 4
+        )
+        distance_surface_coverage = min(1.0, surface_distance_start_count / 4.0)
+
         # Workouts features: days_since_last_workout, workout_cadence_30d
-        if entry_workouts:
-            most_recent_wo = max(w.workout_date for w in entry_workouts)
+        if valid_entry_workouts:
+            most_recent_wo = max(w.workout_date for w in valid_entry_workouts)
             days_since_last_workout = (target_date - most_recent_wo).days
         else:
             days_since_last_workout = None
 
         workout_cadence_30d = sum(
-            1 for w in entry_workouts
+            1 for w in valid_entry_workouts
             if 0 <= (target_date - w.workout_date).days <= 30
         )
+        valid_workouts_60d = [
+            w for w in valid_entry_workouts
+            if 0 <= (target_date - w.workout_date).days <= 60
+            and w.distance_furlongs is not None and w.time_seconds is not None
+        ]
+        readiness_coverage = min(1.0, len(valid_workouts_60d) / 3.0)
 
-        # workout_velocity_z: normalized if peer reference available
+        # Raw work time is comparable only within location+surface+distance and
+        # a recent 90-day cohort of at least five timed works.
         workout_velocity_z = None
+        time_score = 0.50
+        normalization_available = False
+        if valid_workouts_60d:
+            latest_work = max(valid_workouts_60d, key=lambda w: w.workout_date)
+            peers = [
+                w for w in parsed.workouts
+                if w.workout_date < target_date
+                and 0 <= (target_date - w.workout_date).days <= 90
+                and w.time_seconds is not None
+                and w.distance_furlongs is not None
+                and (w.track_name or w.track_code) == (latest_work.track_name or latest_work.track_code)
+                and _surface_key(w.surface) == _surface_key(latest_work.surface)
+                and abs(w.distance_furlongs - latest_work.distance_furlongs) <= 0.01
+            ]
+            peer_times = [float(w.time_seconds) for w in peers]
+            if len(peer_times) >= 5 and pd.Series(peer_times).std(ddof=0) > 0:
+                mean = float(pd.Series(peer_times).mean())
+                std = float(pd.Series(peer_times).std(ddof=0))
+                workout_velocity_z = round((latest_work.time_seconds - mean) / std, 4)
+                time_score = 1.0 / (1.0 + math.exp(workout_velocity_z))
+                normalization_available = True
+
+        recency_score = (
+            math.exp(-max(days_since_last_workout or 0, 0) / 30.0)
+            if days_since_last_workout is not None else 0.50
+        )
+        cadence_score = min(1.0, workout_cadence_30d / 3.0)
+        ordered_works = sorted(valid_workouts_60d, key=lambda w: w.workout_date)
+        progression_score = 0.50
+        if len(ordered_works) >= 2:
+            previous = [w.distance_furlongs for w in ordered_works[:-1] if w.distance_furlongs]
+            if previous:
+                progression_score = 0.65 if ordered_works[-1].distance_furlongs >= sum(previous) / len(previous) else 0.35
+        ranked = [w.rank for w in valid_workouts_60d if w.rank and w.rank > 0]
+        rank_score = min(1.0, 1.0 / min(ranked)) if ranked else 0.50
+        readiness_observed = (
+            0.35 * recency_score + 0.30 * cadence_score
+            + 0.20 * progression_score + 0.10 * rank_score + 0.05 * time_score
+        )
+        workout_readiness_score_v2 = round(
+            readiness_coverage * readiness_observed
+            + (1.0 - readiness_coverage) * 0.50,
+            4,
+        )
 
         # Feature: prior_publicness (recency-weighted implied probability shrunk toward 0.10)
         pub_w_sum = 0.0
         pub_q_sum = 0.0
+        publicness_n = 0
         for s in valid_starts:
-            if s.odds_raw:
-                try:
-                    if "/" in s.odds_raw:
-                        num, den = s.odds_raw.split("/")
-                        dec_odds = float(num) / float(den) + 1.0
-                    else:
-                        dec_odds = float(s.odds_raw) + 1.0
-                    q_i = 1.0 / max(dec_odds, 1.01)
-                    delta_days = (target_date - s.start_date).days
-                    w_i = math.exp(-0.01 * max(delta_days, 0))
-                    pub_w_sum += w_i
-                    pub_q_sum += w_i * q_i
-                except ValueError:
-                    pass
+            q_i = _parse_historical_implied(s.odds_raw)
+            if q_i is not None:
+                delta_days = (target_date - s.start_date).days
+                w_i = math.exp(-0.01 * max(delta_days, 0))
+                pub_w_sum += w_i
+                pub_q_sum += w_i * q_i
+                publicness_n += 1
 
         prior_publicness = round(
-            (pub_q_sum + 1.0 * 0.10) / (pub_w_sum + 1.0), 4
+            (pub_q_sum + 3.0 * 0.10) / (pub_w_sum + 3.0), 4
         )
 
         # Feature: historical_scratch_rate
         historical_scratch_rate = (
-            round(scratch_count / total_attempts, 4) if total_attempts > 0 else 0.0
+            round(scratch_count / total_attempts, 4) if total_attempts >= 3 else None
         )
+        historical_scratch_confidence = "adequate" if total_attempts >= 3 else "low"
 
         # Diagnostics: raw career totals
         career_starts = len(valid_starts)
         career_wins = sum(1 for s in valid_starts if s.finish_position == 1)
         career_places = sum(1 for s in valid_starts if s.finish_position == 2)
         career_shows = sum(1 for s in valid_starts if s.finish_position == 3)
-        career_win_pct = round(career_wins / career_starts, 4) if career_starts > 0 else 0.0
+        career_win_pct = round(career_wins / career_starts, 4) if career_starts > 0 else None
         career_itm_pct = (
             round((career_wins + career_places + career_shows) / career_starts, 4)
-            if career_starts > 0 else 0.0
+            if career_starts > 0 else None
         )
 
         # ML implied prob (prior only, never wagering market price)
-        ml_odds = entry.morning_line_decimal or 10.0
-        market_implied_prob = round(1.0 / max(ml_odds, 1.01), 4)
+        ml_odds = entry.morning_line_decimal
+        market_implied_prob = (
+            round(1.0 / max(ml_odds, 1.01), 4) if ml_odds is not None else None
+        )
 
         # Look up canonical entry_id and horse_id
         row_e = conn.execute(
@@ -859,18 +1029,37 @@ def generate_dk_pre_race_features(
             "post_position": entry.post_position,
             "morning_line_odds": ml_odds,
             "market_implied_prob": market_implied_prob,
+            "market_implied_prob_source": "morning_line" if ml_odds is not None else None,
             # Model features
             "days_since_last_start": days_since_last_start,
             "starts_last_90d": starts_last_90d,
             "recent_finish_percentile_w": recent_finish_percentile_w,
+            "recent_finish_evidence_count": usable_recent,
+            "form_class_coverage": round(form_class_coverage, 4),
             "surface_distance_start_count": surface_distance_start_count,
             "surface_distance_finish_percentile_w": surface_distance_finish_percentile_w,
+            "distance_fit_eb": distance_fit_eb,
+            "surface_fit_eb": surface_fit_eb,
+            "distance_fit_n": distance_fit_n,
+            "surface_fit_n": surface_fit_n,
+            "distance_surface_coverage": round(distance_surface_coverage, 4),
             "class_delta_last_to_today": class_delta_last_to_today,
+            "class_delta_confidence": class_delta_confidence,
+            "last_class_label_raw": last_class_label_raw,
+            "today_class_label_raw": parsed.race_class,
             "days_since_last_workout": days_since_last_workout,
             "workout_cadence_30d": workout_cadence_30d,
             "workout_velocity_z": workout_velocity_z,
+            "workout_count_30d": workout_cadence_30d,
+            "workout_readiness_score_v2": workout_readiness_score_v2,
+            "readiness_coverage": round(readiness_coverage, 4),
+            "workout_time_normalization_available": int(normalization_available),
+            "workout_data_source": "draftkings" if entry_workouts else None,
             "prior_publicness": prior_publicness,
+            "prior_publicness_n": publicness_n,
             "historical_scratch_rate": historical_scratch_rate,
+            "historical_scratch_n": total_attempts,
+            "historical_scratch_confidence": historical_scratch_confidence,
             # Diagnostic totals
             "career_starts": career_starts,
             "career_wins": career_wins,
@@ -881,6 +1070,9 @@ def generate_dk_pre_race_features(
             # Provenance & anti-leakage audit
             "pre_race_starts_count": len(valid_starts),
             "pre_race_workouts_count": len(entry_workouts),
+            "dk_history_start_count": len(entry_starts),
+            "dk_workout_count": len(entry_workouts),
+            "feature_source_mix": "draftkings" if (entry_starts or entry_workouts) else "source_neutral",
             "target_race_records_excluded": sum(1 for s in parsed.starts if s.horse_name == entry.horse_name and s.is_target_race),
             "scoring_as_of_timestamp": scoring_as_of or parsed.captured_at,
         })

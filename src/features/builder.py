@@ -11,6 +11,7 @@ Feature tiers used throughout this module and in feature_catalog.csv:
 """
 
 import datetime
+import math
 import re
 from pathlib import Path
 from typing import Optional
@@ -403,6 +404,7 @@ def _entry_features(row: pd.Series, field_df: pd.DataFrame) -> dict:
         "pace_fit_score":              None,   # filled in second pass
         "morning_line_delta":          None,   # filled in second pass
         "market_implied_prob":         market_implied_prob,
+        "market_implied_prob_source":  "morning_line",
         "morning_line_rank":           None,   # filled in second pass
         "publicness_score":            publicness_score,
         "public_underlay_penalty":     None,   # filled in second pass
@@ -410,6 +412,38 @@ def _entry_features(row: pd.Series, field_df: pd.DataFrame) -> dict:
         "churchill_readiness":         churchill_readiness,
         "jan_apr_improvement_curve":   jan_apr_improvement_curve,
         "derby_override_score":        None,   # filled in second pass
+        # Evidence-aware history fields. Canonical overlays replace these
+        # neutral defaults only with strictly pre-race source evidence.
+        "recent_finish_percentile_w":  0.50,
+        "recent_finish_evidence_count": 0,
+        "starts_last_90d":             0,
+        "form_class_coverage":         0.0,
+        "class_delta_last_to_today":   0.0,
+        "class_delta_confidence":      "low",
+        "last_class_label_raw":        None,
+        "today_class_label_raw":       None,
+        "distance_fit_eb":             0.50,
+        "surface_fit_eb":              0.50,
+        "surface_distance_finish_percentile_w": 0.50,
+        "distance_fit_n":              0,
+        "surface_fit_n":               0,
+        "surface_distance_start_count": 0,
+        "distance_surface_coverage":   0.0,
+        "days_since_last_workout":     None,
+        "workout_cadence_30d":         0,
+        "workout_count_30d":           0,
+        "workout_readiness_score_v2":  0.50,
+        "readiness_coverage":          0.0,
+        "workout_time_normalization_available": 0,
+        "workout_data_source":         None,
+        "historical_scratch_rate":     None,
+        "historical_scratch_n":        0,
+        "historical_scratch_confidence": "low",
+        "prior_publicness":            0.10,
+        "prior_publicness_n":          0,
+        "dk_history_start_count":      0,
+        "dk_workout_count":            0,
+        "feature_source_mix":          "seed",
     }
 
 
@@ -671,11 +705,13 @@ def _apply_firstbet_overlay(
 
     try:
         rc = conn.execute(
-            "SELECT distance_furlongs FROM race_cards WHERE card_id=?", (card_id,)
+            "SELECT distance_furlongs, surface FROM race_cards WHERE card_id=?", (card_id,)
         ).fetchone()
         race_dist_f: Optional[float] = float(rc["distance_furlongs"]) if rc else None
+        race_surface = _surface_key(rc["surface"]) if rc else ""
     except Exception:
         race_dist_f = None
+        race_surface = ""
 
     any_filled = False
     feat_df = feat_df.copy()
@@ -726,15 +762,44 @@ def _apply_firstbet_overlay(
         if horse_pp.empty:
             continue
 
+        finish_values = pd.to_numeric(horse_pp["finish_position"], errors="coerce")
+        field_values = pd.to_numeric(horse_pp["field_size"], errors="coerce")
+        usable_pp = horse_pp[
+            finish_values.notna()
+            & (finish_values >= 1)
+            & field_values.notna()
+            & (field_values >= 2)
+            & (finish_values <= field_values)
+        ].copy()
+        if not usable_pp.empty:
+            finish = pd.to_numeric(usable_pp["finish_position"], errors="coerce")
+            field = pd.to_numeric(usable_pp["field_size"], errors="coerce")
+            percentile = (
+                1.0 - ((finish - 1.0) / (field - 1.0))
+            ).clip(0.0, 1.0)
+            rank = pd.to_numeric(usable_pp["start_rank"], errors="coerce").fillna(99)
+            weights = np.exp(-0.35 * (rank - 1.0).clip(lower=0))
+            observed = float(np.average(percentile, weights=weights))
+            evidence_n = len(usable_pp)
+            coverage = _clamp(evidence_n / 5.0)
+            feat_df.at[idx, "recent_finish_percentile_w"] = round(
+                coverage * observed + (1.0 - coverage) * 0.50, 4
+            )
+            feat_df.at[idx, "recent_finish_evidence_count"] = evidence_n
+            feat_df.at[idx, "form_class_coverage"] = round(coverage, 4)
+        feat_df.at[idx, "feature_source_mix"] = "seed,1stbet"
+
         # surface_fit: wins on dirt / dirt starts (replaces entries.dirt_wins=0 default)
         dirt_mask = horse_pp["surface"].str.lower().str.startswith("dirt", na=False)
         dirt_pp   = horse_pp[dirt_mask]
         if len(dirt_pp) > 0:
             dirt_wins_pp = int((dirt_pp["finish_position"] == 1).sum())
-            new_sf = round(_safe_div(dirt_wins_pp, len(dirt_pp)), 4)
+            new_sf = round((dirt_wins_pp + 2.0 * 0.50) / (len(dirt_pp) + 2.0), 4)
             cur_sf = feat_df.at[idx, "surface_fit"]
             if _isnull(cur_sf) or float(cur_sf) == 0.0:
                 feat_df.at[idx, "surface_fit"] = new_sf
+                feat_df.at[idx, "surface_fit_eb"] = new_sf
+                feat_df.at[idx, "surface_fit_n"] = len(dirt_pp)
                 any_filled = True
 
         # distance_fit: wins at matching distance / dist starts from PP data
@@ -748,10 +813,39 @@ def _apply_firstbet_overlay(
                     if int(prow.get("finish_position") or 99) == 1:
                         dist_wins_pp += 1
             if dist_total_pp > 0:
-                dfit = round(_safe_div(dist_wins_pp, dist_total_pp), 4)
+                dfit = round((dist_wins_pp + 2.0 * 0.50) / (dist_total_pp + 2.0), 4)
                 feat_df.at[idx, "distance_fit"]    = dfit
+                feat_df.at[idx, "distance_fit_eb"] = dfit
+                feat_df.at[idx, "distance_fit_n"] = dist_total_pp
                 feat_df.at[idx, "route_progression"] = dfit
                 any_filled = True
+
+        sd_pp = horse_pp[
+            horse_pp["surface"].map(_surface_key) == race_surface
+        ].copy()
+        if race_dist_f is not None and not sd_pp.empty:
+            sd_pp["_distance"] = sd_pp["distance_text"].map(
+                lambda value: _parse_furlongs(str(value or ""))
+            )
+            sd_pp = sd_pp[
+                sd_pp["_distance"].map(
+                    lambda value: value is not None and (value >= 8.0) == (race_dist_f >= 8.0)
+                )
+            ]
+        sd_n = len(sd_pp)
+        feat_df.at[idx, "surface_distance_start_count"] = sd_n
+        feat_df.at[idx, "distance_surface_coverage"] = round(_clamp(sd_n / 4.0), 4)
+        sd_usable = sd_pp[
+            pd.to_numeric(sd_pp["finish_position"], errors="coerce").notna()
+            & (pd.to_numeric(sd_pp["field_size"], errors="coerce").fillna(0) >= 1)
+        ]
+        if not sd_usable.empty:
+            finish = pd.to_numeric(sd_usable["finish_position"], errors="coerce")
+            field = pd.to_numeric(sd_usable["field_size"], errors="coerce")
+            pct = (1.0 - ((finish - 1.0) / (field - 1.0).clip(lower=1.0))).clip(0, 1)
+            feat_df.at[idx, "surface_distance_finish_percentile_w"] = round(
+                (float(pct.sum()) + 2.0 * 0.50) / (len(pct) + 2.0), 4
+            )
 
         # horses_beaten_pct_last: use actual field size from most recent PP start
         lf = feat_df.at[idx, "_last_race_finish"]
@@ -796,6 +890,261 @@ def _apply_firstbet_overlay(
 
 
 # ---------------------------------------------------------------------------
+# Canonical historical evidence overlay
+# ---------------------------------------------------------------------------
+_CLASS_RANKS = {
+    "G1": 100, "G2": 92, "G3": 88, "STAKES": 85, "AOC": 70,
+    "ALW": 65, "SOC": 60, "STR": 55, "MSW": 50, "CLM": 45,
+    "MOC": 42, "MCL": 30,
+}
+
+
+def _class_rank(raw: object) -> int | None:
+    text = str(raw or "").upper().replace(" ", "")
+    for label, rank in _CLASS_RANKS.items():
+        if label in text:
+            return rank
+    return None
+
+
+def _surface_key(raw: object) -> str:
+    text = str(raw or "").strip().lower()
+    if text in {"aw", "all weather", "all_weather", "synthetic"}:
+        return "synthetic"
+    if text.startswith("turf") or text in {"tr.t", "training turf"}:
+        return "turf"
+    if text.startswith("dirt") or text in {"tr.d", "training dirt"}:
+        return "dirt"
+    return text
+
+
+def _historical_implied(raw: object) -> float | None:
+    text = str(raw or "").strip()
+    if not text:
+        return None
+    try:
+        if "/" in text:
+            num, den = text.split("/", 1)
+            decimal = float(num) / float(den) + 1.0
+        else:
+            decimal = float(text) + 1.0
+        return _clamp(1.0 / max(decimal, 1.01))
+    except (TypeError, ValueError, ZeroDivisionError):
+        return None
+
+
+def _canonical_history_overlay(feat_df: pd.DataFrame, card_id: int, conn) -> pd.DataFrame:
+    """Overlay strictly pre-race canonical starts/workouts onto feature rows.
+
+    Form coverage is ``min(1, usable field-adjusted finishes in 180d / 5)``.
+    Distance/surface coverage is ``min(1, matching surface-distance starts / 4)``.
+    Readiness coverage is ``min(1, valid timed workouts in 60d / 3)``.
+    Every sparse normalized value is blended toward the neutral prior 0.50.
+    """
+    meta = conn.execute(
+        """SELECT rc.card_date, rc.surface, rc.distance_furlongs, rc.race_class,
+                  t.abbrev AS track_code
+           FROM race_cards rc JOIN tracks t ON t.track_id=rc.track_id
+           WHERE rc.card_id=?""",
+        (card_id,),
+    ).fetchone()
+    if not meta:
+        return feat_df
+    try:
+        target_date = datetime.date.fromisoformat(str(meta["card_date"])[:10])
+    except (TypeError, ValueError):
+        return feat_df
+    today_surface = _surface_key(meta["surface"])
+    today_distance = float(meta["distance_furlongs"])
+    today_route = today_distance >= 8.0
+    today_class_raw = meta["race_class"]
+    today_class_rank = _class_rank(today_class_raw)
+    today_track = str(meta["track_code"] or "").upper()
+
+    starts = pd.read_sql(
+        """SELECT * FROM horse_starts
+           WHERE horse_id IN (SELECT horse_id FROM entries WHERE card_id=?)
+             AND start_date IS NOT NULL AND date(start_date) < date(?)""",
+        conn, params=(card_id, target_date.isoformat()),
+    )
+    workouts = pd.read_sql(
+        """SELECT * FROM workouts
+           WHERE horse_id IN (SELECT horse_id FROM entries WHERE card_id=?)
+             AND date(workout_date) < date(?)""",
+        conn, params=(card_id, target_date.isoformat()),
+    )
+    result = feat_df.copy()
+    for idx in result.index:
+        horse_id = int(result.at[idx, "horse_id"])
+        hs = starts[starts["horse_id"] == horse_id].copy() if not starts.empty else starts
+        if not hs.empty:
+            hs["_date"] = pd.to_datetime(hs["start_date"], errors="coerce").dt.date
+            hs = hs[hs["_date"].notna()]
+            hs["_days"] = hs["_date"].map(lambda value: (target_date - value).days)
+            valid = hs[(pd.to_numeric(hs["is_scratch"], errors="coerce").fillna(0) == 0)]
+            valid = valid[
+                pd.to_numeric(valid["finish_position"], errors="coerce").notna()
+            ]
+            finish_values = pd.to_numeric(valid["finish_position"], errors="coerce")
+            field_values = pd.to_numeric(valid["field_size_last"], errors="coerce")
+            usable = valid[
+                finish_values.notna()
+                & (finish_values >= 1)
+                & field_values.notna()
+                & (field_values >= 2)
+                & (finish_values <= field_values)
+            ].copy()
+            if not usable.empty:
+                finish = pd.to_numeric(usable["finish_position"], errors="coerce")
+                field = pd.to_numeric(usable["field_size_last"], errors="coerce")
+                usable["_pct"] = (
+                    1.0 - ((finish - 1.0) / (field - 1.0))
+                ).clip(0.0, 1.0)
+                weights = np.exp(-0.01 * usable["_days"].clip(lower=0))
+                observed = float(np.average(usable["_pct"], weights=weights))
+                usable_recent_n = int((usable["_days"] <= 180).sum())
+                form_cov = _clamp(usable_recent_n / 5.0)
+                result.at[idx, "recent_finish_percentile_w"] = round(
+                    form_cov * observed + (1.0 - form_cov) * 0.50, 4
+                )
+                result.at[idx, "recent_finish_evidence_count"] = usable_recent_n
+                result.at[idx, "form_class_coverage"] = round(form_cov, 4)
+            result.at[idx, "starts_last_90d"] = max(
+                0, int(((valid["_days"] >= 0) & (valid["_days"] <= 90)).sum())
+            )
+
+            valid_surface = valid[
+                valid["surface"].map(_surface_key) == today_surface
+            ]
+            valid_distance = valid[
+                (pd.to_numeric(valid["distance_furlongs"], errors="coerce") - today_distance).abs() <= 1.0
+            ]
+            valid_sd = valid_surface[
+                pd.to_numeric(valid_surface["distance_furlongs"], errors="coerce")
+                .map(lambda value: bool(pd.notna(value) and (float(value) >= 8.0) == today_route))
+            ]
+            m = 2.0
+            distance_n, surface_n, sd_n = len(valid_distance), len(valid_surface), len(valid_sd)
+            distance_wins = int((pd.to_numeric(valid_distance["finish_position"], errors="coerce") == 1).sum())
+            surface_wins = int((pd.to_numeric(valid_surface["finish_position"], errors="coerce") == 1).sum())
+            dfit = (distance_wins + m * 0.50) / (distance_n + m)
+            sfit = (surface_wins + m * 0.50) / (surface_n + m)
+            result.at[idx, "distance_fit_eb"] = result.at[idx, "distance_fit"] = round(dfit, 4)
+            result.at[idx, "surface_fit_eb"] = result.at[idx, "surface_fit"] = round(sfit, 4)
+            result.at[idx, "distance_fit_n"] = distance_n
+            result.at[idx, "surface_fit_n"] = surface_n
+            result.at[idx, "surface_distance_start_count"] = sd_n
+            result.at[idx, "distance_surface_coverage"] = round(_clamp(sd_n / 4.0), 4)
+            sd_usable = valid_sd[
+                pd.to_numeric(valid_sd["field_size_last"], errors="coerce").fillna(0) >= 1
+            ].copy()
+            if not sd_usable.empty:
+                finish = pd.to_numeric(sd_usable["finish_position"], errors="coerce")
+                field = pd.to_numeric(sd_usable["field_size_last"], errors="coerce")
+                pct = (1.0 - ((finish - 1.0) / (field - 1.0).clip(lower=1.0))).clip(0, 1)
+                weights = np.exp(-0.01 * sd_usable["_days"].clip(lower=0))
+                result.at[idx, "surface_distance_finish_percentile_w"] = round(
+                    (float(np.dot(weights, pct)) + m * 0.50) / (float(weights.sum()) + m), 4
+                )
+
+            latest = valid.sort_values("_date", ascending=False).head(1)
+            if not latest.empty:
+                last = latest.iloc[0]
+                last_label = last.get("race_class_raw")
+                last_rank = _class_rank(last_label)
+                same_circuit = str(last.get("track_code") or "").upper() == today_track
+                if last_rank is not None and today_class_rank is not None and same_circuit:
+                    result.at[idx, "class_delta_last_to_today"] = round(
+                        (last_rank - today_class_rank) / 100.0, 4
+                    )
+                    result.at[idx, "class_delta_confidence"] = "conditioned_same_circuit"
+                result.at[idx, "last_class_label_raw"] = last_label
+            result.at[idx, "today_class_label_raw"] = today_class_raw
+
+            total_n = len(hs)
+            scratch_n = int((pd.to_numeric(hs["is_scratch"], errors="coerce").fillna(0) == 1).sum())
+            result.at[idx, "historical_scratch_n"] = total_n
+            result.at[idx, "historical_scratch_confidence"] = "adequate" if total_n >= 3 else "low"
+            result.at[idx, "historical_scratch_rate"] = (
+                round(scratch_n / total_n, 4) if total_n >= 3 else None
+            )
+            pub_values: list[tuple[float, float]] = []
+            for _, start in valid.iterrows():
+                implied = _historical_implied(start.get("historical_odds_raw"))
+                if implied is not None:
+                    pub_values.append((implied, math.exp(-0.01 * max(float(start["_days"]), 0))))
+            result.at[idx, "prior_publicness_n"] = len(pub_values)
+            if pub_values:
+                weighted = sum(value * weight for value, weight in pub_values)
+                weight_sum = sum(weight for _, weight in pub_values)
+                result.at[idx, "prior_publicness"] = round(
+                    (weighted + 3.0 * 0.10) / (weight_sum + 3.0), 4
+                )
+            dk_starts = int((hs["source_provider"].fillna("") == "draftkings").sum())
+            result.at[idx, "dk_history_start_count"] = dk_starts
+
+        hw = workouts[workouts["horse_id"] == horse_id].copy() if not workouts.empty else workouts
+        if not hw.empty:
+            hw["_date"] = pd.to_datetime(hw["workout_date"], errors="coerce").dt.date
+            hw = hw[hw["_date"].notna()]
+            hw["_days"] = hw["_date"].map(lambda value: (target_date - value).days)
+            valid60 = hw[
+                (hw["_days"] >= 0) & (hw["_days"] <= 60)
+                & pd.to_numeric(hw["time_seconds"], errors="coerce").notna()
+                & pd.to_numeric(hw["distance_furlongs"], errors="coerce").notna()
+            ].sort_values("_date")
+            count30 = int(((valid60["_days"] >= 0) & (valid60["_days"] <= 30)).sum())
+            coverage = _clamp(len(valid60) / 3.0)
+            result.at[idx, "workout_count_30d"] = result.at[idx, "workout_cadence_30d"] = count30
+            result.at[idx, "readiness_coverage"] = round(coverage, 4)
+            if not valid60.empty:
+                last = valid60.iloc[-1]
+                days = int(last["_days"])
+                result.at[idx, "days_since_last_workout"] = result.at[idx, "days_since_last_work"] = days
+                recency = math.exp(-days / 30.0)
+                cadence = _clamp(count30 / 3.0)
+                progression = 0.50
+                if len(valid60) >= 2:
+                    prior_dist = pd.to_numeric(valid60.iloc[:-1]["distance_furlongs"], errors="coerce").dropna()
+                    if not prior_dist.empty:
+                        progression = 0.65 if float(last["distance_furlongs"]) >= float(prior_dist.mean()) else 0.35
+                rank = _f(last.get("source_rank"))
+                rank_score = min(1.0, 1.0 / rank) if rank and rank > 0 else 0.50
+                time_score = 0.50
+                location = str(last.get("location_label") or "").strip()
+                workout_dates = pd.to_datetime(workouts["workout_date"], errors="coerce").dt.date
+                recent_peer = workout_dates.map(
+                    lambda value: bool(pd.notna(value) and 0 <= (target_date - value).days <= 90)
+                )
+                cohort = workouts[
+                    recent_peer
+                    & bool(location)
+                    & (workouts["location_label"].fillna("") == location)
+                    & (workouts["surface"].map(_surface_key) == _surface_key(last.get("surface")))
+                    & ((pd.to_numeric(workouts["distance_furlongs"], errors="coerce") - float(last["distance_furlongs"])).abs() <= 0.01)
+                ]
+                peer_times = pd.to_numeric(cohort["time_seconds"], errors="coerce").dropna()
+                normalized = len(peer_times) >= 5 and float(peer_times.std(ddof=0)) > 0
+                if normalized:
+                    z = (float(last["time_seconds"]) - float(peer_times.mean())) / float(peer_times.std(ddof=0))
+                    time_score = 1.0 / (1.0 + math.exp(z))
+                observed = 0.35 * recency + 0.30 * cadence + 0.20 * progression + 0.10 * rank_score + 0.05 * time_score
+                score = coverage * observed + (1.0 - coverage) * 0.50
+                result.at[idx, "workout_readiness_score_v2"] = round(_clamp(score), 4)
+                result.at[idx, "work_readiness_score"] = round(_clamp(score), 4)
+                result.at[idx, "workout_time_normalization_available"] = int(normalized)
+            sources = sorted(set(str(value) for value in hw["source_provider"].dropna()))
+            result.at[idx, "workout_data_source"] = ",".join(sources) or "canonical"
+            result.at[idx, "dk_workout_count"] = int((hw["source_provider"].fillna("") == "draftkings").sum())
+
+        sources = [str(result.at[idx, "feature_source_mix"] or "seed")]
+        if int(result.at[idx, "dk_history_start_count"] or 0) or int(result.at[idx, "dk_workout_count"] or 0):
+            sources.append("draftkings")
+        result.at[idx, "feature_source_mix"] = ",".join(dict.fromkeys(sources))
+    return result
+
+
+# ---------------------------------------------------------------------------
 # Public API
 # ---------------------------------------------------------------------------
 def build_features(card_id: Optional[int] = None) -> pd.DataFrame:
@@ -808,11 +1157,15 @@ def build_features(card_id: Optional[int] = None) -> pd.DataFrame:
     """
     from src.utils.db import (
         ensure_feature_store_columns,
+        ensure_horse_starts_columns,
+        ensure_workouts_columns,
         get_connection,
         get_derby_card_id,
     )
 
     conn = get_connection()
+    ensure_horse_starts_columns(conn)
+    ensure_workouts_columns(conn)
     ensure_feature_store_columns(conn)
 
     if card_id is None:
@@ -832,7 +1185,7 @@ def build_features(card_id: Optional[int] = None) -> pd.DataFrame:
 
     derby_active = _is_derby_context(conn, card_id)
 
-    build_ts = datetime.datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ")
+    build_ts = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
     rows = []
     for _, row in df.iterrows():
@@ -851,6 +1204,11 @@ def build_features(card_id: Optional[int] = None) -> pd.DataFrame:
         feat_df, _ = _apply_firstbet_overlay(feat_df, card_id, conn)
     except Exception as exc:
         print(f"[builder] firstbet overlay skipped: {exc}")
+
+    try:
+        feat_df = _canonical_history_overlay(feat_df, card_id, conn)
+    except Exception as exc:
+        print(f"[builder] canonical history overlay skipped: {exc}")
 
     feat_df = _fill_race_level_features(feat_df, derby_active=derby_active)
 
