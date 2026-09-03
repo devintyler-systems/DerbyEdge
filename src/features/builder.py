@@ -806,9 +806,14 @@ def build_features(card_id: Optional[int] = None) -> pd.DataFrame:
     Deletes any previous feature_store rows for this card, then inserts fresh ones.
     Returns a DataFrame with one row per entry (20 for the Derby seed).
     """
-    from src.utils.db import get_connection, get_derby_card_id
+    from src.utils.db import (
+        ensure_feature_store_columns,
+        get_connection,
+        get_derby_card_id,
+    )
 
     conn = get_connection()
+    ensure_feature_store_columns(conn)
 
     if card_id is None:
         card_id = get_derby_card_id()

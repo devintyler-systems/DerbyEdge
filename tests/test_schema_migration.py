@@ -6,9 +6,8 @@ files on disk.  They simulate the "old DB without new columns" scenario
 by creating a minimal table then calling the ensure_* functions.
 """
 import sqlite3
-
-import pandas as pd
-import pytest
+from pathlib import Path
+from typing import ClassVar
 
 from src.utils.db import (
     ensure_entry_scores_columns,
@@ -16,6 +15,8 @@ from src.utils.db import (
     ensure_score_runs_columns,
     entry_scores_cols,
 )
+
+ROOT = Path(__file__).resolve().parents[1]
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -342,3 +343,114 @@ class TestDynamicSelectFallback:
             "SELECT confidence_bucket FROM entry_scores WHERE entry_id=20"
         ).fetchone()
         assert row["confidence_bucket"] == "LOW"
+
+
+# ---------------------------------------------------------------------------
+# Integration: build_features auto-migrates feature_store
+# ---------------------------------------------------------------------------
+
+class TestFeatureStoreBuilderMigrationIntegration:
+    """Integration test verifying build_features self-migrates local SQLite DB.
+
+    Covers the PR #10 pace observability columns:
+      - run_style_evidence_count
+      - run_style_source
+      - pace_band
+      - classified_runner_count
+      - active_runner_count
+      - pace_state
+    """
+
+    PACE_COLUMNS_PR10: ClassVar[set[str]] = {
+        "run_style_evidence_count",
+        "run_style_source",
+        "pace_band",
+        "classified_runner_count",
+        "active_runner_count",
+        "pace_state",
+    }
+
+    def _setup_legacy_db(self, tmp_path: Path) -> tuple[Path, int]:
+        from src.services.results_intake import _ensure_table, ensure_race_review_view
+        from tests.conftest import insert_minimal_race
+
+        db_path = tmp_path / "legacy_derbyedge.db"
+        schema_text = (ROOT / "db" / "schema.sql").read_text(encoding="utf-8")
+
+        conn = sqlite3.connect(db_path)
+        conn.executescript(schema_text)
+        _ensure_table(conn)
+        ensure_race_review_view(conn)
+        race = insert_minimal_race(conn)
+        card_id = race["card_id"]
+
+        # Drop the PR #10 pace columns to simulate an unmigrated local SQLite database
+        for col in self.PACE_COLUMNS_PR10:
+            conn.execute(f"ALTER TABLE feature_store DROP COLUMN {col}")
+        conn.commit()
+
+        cols_before = _col_names(conn, "feature_store")
+        assert not (self.PACE_COLUMNS_PR10 & cols_before), "PR10 columns must be absent before migration"
+        conn.close()
+        return db_path, card_id
+
+    def test_build_features_auto_migrates_legacy_feature_store(self, tmp_path, monkeypatch):
+        import scripts.migrate_schema as migrate_module
+        from src.features.builder import build_features
+
+        db_path, card_id = self._setup_legacy_db(tmp_path)
+        monkeypatch.setattr("src.utils.db.DB_PATH", db_path)
+
+        # Track if migrate_schema was ever invoked (it should NOT be required)
+        migrate_called = False
+
+        def fake_migrate(*args, **kwargs):
+            nonlocal migrate_called
+            migrate_called = True
+            raise AssertionError("Manual migrate_schema invocation should not be called!")
+
+        monkeypatch.setattr(migrate_module, "main", fake_migrate)
+
+        # 1. Run build_features directly
+        feat_df = build_features(card_id=card_id)
+
+        # 2. Assert no manual scripts/migrate_schema.py invocation was required
+        assert not migrate_called
+
+        # 3. Assert write succeeds
+        assert not feat_df.empty
+        assert len(feat_df) == 5
+
+        # 4. Assert migration occurred and the six PR #10 columns now exist in DB
+        conn = sqlite3.connect(db_path)
+        cols_after = _col_names(conn, "feature_store")
+        assert self.PACE_COLUMNS_PR10.issubset(cols_after)
+
+        rows = conn.execute(
+            "SELECT feature_id, card_id, run_style_evidence_count, run_style_source, "
+            "pace_band, classified_runner_count, active_runner_count, pace_state "
+            "FROM feature_store WHERE card_id = ?",
+            (card_id,),
+        ).fetchall()
+        assert len(rows) == len(feat_df)
+        conn.close()
+
+    def test_build_features_cli_self_migrates_database(self, tmp_path, monkeypatch):
+        import scripts.build_features as build_features_cli
+
+        db_path, card_id = self._setup_legacy_db(tmp_path)
+        monkeypatch.setattr("src.utils.db.DB_PATH", db_path)
+        monkeypatch.setattr("sys.argv", ["build_features.py", "--card-id", str(card_id)])
+
+        # Run CLI entrypoint
+        ret = build_features_cli.main()
+        assert ret == 0
+
+        # Assert migration occurred and write succeeded
+        conn = sqlite3.connect(db_path)
+        cols_after = _col_names(conn, "feature_store")
+        assert self.PACE_COLUMNS_PR10.issubset(cols_after)
+        count = conn.execute("SELECT COUNT(*) FROM feature_store WHERE card_id = ?", (card_id,)).fetchone()[0]
+        assert count == 5
+        conn.close()
+
