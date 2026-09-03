@@ -2665,13 +2665,29 @@ with tab5:
     if _pdf5_file is not None:
         _pdf5_bytes = _pdf5_file.getvalue()
         _pdf5_sha = hashlib.sha256(_pdf5_bytes).hexdigest()
+
+        # Deterministic upload path
+        _upload_dir = ROOT / "data" / "runs" / "uploads"
+        _upload_dir.mkdir(parents=True, exist_ok=True)
+        _stored_path = _upload_dir / f"{_pdf5_sha[:12]}_{_pdf5_file.name}"
+        if not _stored_path.exists():
+            _stored_path.write_bytes(_pdf5_bytes)
+
+        # Cache keyed by SHA-256, filename, parser version, and extract mode
+        _cache_key = f"{_pdf5_sha}:{_pdf5_file.name}:v1.0.0:full"
         _cached_upload = st.session_state.get("_pdf5_parse_cache") or {}
-        if _cached_upload.get("sha256") == _pdf5_sha:
+        if _cached_upload.get("cache_key") == _cache_key:
             _pr5 = _cached_upload["result"]
         else:
             with st.spinner("Extracting and validating race data from PDF…"):
-                _generic_pr5 = parse_race_pdf(_pdf5_bytes)
-                if _generic_pr5.get("is_1stbet"):
+                _parsed_pr5 = parse_race_pdf(
+                    _pdf5_bytes,
+                    filename=_pdf5_file.name,
+                    stored_path=str(_stored_path.resolve()),
+                )
+                if _parsed_pr5.get("is_draftkings"):
+                    _pr5 = _parsed_pr5
+                elif _parsed_pr5.get("is_1stbet"):
                     _firstbet_run = ingest_firstbet_pdf(
                         _pdf5_bytes,
                         filename=_pdf5_file.name,
@@ -2685,14 +2701,19 @@ with tab5:
                         "feature_audit": _firstbet_run["feature_audit"],
                         "ingest_run_id": _firstbet_run["run_id"],
                         "artifact_paths": _firstbet_run["paths"],
-                        "raw_text": _generic_pr5.get("raw_text"),
-                        "runners_primary": _generic_pr5.get("runners_primary") or [],
-                        "runners_fallback": _generic_pr5.get("runners_fallback") or [],
+                        "raw_text": _parsed_pr5.get("raw_text"),
+                        "runners_primary": _parsed_pr5.get("runners_primary") or [],
+                        "runners_fallback": _parsed_pr5.get("runners_fallback") or [],
+                        "upload": _parsed_pr5.get("upload"),
+                        "parser": _parsed_pr5.get("parser"),
+                        "race_resolution": _parsed_pr5.get("race_resolution"),
                     })
                 else:
-                    _pr5 = _generic_pr5
+                    _pr5 = _parsed_pr5
             st.session_state["_pdf5_parse_cache"] = {
-                "sha256": _pdf5_sha, "result": _pr5,
+                "cache_key": _cache_key,
+                "sha256": _pdf5_sha,
+                "result": _pr5,
             }
 
         if not _pr5["ok"] and not _pr5.get("normalized_payload"):
@@ -2737,6 +2758,15 @@ with tab5:
             ] if p]
             if _p5_detail:
                 st.caption(" · ".join(_p5_detail))
+
+            # Diagnostic payload display
+            if _pr5.get("upload") and _pr5.get("parser"):
+                with st.expander("🔍 Ingestion Diagnostics & Resolution", expanded=False):
+                    st.json({
+                        "upload": _pr5.get("upload"),
+                        "parser": _pr5.get("parser"),
+                        "race_resolution": _pr5.get("race_resolution"),
+                    })
 
             # Runners preview
             if _p5_runners:
