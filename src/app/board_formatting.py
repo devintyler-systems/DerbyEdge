@@ -17,6 +17,15 @@ BINDING_INVALID_GUIDANCE = (
     "Upload state mismatch: this card is not bound to the current immutable ingestion result.\n"
     "Re-upload the source PDF to create a new validated ingestion run."
 )
+DK_ENRICHMENT_FAILED_GUIDANCE = (
+    "DK PP data was parsed and persisted, but pre-race feature enrichment failed."
+)
+FEATURE_LIMITED_NO_SCORING_GUIDANCE = (
+    "Feature-limited — no scoring. Speed, pace, form, and trip history are "
+    "unavailable from this DraftKings source and no limited-history proxy model "
+    "is available, so no win probabilities, fair odds, rankings, or betting "
+    "outputs are produced. Parsed entries and diagnostics are shown for review."
+)
 # Only these source-format values may ever surface the generic 1/ST guidance.
 _GENERIC_GUIDANCE_SOURCE_FORMATS = frozenset({"", "unknown", "unsupported"})
 
@@ -26,6 +35,10 @@ def blocked_state_guidance(audit: object) -> str:
     safe_audit = audit if isinstance(audit, dict) else {}
     if safe_audit.get("binding_invalid"):
         return BINDING_INVALID_GUIDANCE
+    if safe_audit.get("scoring_state") == "FEATURE_LIMITED_NO_SCORING":
+        return FEATURE_LIMITED_NO_SCORING_GUIDANCE
+    if safe_audit.get("enrichment_failed"):
+        return DK_ENRICHMENT_FAILED_GUIDANCE
     if safe_audit.get("recommended_action"):
         action = str(safe_audit["recommended_action"])
         if safe_audit.get("field_reconciliation_status") == "exact" and "reconciliation" in action.lower():

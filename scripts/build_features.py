@@ -404,8 +404,31 @@ def main() -> int:
     print("\nDerbyEdge feature store build")
     print("=" * 44)
 
-    # 1. Build features and persist to DB
-    feat_df = build_features(card_id=args.card_id)
+    # 1. Build features and persist to DB.
+    #    DraftKings-bound cards run pre-race enrichment from their exact
+    #    immutable ingestion run first, then build features from it.
+    from src.utils.db import get_connection
+    from src.services.dk_enrichment import card_is_dk_bound, enrich_card_from_ingestion_run
+
+    _dk_conn = get_connection()
+    _is_dk = bool(args.card_id) and card_is_dk_bound(_dk_conn, args.card_id)
+    if _is_dk:
+        result = enrich_card_from_ingestion_run(_dk_conn, args.card_id)
+        _dk_conn.commit()
+        _dk_conn.close()
+        print(f"  [dk-enrich] state={result.state} "
+              f"run={result.ingestion_run_id} "
+              f"horse_starts={result.horse_starts_written} workouts={result.workouts_written}")
+        if result.state != "ENRICHED":
+            print(f"  [dk-enrich] FAILED — {result.failure_reason}")
+            return 1
+        feat_df = pd.read_sql(
+            "SELECT * FROM feature_store WHERE card_id=? ORDER BY post_position",
+            get_connection(), params=(args.card_id,),
+        )
+    else:
+        _dk_conn.close()
+        feat_df = build_features(card_id=args.card_id)
     print(f"  [builder]  {len(feat_df)} entries, {len(feat_df.columns)} columns")
 
     feature_cols = [

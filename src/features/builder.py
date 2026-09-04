@@ -1019,10 +1019,15 @@ def _canonical_history_overlay(feat_df: pd.DataFrame, card_id: int, conn) -> pd.
             valid_distance = valid[
                 (pd.to_numeric(valid["distance_furlongs"], errors="coerce") - today_distance).abs() <= 1.0
             ]
-            valid_sd = valid_surface[
-                pd.to_numeric(valid_surface["distance_furlongs"], errors="coerce")
-                .map(lambda value: bool(pd.notna(value) and (float(value) >= 8.0) == today_route))
-            ]
+            if valid_surface.empty:
+                valid_sd = valid_surface
+            else:
+                _sd_mask = (
+                    pd.to_numeric(valid_surface["distance_furlongs"], errors="coerce")
+                    .map(lambda value: bool(pd.notna(value) and (float(value) >= 8.0) == today_route))
+                    .astype(bool)
+                )
+                valid_sd = valid_surface[_sd_mask]
             m = 2.0
             distance_n, surface_n, sd_n = len(valid_distance), len(valid_surface), len(valid_sd)
             distance_wins = int((pd.to_numeric(valid_distance["finish_position"], errors="coerce") == 1).sum())
@@ -1147,13 +1152,16 @@ def _canonical_history_overlay(feat_df: pd.DataFrame, card_id: int, conn) -> pd.
 # ---------------------------------------------------------------------------
 # Public API
 # ---------------------------------------------------------------------------
-def build_features(card_id: Optional[int] = None) -> pd.DataFrame:
+def build_features(card_id: Optional[int] = None, conn=None) -> pd.DataFrame:
     """
     Build the feature store for one race card.
 
     If card_id is None uses the first Kentucky Derby card found.
     Deletes any previous feature_store rows for this card, then inserts fresh ones.
     Returns a DataFrame with one row per entry (20 for the Derby seed).
+
+    Pass ``conn`` to build against an already-open connection (it is not closed
+    here); otherwise a new connection to the on-disk DB is opened and closed.
     """
     from src.utils.db import (
         ensure_feature_store_columns,
@@ -1163,7 +1171,8 @@ def build_features(card_id: Optional[int] = None) -> pd.DataFrame:
         get_derby_card_id,
     )
 
-    conn = get_connection()
+    _external_conn = conn is not None
+    conn = conn if _external_conn else get_connection()
     ensure_horse_starts_columns(conn)
     ensure_workouts_columns(conn)
     ensure_feature_store_columns(conn)
@@ -1171,7 +1180,8 @@ def build_features(card_id: Optional[int] = None) -> pd.DataFrame:
     if card_id is None:
         card_id = get_derby_card_id()
     if card_id is None:
-        conn.close()
+        if not _external_conn:
+            conn.close()
         raise RuntimeError("No Kentucky Derby card found — run ingest first.")
 
     df = pd.read_sql(
@@ -1180,7 +1190,8 @@ def build_features(card_id: Optional[int] = None) -> pd.DataFrame:
         params=(card_id,),
     )
     if df.empty:
-        conn.close()
+        if not _external_conn:
+            conn.close()
         raise RuntimeError(f"No entries for card_id={card_id} — run ingest first.")
 
     derby_active = _is_derby_context(conn, card_id)
@@ -1220,6 +1231,7 @@ def build_features(card_id: Optional[int] = None) -> pd.DataFrame:
     conn.execute("DELETE FROM feature_store WHERE card_id = ?", (card_id,))
     feat_df.to_sql("feature_store", conn, if_exists="append", index=False)
     conn.commit()
-    conn.close()
+    if not _external_conn:
+        conn.close()
 
     return feat_df

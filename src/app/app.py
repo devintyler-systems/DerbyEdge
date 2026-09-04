@@ -1240,7 +1240,19 @@ if active_card_id:
         "starter_match_rate",
         (_card_run_state.quality.starter_match_rate if _card_run_state.quality else 0.0),
     )
-    if _run_mode == RunMode.BLOCKED:
+    if getattr(_card_run_state, "scoring_state", None) == "FEATURE_LIMITED_NO_SCORING":
+        _fam = ", ".join(
+            k.replace("_feature_available", "")
+            for k, v in (_audit.get("feature_availability_mask") or {}).items() if not v
+        )
+        st.warning(
+            "🔒 FEATURE-LIMITED — NO SCORING\n\n"
+            f"{blocked_state_guidance(_audit)}\n\n"
+            f"Unavailable feature families: {_fam or 'speed, pace, form, trip'}. "
+            "No win probabilities, fair odds, rankings, or betting outputs are produced. "
+            "Parsed entries and diagnostics below are for review only."
+        )
+    elif _run_mode == RunMode.BLOCKED:
         _reason = next(iter(_card_run_state.reasons), "Race data failed validation.")
         st.error(
             "⛔ SCORING BLOCKED\n\n"
@@ -1272,11 +1284,26 @@ if active_card_id:
             + _delta_text
         )
     elif _run_mode == RunMode.PP_PARSED_FEATURES_PENDING:
+        _src_fmt = str(_audit.get("source_format") or "")
+        _src_label = (
+            "DraftKings Horse program past performances"
+            if _src_fmt.startswith("dkhorse")
+            else "1/ST past performances"
+        )
         st.info(
             "PP PARSED — FEATURES PENDING\n\n"
-            "1/ST past performances were attached, but the current model feature "
+            f"{_src_label} were attached, but the current model feature "
             "frame has not passed schema and non-degeneracy checks. Build features "
             "before scoring. No model output is available in this state."
+        )
+    elif _run_mode == RunMode.MODEL_READY_LIMITED and _audit.get("confidence_tier") == "limited_data_proxy":
+        st.warning(
+            "LIMITED-DATA PROXY FORECAST\n\n"
+            "Limited-data proxy forecast — speed, pace, form, and trip history are "
+            "unavailable from this source. Not eligible for wagering.\n\n"
+            f"Model family: {_audit.get('model_family_selected')} "
+            f"v{_audit.get('model_version')} · schema {_audit.get('model_feature_schema_version')} · "
+            f"calibration {_audit.get('calibration_version')}"
         )
     elif _run_mode == RunMode.MODEL_READY_LIMITED:
         _coverage = _audit.get("feature_coverage") or {}
@@ -1285,11 +1312,23 @@ if active_card_id:
             f"{_label}: {', '.join(_items) if _items else 'None'}"
             for _label, _items in _inventory.items()
         )
+        _src_fmt = str(_audit.get("source_format") or "")
+        _is_dk = _src_fmt.startswith("dkhorse")
+        _src_phrase = (
+            "DraftKings Horse PP-derived inputs only"
+            if _is_dk else "1/ST PDF-derived inputs only"
+        )
+        _unavail = (
+            ", ".join(_audit.get("dk_unavailable_feature_families") or [])
+            + ", workouts time-normalization, pedigree, live odds"
+            if _is_dk
+            else "speed figures, fractional pace, workouts, pedigree, live odds"
+        )
         st.warning(
             "LIMITED-SOURCE FORECAST\n\n"
             f"{_entries_parsed}/{race_info.get('field_size') or _entries_parsed} starters "
-            "have parsed PP history. The forecast uses 1/ST PDF-derived inputs only. "
-            "Unavailable: speed figures, fractional pace, workouts, pedigree, live odds. "
+            f"have parsed PP history. The forecast uses {_src_phrase}. "
+            f"Unavailable: {_unavail}. "
             "Betting outputs remain disabled. "
             f"Source inventory — {_inventory_text}"
         )
@@ -2717,6 +2756,12 @@ with tab5:
                         _pdf5_bytes, filename=_pdf5_file.name, parse_result=_pr5,
                     )
                     _persist_ing_run(_dk_ing_run, runs_root=ROOT / "data" / "runs")
+                    if _pr5.get("parsed_race") is not None:
+                        from src.services.dk_enrichment import persist_dk_parsed_race
+                        persist_dk_parsed_race(
+                            _dk_ing_run.ingestion_run_id, _pr5["parsed_race"],
+                            runs_root=ROOT / "data" / "runs",
+                        )
                     _pr5["ingestion_run_id"] = _dk_ing_run.ingestion_run_id
                 elif _parsed_pr5.get("is_1stbet"):
                     _firstbet_run = ingest_firstbet_pdf(

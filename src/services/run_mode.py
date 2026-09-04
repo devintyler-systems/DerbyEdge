@@ -27,6 +27,11 @@ class CardRunState:
     audit: dict = field(default_factory=dict)
     quality: DataQuality | None = None
     feature_verification: FeatureVerification | None = None
+    # Refines ``mode`` when a source-specific model policy overrides it — e.g.
+    # "FEATURE_LIMITED_NO_SCORING" for a DK card whose source cannot supply the
+    # feature families the standard model needs and for which no separately
+    # trained proxy model exists.
+    scoring_state: str | None = None
 
     def __post_init__(self) -> None:
         if self.audit is None:
@@ -34,6 +39,8 @@ class CardRunState:
 
     @property
     def scoring_eligible(self) -> bool:
+        if self.scoring_state == "FEATURE_LIMITED_NO_SCORING":
+            return False
         return self.mode in (RunMode.MODEL_READY_LIMITED, RunMode.MODEL_READY)
 
 
@@ -93,6 +100,25 @@ def _card_run_state_from_ingestion_run(
     audit["ingestion_run_id"] = run.ingestion_run_id
     audit["ingestion_run_upload_sha256"] = run.upload_sha256
     audit["ingestion_run_parser_pipeline_version"] = run.parser_pipeline_version
+
+    # DK cards: a failed pre-race enrichment blocks honestly — never fall back to
+    # a 0/0 audit, generic 1/ST guidance, or stale DB history.
+    if str(run.source_format or "").startswith("dkhorse"):
+        from src.services.dk_enrichment import FAILED as _DK_FAILED, get_dk_enrichment_state
+        enr = get_dk_enrichment_state(conn, card_id, run.ingestion_run_id)
+        audit["dk_enrichment_state"] = enr.get("state")
+        if enr.get("state") == _DK_FAILED:
+            audit["enrichment_failed"] = True
+            audit["enrichment_failure_reason"] = enr.get("failure_reason")
+            trace_ingest(
+                "render", ingestion_run_id=run.ingestion_run_id, card_id=card_id,
+                source_format=run.source_format, enrichment_failed=enr.get("failure_reason"),
+            )
+            return CardRunState(
+                RunMode.BLOCKED,
+                [f"dk_enrichment_failed: {enr.get('failure_reason') or 'pre-race feature enrichment failed'}"],
+                audit,
+            )
     trace_ingest(
         "render",
         ingestion_run_id=run.ingestion_run_id,
@@ -103,7 +129,40 @@ def _card_run_state_from_ingestion_run(
         race_key=run.race_key,
         **audit_trace_fields(audit),
     )
-    return _finalize_card_run_state(conn, card_id, audit)
+    state = _finalize_card_run_state(conn, card_id, audit)
+    if str(run.source_format or "").startswith("dkhorse"):
+        state = _apply_dk_model_policy(conn, card_id, state)
+    return state
+
+
+def _apply_dk_model_policy(
+    conn: sqlite3.Connection, card_id: int, state: CardRunState
+) -> CardRunState:
+    """Enforce model-family separation for a DK card and record the decision."""
+    from src.services.dk_model_policy import (
+        FEATURE_LIMITED_NO_SCORING, decide_dk_model_policy,
+    )
+
+    audit = dict(state.audit or {})
+    decision = decide_dk_model_policy(
+        conn, card_id, state.mode, state.feature_verification,
+        has_live_odds=bool(state.quality and state.quality.has_live_odds),
+    )
+    audit.update(decision.as_audit())
+
+    if decision.scoring_state == FEATURE_LIMITED_NO_SCORING:
+        audit["scoring_state"] = FEATURE_LIMITED_NO_SCORING
+        reasons = [
+            "FEATURE_LIMITED_NO_SCORING: DraftKings source supplies no speed, "
+            "pace, form, or trip history and no limited_history_proxy model is "
+            "registered; the standard full-feature model must not score this card.",
+            *[f"{cap} disabled: {why}" for cap, why in decision.disabled_capability_reasons.items()],
+        ]
+        return replace(
+            state, mode=RunMode.BLOCKED, reasons=reasons, audit=audit,
+            scoring_state=FEATURE_LIMITED_NO_SCORING,
+        )
+    return replace(state, audit=audit)
 
 
 def _finalize_card_run_state(
@@ -145,6 +204,28 @@ def _finalize_card_run_state(
                 if warning.startswith("PACE_")
             ],
         }
+
+    # DraftKings source: name the source correctly in limited-forecast reasons
+    # and record which feature families the source cannot supply.
+    if audit and str(audit.get("source_format") or "").startswith("dkhorse"):
+        reasons = [
+            r.replace("1/ST PDF-supported features", "DraftKings Horse PP-supported features")
+             .replace("1/ST PDF-derived inputs only", "DraftKings Horse PP-derived inputs only")
+            for r in reasons
+        ]
+        degenerate = {
+            w.split(":", 1)[1].strip().split(" ", 1)[0]
+            for w in verification.warnings
+            if w.startswith("FEATURE_DEGENERACY_WARNING:")
+        }
+        # DK Horse PP rows carry no speed figures and no historical field size,
+        # so speed and field-adjusted form/pace families are unavailable.
+        unavailable = {"speed_figures", "fractional_pace"}
+        if "form" in degenerate:
+            unavailable.add("field_adjusted_form")
+        audit = dict(audit)
+        audit["dk_unavailable_feature_families"] = sorted(unavailable)
+        audit["dk_confidence_penalty"] = "limited_source_forecast"
     return CardRunState(mode, reasons, audit, quality, verification)
 
 
