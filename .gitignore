@@ -16,6 +16,10 @@ db/derbyedge.db
 *.sqlite
 *.sqlite3
 
+# Local SQLite databases and SQLite sidecar files (WAL / SHM / rollback journal)
+/db/*.db
+/db/*.db-*
+
 # Model artifacts (manifests remain version-controlled)
 saved_models/
 models/**/*.pkl
@@ -28,6 +32,10 @@ models/**/*.onnx
 output/
 evaluation_runs/
 eval_runs/
+
+# DerbyEdge local runtime data and validation evidence
+/artifacts/
+/data/runs/
 
 # Test / coverage / cache
 .pytest_cache/
