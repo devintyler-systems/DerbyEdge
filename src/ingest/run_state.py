@@ -36,23 +36,42 @@ class DataQuality:
     # active entries, while this count lets the field-size gate distinguish a
     # fully explained scratch reduction from a parser omission.
     entries_scratched: int = 0
+    active_entry_count: int | None = None
+    nonstarter_count: int = 0
+    field_reconciliation_status: str = "unknown"
+    experienced_field: bool = True
+    workout_forward_low_history: bool = False
+    source_format: str | None = None
+    identity_resolution_rate: float | None = None
+    starter_pp_link_rate: float | None = None
+    experienced_field_pp_coverage: float | None = None
+    resolved_no_history_count: int | None = None
+    unresolved_identity_count: int | None = None
+    unresolved_history_count: int | None = None
+
+
+MIN_ACTIVE_ENTRIES = 4
+MIN_STARTER_MATCH_RATE = 0.90
+MIN_IDENTITY_RESOLUTION_RATE = 0.90
+MIN_EXPERIENCED_FIELD_PP_COVERAGE = 0.70
 
 
 def resolve_run_mode(q: DataQuality) -> tuple[RunMode, list[str]]:
     """Resolve the only product state that the supplied data can support."""
     errors = list(q.blocking_errors)
 
-    if q.entries_parsed < 2:
-        errors.append("Fewer than two valid entries were parsed.")
+    active_entries = q.active_entry_count if q.active_entry_count is not None else q.entries_parsed
+    if active_entries < MIN_ACTIVE_ENTRIES:
+        errors.append(f"Fewer than {MIN_ACTIVE_ENTRIES} valid active entries were parsed.")
 
     expected_active = (
         q.field_size_declared - q.entries_scratched
         if q.field_size_declared is not None else None
     )
-    if expected_active is not None and q.entries_parsed != expected_active:
+    if q.field_reconciliation_status == "unexplained" or (expected_active is not None and active_entries != expected_active and q.field_reconciliation_status != "late_scratch_explained"):
         errors.append(
             f"Declared field size is {q.field_size_declared}; "
-            f"only {q.entries_parsed} active entries were parsed"
+            f"only {active_entries} active entries were parsed"
             + (
                 f" after {q.entries_scratched} parsed scratches."
                 if q.entries_scratched else "."
@@ -62,29 +81,59 @@ def resolve_run_mode(q: DataQuality) -> tuple[RunMode, list[str]]:
     if not q.race_metadata_complete:
         errors.append("Required race metadata is incomplete.")
 
-    if errors:
-        return RunMode.BLOCKED, _dedupe(errors)
+    is_dk = bool(q.source_format and str(q.source_format).startswith("dkhorse"))
+    if is_dk:
+        if q.identity_resolution_rate is None:
+            errors.append("DK Horse identity resolution metric is missing.")
+        if q.experienced_field_pp_coverage is None:
+            errors.append("DK Horse experienced field PP coverage metric is missing.")
+
+    if q.unresolved_identity_count is not None and q.unresolved_identity_count > 0:
+        errors.append(f"{q.unresolved_identity_count} active entries have unresolved runner identity.")
+
+    if q.unresolved_history_count is not None and q.unresolved_history_count > 0:
+        errors.append(f"{q.unresolved_history_count} runners expected to have history have unresolved history.")
 
     if q.entries_with_pp_history == 0:
-        if q.has_morning_lines:
+        if q.experienced_field and not q.workout_forward_low_history:
+            errors.append(
+                "No usable past-performance rows are linked in an experienced field."
+            )
+        elif q.has_morning_lines:
             return RunMode.MARKET_BASELINE_ONLY, [
-                "No past-performance rows attached to entered horses.",
+                "WORKOUT_FORWARD_LOW_HISTORY: source supports a debut-heavy field.",
                 "Morning-line implied probabilities are reference only, not model output.",
             ]
-        return RunMode.BLOCKED, [
-            "No PP history and no usable morning-line odds were parsed."
-        ]
+        else:
+            errors.append(
+                "No PP history and no usable morning-line odds were parsed."
+            )
 
-    if q.starter_match_rate < 0.90:
-        return RunMode.BLOCKED, [
+    if q.identity_resolution_rate is not None:
+        if q.identity_resolution_rate < MIN_IDENTITY_RESOLUTION_RATE:
+            errors.append(
+                f"Identity resolution rate is {q.identity_resolution_rate:.0%}; minimum is 90%."
+            )
+    elif q.starter_match_rate < MIN_STARTER_MATCH_RATE:
+        errors.append(
             f"Starter-to-PP match rate is {q.starter_match_rate:.0%}; minimum is 90%."
-        ]
+        )
 
-    pp_coverage = q.entries_with_pp_history / q.entries_parsed
-    if pp_coverage < 0.80:
-        return RunMode.BLOCKED, [
-            f"PP coverage is {pp_coverage:.0%}; minimum is 80% of parsed entries."
-        ]
+    if q.experienced_field and not q.workout_forward_low_history:
+        if q.experienced_field_pp_coverage is not None:
+            if q.experienced_field_pp_coverage < MIN_EXPERIENCED_FIELD_PP_COVERAGE:
+                errors.append(
+                    f"Experienced field PP coverage is {q.experienced_field_pp_coverage:.0%}; minimum is {MIN_EXPERIENCED_FIELD_PP_COVERAGE:.0%}."
+                )
+        else:
+            pp_coverage = q.entries_with_pp_history / active_entries
+            if pp_coverage < MIN_EXPERIENCED_FIELD_PP_COVERAGE:
+                errors.append(
+                    f"PP coverage is {pp_coverage:.0%}; minimum is {MIN_EXPERIENCED_FIELD_PP_COVERAGE:.0%} of active entries."
+                )
+
+    if errors:
+        return RunMode.BLOCKED, _dedupe(errors)
 
     if not q.required_model_features_complete:
         return RunMode.PP_PARSED_FEATURES_PENDING, [

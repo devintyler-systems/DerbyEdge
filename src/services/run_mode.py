@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import sqlite3
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any
 
@@ -17,9 +17,13 @@ from src.services.odds_intake import load_live_odds_by_pp
 class CardRunState:
     mode: RunMode
     reasons: list[str]
-    audit: dict | None
+    audit: dict = field(default_factory=dict)
     quality: DataQuality | None = None
     feature_verification: FeatureVerification | None = None
+
+    def __post_init__(self) -> None:
+        if self.audit is None:
+            object.__setattr__(self, "audit", {})
 
     @property
     def scoring_eligible(self) -> bool:
@@ -129,7 +133,15 @@ def data_quality_from_card(
         scratches = int(audit.get("scratches") or 0)
         metadata_complete = bool(audit.get("race_metadata_complete", race is not None))
         has_morning_lines = bool(audit.get("has_morning_lines", entries))
-        blocking_errors = list(audit.get("blocking_errors") or [])
+        blocking_errors = list(audit.get("block_reasons") or audit.get("blocking_errors") or [])
+        source_format = audit.get("source_format")
+        field_reconciliation = audit.get("field_reconciliation_status", "unknown")
+        identity_rate = audit.get("identity_resolution_rate")
+        pp_link_rate = audit.get("starter_pp_link_rate")
+        exp_coverage = audit.get("experienced_field_pp_coverage")
+        resolved_no_hist = audit.get("resolved_no_history_count")
+        unresolved_id = audit.get("unresolved_identity_count")
+        unresolved_hist = audit.get("unresolved_history_count")
     else:
         pp_entry_ids: set[int] = set()
         for table in ("firstbet_pp_starts", "horse_starts"):
@@ -149,6 +161,14 @@ def data_quality_from_card(
         has_morning_lines = bool(entries) and all(row[1] is not None for row in entries)
         blocking_errors = [] if race else [f"No race card found for card_id={card_id}."]
         scratches = 0
+        source_format = None
+        field_reconciliation = "unknown"
+        identity_rate = None
+        pp_link_rate = None
+        exp_coverage = None
+        resolved_no_hist = None
+        unresolved_id = None
+        unresolved_hist = None
     return DataQuality(
         entries_parsed=parsed,
         field_size_declared=int(declared) if declared else None,
@@ -164,6 +184,15 @@ def data_quality_from_card(
         required_model_features_complete=required_model_features_complete,
         blocking_errors=blocking_errors,
         entries_scratched=scratches,
+        active_entry_count=parsed,
+        field_reconciliation_status=field_reconciliation,
+        source_format=source_format,
+        identity_resolution_rate=identity_rate,
+        starter_pp_link_rate=pp_link_rate,
+        experienced_field_pp_coverage=exp_coverage,
+        resolved_no_history_count=resolved_no_hist,
+        unresolved_identity_count=unresolved_id,
+        unresolved_history_count=unresolved_hist,
     )
 
 

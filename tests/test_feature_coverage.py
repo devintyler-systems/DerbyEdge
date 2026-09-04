@@ -37,15 +37,17 @@ def test_constant_nontrivial_features_emit_warning_and_block_forecast():
     rows = [
         {"pace_fit": 0.5, "form": 0.5, "surface_distance_fit": 0.5},
         {"pace_fit": 0.5, "form": 0.5, "surface_distance_fit": 0.5},
+        {"pace_fit": 0.5, "form": 0.5, "surface_distance_fit": 0.5},
+        {"pace_fit": 0.5, "form": 0.5, "surface_distance_fit": 0.5},
     ]
     warnings = feature_degeneracy_warnings(rows, rows[0].keys())
     assert len(warnings) == 3
     assert all(warning.startswith("FEATURE_DEGENERACY_WARNING") for warning in warnings)
 
     quality = DataQuality(
-        entries_parsed=2,
-        field_size_declared=2,
-        entries_with_pp_history=2,
+            entries_parsed=4,
+            field_size_declared=4,
+            entries_with_pp_history=4,
         starter_match_rate=1.0,
         race_metadata_complete=True,
         has_morning_lines=True,

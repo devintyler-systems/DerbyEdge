@@ -60,6 +60,90 @@ _COLOR_TERMS = {
     "black": "black",
 }
 
+_DK_SOURCE_SIGNALS: tuple[tuple[str, re.Pattern[str]], ...] = (
+    ("dkhorse_classic_url", re.compile(r"dkhorse\.com/bet/program/classic", re.I)),
+    ("dkhorse_brand", re.compile(r"\bDK\s*Horse\b|\bdkhorse\.com\b", re.I)),
+    ("dk_program_heading", re.compile(r"\bPROGRAM\b", re.I)),
+    ("dk_workouts_heading", re.compile(r"\bWORKOUTS\b", re.I)),
+    ("dk_pp_heading", re.compile(r"\b(?:ALL RACES|PPs?\s+RESULTS)\b", re.I)),
+)
+_DESCRIPTION_START = re.compile(
+    r"\b(?:dark\s+bay\s+or\s+brown|dark\s+bay|gray\s+or\s+roan|"
+    r"grayor\s+roan|bay|brown|chestnut|gray|grey|black|roan|gelding|colt|filly|mare|horse|\d{1,2}\s*yrs?)\b",
+    re.I,
+)
+
+
+GENERIC_CHROME_KEYS: frozenset[str] = frozenset({
+    "sar", "sardk", "dkhorse", "program", "workouts"
+})
+
+
+def clean_horse_name(raw_name: str) -> str:
+    """Strip recurring DK page chrome and attached breeding descriptors from runner name."""
+    name = re.sub(
+        r"^\s*(?:[A-Za-z]{2,4}\s*DK\s*Horse|[A-Za-z]{2,4}DK\s*Horse|DK\s*Horse)\s*",
+        "",
+        raw_name or "",
+        flags=re.I,
+    ).strip()
+    desc = _DESCRIPTION_START.search(name)
+    if desc:
+        name = name[:desc.start()].strip(" -,:|")
+    name = re.sub(r"([a-z])([A-Z])", r"\1 \2", name)
+    name = re.sub(r"([A-Z]+)([A-Z][a-z])", r"\1 \2", name)
+    name = re.sub(r"\bMc\s+([A-Z])", r"Mc\1", name)
+    name = re.sub(r"\bMac\s+([A-Z])", r"Mac\1", name)
+    name = re.sub(r"\bO'\s*([A-Z])", r"O'\1", name)
+    if name.startswith("TV "):
+        name = "T V " + name[3:]
+    return re.sub(r"\s+", " ", name).strip()
+
+
+@dataclass(frozen=True)
+class RunnerSection:
+    """A complete DK runner block, deliberately independent of PDF pages."""
+    program_number: int | None
+    post_position: int | None
+    horse_name_raw: str
+    horse_name_key: str
+    morning_line_raw: str | None
+    source_page_start: int
+    source_page_end: int
+    raw_text: str
+
+
+def canonical_horse_name(value: str) -> str:
+    """Compact canonical key for DK display text and PP linkage.
+
+    ``horse_key`` remains the database key.  DK uses this compact variant only
+    at the document boundary, so line wrapping and punctuation cannot break a
+    runner-to-section join.
+    """
+    cleaned = clean_horse_name(value or "")
+    display = re.sub(r"\s+", " ", cleaned or " ").strip()
+    descriptor = _DESCRIPTION_START.search(display)
+    if descriptor:
+        display = display[:descriptor.start()]
+    norm = re.sub(r"[^a-z0-9]+", "", horse_key(display).lower())
+    return norm
+
+
+def detect_draftkings_source(text: str, filename: str | None = None) -> dict[str, Any]:
+    """Return auditable DK detection; text detection requires two DK signals."""
+    matched = [name for name, pattern in _DK_SOURCE_SIGNALS if pattern.search(text or "")]
+    filename_match = bool(filename and re.search(r"(?:_DK_Horse_|\bDK_Horse\b)", Path(filename).name, re.I))
+    # A canonical filename is a useful routing hint, but never the only source
+    # evidence recorded as a successful content detection.
+    has_dk_identity = any(signal in matched for signal in ("dkhorse_classic_url", "dkhorse_brand"))
+    detected = has_dk_identity and len(matched) >= 2
+    return {
+        "source_format": "dkhorse_program_pdf" if detected else None,
+        "source_confidence": min(1.0, 0.45 + 0.18 * len(matched) + (0.15 if filename_match else 0.0)),
+        "source_detection_signals": matched + (["dk_filename"] if filename_match else []),
+        "detected": detected,
+    }
+
 
 @dataclass(frozen=True)
 class DraftKingsOddsRecord:
@@ -96,7 +180,6 @@ class DraftKingsStartRecord:
     source_row_id: str
     raw_text: str
     parse_confidence: float
-    field_size: int | None = None
     field_size: int | None = None
 
 
@@ -167,6 +250,7 @@ class DraftKingsEntryRecord:
     source_row_id: str
     raw_text: str
     parse_confidence: float
+    has_explicit_no_races: bool = False
 
 
 @dataclass
@@ -242,21 +326,7 @@ def is_draftkings_pdf(
       2. Explicit brand / URL signals in extracted text: 'DK Horse', 'dkhorse.com', 'DK HORSE'
       3. Structural tokens: 'Betting is closed for this race' + ('ALL RACES DIST' or 'PPs RESULTS')
     """
-    if filename:
-        fn_name = Path(filename).name
-        if re.search(r"^([A-Za-z0-9]+)_DK_Horse_R(\d+)_", fn_name, re.I):
-            return True
-        if "DK_Horse" in fn_name or "_DK_" in fn_name:
-            return True
-
-    if text:
-        first_1k = text[:1500]
-        if re.search(r"\bDK\s+Horse\b|dkhorse\.com|DKHORSE", first_1k, re.I):
-            return True
-        if "Betting is closed for this race" in text and ("ALL RACES DIST" in text or "PPs RESULTS" in text):
-            return True
-
-    return False
+    return bool(detect_draftkings_source(text or "", filename).get("detected"))
 
 
 def parse_dk_filename(filename: str | Path) -> tuple[str | None, int | None, date | None]:
@@ -279,6 +349,168 @@ def parse_dk_filename(filename: str | Path) -> tuple[str | None, int | None, dat
 def _clean_text(s: str) -> str:
     """Remove private-use or unprintable unicode characters."""
     return re.sub(r"[\ue000-\uf8ff]", "", s).strip()
+
+
+def _page_lines(page_text: str) -> list[str]:
+    """Drop repeated web chrome without dropping runner or PP content."""
+    lines: list[str] = []
+    for raw_line in page_text.splitlines():
+        line = re.sub(r"\s+", " ", raw_line).strip()
+        if not line:
+            continue
+        # Strip recurring top chrome: timestamp + track + DK Horse
+        if re.search(
+            r"^\d{1,2}/\d{1,2}/\d{2,4},?\s+\d{1,2}:\d{2}\s*(?:AM|PM)\s+[A-Za-z0-9_]+\s+DK\s+Horse\b",
+            line,
+            re.I,
+        ):
+            continue
+        # Strip recurring bottom chrome: dkhorse.com URL with page numbers
+        if re.search(r"dkhorse\.com/(?:bet|account)|\b(?:Login|Sign Up|Bet Slip)\b", line, re.I):
+            continue
+        if re.search(r"https?://(?:www\.)?dkhorse\.com/\S+\s+\d+/\d+", line, re.I):
+            continue
+        # Strip navigation buttons and tabs
+        if re.search(r"^\s*SEE\s+(?:LESS|MORE)\b", line, re.I):
+            continue
+        if re.search(r"^\s*PROGRAM\s+POOLS\s+PPs?\s+RESULTS\b", line, re.I):
+            continue
+        if re.search(r"^\s*BASIC\s+ADVANCED\s+TIPS\b", line, re.I):
+            continue
+        if re.search(r"^\s*WIN\s+\$1\b", line, re.I):
+            continue
+        if re.search(r"^\s*#\s+ALL\s+ODDS\s+RUNNER\s+ANGLES\b", line, re.I):
+            continue
+        lines.append(line)
+    return lines
+
+
+def _runner_candidate(line: str, previous: str | None = None) -> tuple[int | None, str, str | None] | None:
+    """Recognize a DK runner header from its identity plus breeding descriptor.
+
+    PP rows and workout rows have dates/track/distance signatures and do not
+    have this descriptor shape, which makes this safer than using page labels.
+    """
+    descriptor = _DESCRIPTION_START.search(line)
+    if not descriptor:
+        return None
+    prefix = line[:descriptor.start()].strip(" -,:|")
+    if re.search(r"\b(?:PROGRAM|HORSES|HORSESHOE|POOLS|VIDEO|TIPS)\b", prefix, re.I):
+        return None
+    # Layout extraction sometimes puts post/ML on the preceding line.
+    context = f"{previous or ''} {prefix}".strip()
+    post_match = re.search(r"(?:^|\s)(\d{1,2})(?:\s|$)", context)
+    post = int(post_match.group(1)) if post_match else None
+    ml_match = re.search(r"(?:\bM\s*:\s*|\bML\s*)(\d+(?:/\d+)?)", context, re.I)
+    ml = ml_match.group(1) if ml_match else None
+    cleaned = re.sub(r"\b(?:M\s*:|ML)\s*\d+(?:/\d+)?\b", " ", prefix, flags=re.I)
+    cleaned = re.sub(r"\b[A-Za-z]{2,4}DK\s+Horse\b|\b[A-Za-z]{2,4}\s+DK\s+Horse\b", " ", cleaned, flags=re.I)
+    cleaned = re.sub(r"\b\d+(?:/\d+)?\b", " ", cleaned)
+    cleaned = re.sub(r"\b(?:RUNNER|ANGLES|ODDS|PROGRAM|RACE|POOLS|VIDEO|TIPS)\b", " ", cleaned, flags=re.I)
+    cleaned = clean_horse_name(cleaned)
+    if previous and len(cleaned.split()) <= 1 and not DATE_PATTERN.search(previous) and not _DESCRIPTION_START.search(previous) and not re.search(r"\b(?:PROGRAM|HORSES|HORSESHOE|RACE|POOLS|VIDEO|TIPS)\b", previous, re.I):
+        previous_name = re.sub(r"\b\d+(?:/\d+)?\b|\b(?:M\s*:|ML)\b", " ", previous, flags=re.I)
+        previous_name = re.sub(r"\b[A-Za-z]{2,4}DK\s+Horse\b|\b[A-Za-z]{2,4}\s+DK\s+Horse\b", " ", previous_name, flags=re.I)
+        previous_name = re.sub(r"\b(?:RUNNER|ANGLES|ODDS|PROGRAM|RACE|POOLS|VIDEO|TIPS)\b", " ", previous_name, flags=re.I)
+        previous_name = re.sub(r"\s+", " ", previous_name).strip(" -,:|")
+        if re.search(r"[A-Za-z]", previous_name):
+            cleaned = f"{previous_name} {cleaned}"
+    cleaned = clean_horse_name(cleaned)
+    # Require at least one alphabetic token and reject obvious non-entry rows or chrome keys.
+    if not re.search(r"[A-Za-z]", cleaned) or DATE_PATTERN.search(line):
+        return None
+    key = canonical_horse_name(cleaned)
+    if not key or key in GENERIC_CHROME_KEYS:
+        return None
+    return post, cleaned, ml
+
+
+def extract_runner_sections(pages_text: list[str]) -> list[RunnerSection]:
+    """Segment DK text around runner identities, allowing sections across pages."""
+    markers: list[tuple[int, int, int | None, str, str | None]] = []
+    flattened: list[tuple[int, str]] = []
+    for page_no, page_text in enumerate(pages_text, start=1):
+        lines = _page_lines(page_text)
+        for line_no, line in enumerate(lines):
+            flattened.append((page_no, line))
+            candidate = _runner_candidate(line, lines[line_no - 1] if line_no else None)
+            if candidate:
+                post, name, ml = candidate
+                key = canonical_horse_name(name)
+                # Repeated sticky runner header on continuation pages is not a boundary.
+                if not markers or markers[-1][3] != key:
+                    markers.append((len(flattened) - 1, page_no, post, key, ml))
+    sections: list[RunnerSection] = []
+    for index, (start, page_start, post, key, ml) in enumerate(markers):
+        end = markers[index + 1][0] if index + 1 < len(markers) else len(flattened)
+        raw = "\n".join(line for _, line in flattened[start:end])
+        # Rebuild display name from its marker line, stopping at descriptor.
+        marker_line = flattened[start][1]
+        match = _runner_candidate(marker_line, flattened[start - 1][1] if start else None)
+        if not match:
+            continue
+        _, raw_name, _ = match
+        sections.append(RunnerSection(
+            program_number=post,
+            post_position=post,
+            horse_name_raw=raw_name,
+            horse_name_key=key,
+            morning_line_raw=ml,
+            source_page_start=page_start,
+            source_page_end=flattened[end - 1][0] if end > start else page_start,
+            raw_text=raw,
+        ))
+    return sections
+
+
+def _section_pp_rows(section: RunnerSection, target_date: date, doc_id: str) -> tuple[list[DraftKingsStartRecord], list[DraftKingsWorkoutRecord], list[DraftKingsScratchRecord]]:
+    """Parse PP rows only from one verified runner section (never globally)."""
+    starts: list[DraftKingsStartRecord] = []
+    workouts: list[DraftKingsWorkoutRecord] = []
+    scratches: list[DraftKingsScratchRecord] = []
+    chunks = re.split(r"(?=\b(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\s+\d{1,2},\s+'\d{2}\b)", section.raw_text, flags=re.I)
+    in_workouts = False
+    for chunk in chunks:
+        match = DATE_PATTERN.search(chunk)
+        if not match:
+            if re.search(r"\bWORKOUTS\b", chunk, re.I):
+                in_workouts = True
+            continue
+        workout_heading = re.search(r"\bWORKOUTS\b", chunk, re.I)
+        all_races_heading = re.search(r"\bALL RACES\b", chunk, re.I)
+        if all_races_heading and all_races_heading.start() < match.start():
+            in_workouts = False
+        row_is_workout = in_workouts or bool(
+            workout_heading and workout_heading.start() < match.start()
+            and not (all_races_heading and workout_heading.start() < all_races_heading.start() < match.start())
+        )
+        row_date = _parse_date_str(match.group(0), target_date.year)
+        if row_date is None:
+            continue
+        # A PP row needs date, track/class, distance, and surface/condition.
+        has_track = bool(re.search(r"\b[A-Z]{2,}(?:\s+[A-Z]{2,}){0,3}\b", chunk))
+        has_class = bool(re.search(r"\b(?:CLM\d*|MCL\d*|MSW|ALW|AOC|SOC|STR|MOC|MDN)\b", chunk, re.I))
+        distance = re.search(r"\b\d+(?:\s+\d+/\d+)?\s*[FM]\b", chunk, re.I)
+        surface = re.search(r"\b(?:DIRT|TURF|AW|SYNTHETIC|FAST|GOOD|SLOPPY|YIELDING)\b", chunk, re.I)
+        if row_is_workout:
+            if distance and re.search(r"\b(?:\d{2}\.\d+|\d:\d{2}\.\d+)\b", chunk):
+                workouts.append(DraftKingsWorkoutRecord(section.horse_name_raw, f"draftkings:{section.horse_name_key}:unknown:unknown:unknown", row_date, row_date == target_date, "UNK", "Unknown", distance.group(0), _parse_furlongs(distance.group(0)), "dirt", "fast", None, "", "B", None, section.source_page_start, f"{doc_id}:p{section.source_page_start}:wo:{len(workouts)+1}", chunk.strip(), 0.90))
+            if workout_heading:
+                in_workouts = True
+            if all_races_heading and all_races_heading.start() > match.start():
+                in_workouts = False
+            continue
+        if not (has_track and has_class and distance and surface):
+            continue
+        is_scr = bool(re.search(r"\bSCR(?:ATCH(?:ED)?)?\b", chunk, re.I))
+        finish = None if is_scr else (int(m.group(1)) if (m := re.search(r"\b(\d{1,2})(?:st|nd|rd|th)?\s*$", chunk.strip(), re.I)) else None)
+        start = DraftKingsStartRecord(section.horse_name_raw, f"draftkings:{section.horse_name_key}:unknown:unknown:unknown", row_date, row_date == target_date, "UNK", "Unknown", "Unknown", distance.group(0), _parse_furlongs(distance.group(0)), "dirt", "unknown", None, None, finish, is_scr, section.source_page_start, f"{doc_id}:p{section.source_page_start}:start:{len(starts)+1}", chunk.strip(), 0.92)
+        starts.append(start)
+        if is_scr:
+            scratches.append(DraftKingsScratchRecord(section.horse_name_raw, "historical", row_date, "UNK", "Unknown", section.source_page_start, f"{doc_id}:p{section.source_page_start}:scr:{len(scratches)+1}", chunk.strip(), 0.92))
+        if workout_heading:
+            in_workouts = True
+    return starts, workouts, scratches
 
 
 def _parse_furlongs(s: str | None) -> float | None:
@@ -401,6 +633,8 @@ def parse_draftkings_pdf(
         p1_text = pages_text[0] if pages_text else ""
         full_raw_text = "\n".join(pages_text)
 
+    source_detection = detect_draftkings_source(full_raw_text, filename)
+
     # 1. Capture Header & Timestamp
     m_time = re.search(r"(\d{1,2}/\d{1,2}/\d{2}),?\s+(\d{1,2}:\d{2}\s*(?:AM|PM))", p1_text, re.I)
     captured_at = None
@@ -474,6 +708,7 @@ def parse_draftkings_pdf(
 
     # 2. Extract Runners, Starts, Workouts
     entries: list[DraftKingsEntryRecord] = []
+    entry_page_indices: list[int] = []
     starts: list[DraftKingsStartRecord] = []
     workouts: list[DraftKingsWorkoutRecord] = []
     scratches: list[DraftKingsScratchRecord] = []
@@ -481,17 +716,40 @@ def parse_draftkings_pdf(
     odds_records: list[DraftKingsOddsRecord] = []
 
     # Map each page to the current runner
-    # We locate all pages that introduce a runner by the presence of ALL RACES header
-    runner_page_indices: list[tuple[int, float]] = []
+    # We locate all pages that introduce a runner by the presence of ALL RACES or NO RACES header,
+    # or where runner introduction was split across pages.
+    runner_sections_info: list[tuple[int, int, float, list[dict[str, Any]], bool]] = []
     for p_idx, p_words in enumerate(pages_words):
-        ar_words = [w for w in p_words if w["text"] == "ALL" and w["x0"] < 80]
-        if ar_words:
-            runner_page_indices.append((p_idx, ar_words[0]["top"]))
+        p_height = pdf.pages[p_idx].height if pdf.pages else 792.0
+        race_hdrs = [w for w in p_words if w["text"] in ("ALL", "NO") and w["x0"] < 80]
+        if not race_hdrs:
+            continue
+        ar_top = race_hdrs[0]["top"]
+        hw_on_page = [
+            w for w in p_words
+            if 0.035 * p_height <= w["top"] < ar_top and w["top"] >= ar_top - 120
+            and not (w["bottom"] > 0.965 * p_height)
+        ]
+        col_runner_candidate = [w for w in hw_on_page if 270 <= w["x0"] < 390]
+        has_runner = any(re.search(r"[A-Za-z]", w["text"]) for w in col_runner_candidate)
+        is_no_races = race_hdrs[0]["text"] == "NO"
+        if has_runner:
+            runner_sections_info.append((p_idx, p_idx, ar_top, hw_on_page, is_no_races))
+        elif p_idx > 0:
+            prev_height = pdf.pages[p_idx - 1].height if pdf.pages else 792.0
+            prev_words = pages_words[p_idx - 1]
+            prev_hw = [
+                w for w in prev_words
+                if 0.85 * prev_height <= w["top"] < 0.965 * prev_height
+            ]
+            runner_sections_info.append((p_idx - 1, p_idx, ar_top, prev_hw, is_no_races))
 
     # Parse each runner block
-    for r_idx, (p_idx, ar_top) in enumerate(runner_page_indices):
-        page = pages_words[p_idx]
-        header_words = [w for w in page if ar_top - 100 <= w["top"] < ar_top]
+    pps_page_indices: list[int] = []
+    has_explicit_no_races: list[bool] = []
+
+    for r_idx, (hdr_page_idx, pps_page_idx, ar_top, header_words, is_no_races) in enumerate(runner_sections_info):
+        page = pages_words[hdr_page_idx]
 
         # Four columns:
         col_num = [w for w in header_words if w["x0"] < 150]
@@ -562,7 +820,7 @@ def parse_draftkings_pdf(
             if not line_str:
                 continue
 
-            if any(re.search(r"\b" + re.escape(term) + r"\b", line_str, re.I) for term in ["Bay", "Dark", "Brown", "Chestnut", "Colt", "Gelding", "Ridgling", "Filly", "Mare", "yrs", "(KY)", "(NY)", "(FL)", "(MD)"]) or "DarkBay" in line_str or "Gelding" in line_str:
+            if any(re.search(r"\b" + re.escape(term) + r"\b", line_str, re.I) for term in ["Bay", "Dark", "Brown", "Chestnut", "Grayor", "Gray", "Roan", "Colt", "Gelding", "Ridgling", "Filly", "Mare", "yrs", "(KY)", "(NY)", "(FL)", "(MD)"]) or "DarkBay" in line_str or "Gelding" in line_str:
                 is_desc = True
 
             if is_desc:
@@ -571,25 +829,16 @@ def parse_draftkings_pdf(
                 name_lines.append(line_str)
 
         raw_name = " ".join(name_lines).strip()
-        # Split CamelCase in horse name
-        raw_name = re.sub(r"([a-z])([A-Z])", r"\1 \2", raw_name)
-        raw_name = re.sub(r"([A-Z]+)([A-Z][a-z])", r"\1 \2", raw_name)
-        if raw_name.startswith("TV "):
-            raw_name = "T V " + raw_name[3:]
-        horse_name = raw_name.strip()
+        horse_name = clean_horse_name(raw_name)
+
+        # Repeated DK web chrome is not a runner header.  Do not fall back to
+        # a positional name here: that would invent an active entry.
+        if not horse_name or canonical_horse_name(horse_name) in GENERIC_CHROME_KEYS:
+            continue
 
         desc_raw = " ".join(desc_lines).strip()
         desc_raw = re.sub(r"([a-z])([A-Z])", r"\1 \2", desc_raw)
         desc_raw = re.sub(r"([A-Z]+)([A-Z][a-z])", r"\1 \2", desc_raw)
-        # Fallback names for the 10 known positions if header is noisy
-        if not horse_name:
-            known_names = [
-                "Lexington Pike", "Blue Pill", "Overseer", "T V Channel",
-                "Free Refills", "Royal Browne", "Printer's Alley", "Vintage Vino",
-                "I Can See That", "Mirage"
-            ]
-            horse_name = known_names[min(post_pos - 1, len(known_names) - 1)]
-
         # Extract breeding
         color, sex, age, foal_year, state_bred, lasix = _extract_breeding(
             desc_raw, target_date.year
@@ -618,8 +867,8 @@ def parse_draftkings_pdf(
                         horse_name=horse_name,
                         angle_name=angle_name,
                         angle_category=angle_cat,
-                        source_page_number=p_idx + 1,
-                        source_row_id=f"{doc_id}:p{p_idx+1}:angle:{len(annotations)+1}",
+                        source_page_number=hdr_page_idx + 1,
+                        source_row_id=f"{doc_id}:p{hdr_page_idx+1}:angle:{len(annotations)+1}",
                         raw_text=angles_text,
                         parse_confidence=0.98,
                     )
@@ -635,8 +884,8 @@ def parse_draftkings_pdf(
                     odds_capture_timestamp=captured_at,
                     odds_source_label_raw="M:",
                     is_market_eligible=True,
-                    source_page_number=p_idx + 1,
-                    source_row_id=f"{doc_id}:p{p_idx+1}:ml:{post_pos}",
+                    source_page_number=hdr_page_idx + 1,
+                    source_row_id=f"{doc_id}:p{hdr_page_idx+1}:ml:{post_pos}",
                     raw_text=f"M: {ml_raw}",
                     parse_confidence=0.99,
                 )
@@ -651,12 +900,9 @@ def parse_draftkings_pdf(
                     odds_type=odds_type,
                     odds_capture_timestamp=captured_at,
                     odds_source_label_raw="ODDS",
-                    # The PDF has no authoritative scheduled-post timestamp to
-                    # prove this capture is pre-post. Retain it, but do not
-                    # promote it to live current-market evidence here.
                     is_market_eligible=False,
-                    source_page_number=p_idx + 1,
-                    source_row_id=f"{doc_id}:p{p_idx+1}:other_odds:{post_pos}",
+                    source_page_number=hdr_page_idx + 1,
+                    source_row_id=f"{doc_id}:p{hdr_page_idx+1}:other_odds:{post_pos}",
                     raw_text=other_odds_raw,
                     parse_confidence=0.95,
                 )
@@ -678,26 +924,31 @@ def parse_draftkings_pdf(
             state_bred=state_bred,
             lasix=lasix,
             angles=parsed_angles,
-            source_page_number=p_idx + 1,
-            source_row_id=f"{doc_id}:p{p_idx+1}:entry:{post_pos}",
+            source_page_number=hdr_page_idx + 1,
+            source_row_id=f"{doc_id}:p{hdr_page_idx+1}:entry:{post_pos}",
             raw_text=f"{post_pos} {horse_name} ML:{ml_raw} ODDS:{other_odds_raw}",
             parse_confidence=0.99,
+            has_explicit_no_races=is_no_races,
         )
         entries.append(entry_rec)
+        entry_page_indices.append(hdr_page_idx)
+        pps_page_indices.append(pps_page_idx)
+        has_explicit_no_races.append(is_no_races)
 
     # 3. Associate Pages to Runners and Extract Starts & Workouts
     # Determine page range for each runner
     runner_page_ranges: list[tuple[DraftKingsEntryRecord, int, int]] = []
-    for i in range(len(runner_page_indices)):
-        p_start, _ = runner_page_indices[i]
-        p_end = runner_page_indices[i + 1][0] if i + 1 < len(runner_page_indices) else num_pages
-        runner_page_ranges.append((entries[i], p_start, p_end))
+    for i, entry in enumerate(entries):
+        p_start = pps_page_indices[i]
+        p_end = pps_page_indices[i + 1] if i + 1 < len(pps_page_indices) else num_pages
+        runner_page_ranges.append((entry, p_start, p_end))
 
     for entry, p_start, p_end in runner_page_ranges:
         current_section = "starts"
         for p_idx in range(p_start, p_end):
             page_words = pages_words[p_idx]
-            ar_words = [w for w in page_words if w["text"] == "ALL" and w["x0"] < 80]
+            p_height = pdf.pages[p_idx].height if pdf.pages else 792.0
+            ar_words = [w for w in page_words if w["text"] in ("ALL", "NO") and w["x0"] < 80]
             wo_words = [w for w in page_words if w["text"] == "WORKOUTS" and w["x0"] < 100]
             sl_words = [w for w in page_words if w["text"] == "SEE" and w["x0"] < 80]
 
@@ -708,8 +959,8 @@ def parse_draftkings_pdf(
             # Group page lines by vertical coordinate
             lines_by_y: dict[int, list[Any]] = {}
             for w in sorted(page_words, key=lambda x: (x["top"], x["x0"])):
-                # Ignore page header and footer
-                if w["top"] < 30 or w["top"] > 760:
+                # Ignore page header and footer using normalized coordinates
+                if w["top"] / p_height < 0.035 or w["bottom"] / p_height > 0.965:
                     continue
                 lines_by_y.setdefault(round(w["top"] / 4), []).append(w)
 
@@ -737,7 +988,7 @@ def parse_draftkings_pdf(
                 if "SEE LESS" in line:
                     # End of workouts for current horse
                     break
-                if "ALL RACES" in line:
+                if "ALL RACES" in line or "NO RACES" in line:
                     current_section = "starts"
                     i += 1
                     continue
@@ -764,6 +1015,7 @@ def parse_draftkings_pdf(
                             or "WORKOUTS" in next_line
                             or "SEE LESS" in next_line
                             or "ALL RACES" in next_line
+                            or "NO RACES" in next_line
                         ):
                             break
                         sub_lines.append(next_line)
@@ -775,9 +1027,6 @@ def parse_draftkings_pdf(
                     if current_section == "starts":
                         # Parse start details
                         is_target = record_date == target_date
-                        # e.g., "SARATOGA CLM35000 1 1/16 M I-Yielding 1 32 5"
-                        # or "DELAWARE PARK SOC 5 F TURF-Yielding SCR SCR S"
-                        # Track extraction
                         track_name = "Unknown"
                         for candidate in ["SARATOGA", "BELMONT AT THE BIG A", "BELMONT", "AQUEDUCT", "DELAWARE PARK", "PARX RACING", "MONMOUTH PARK", "ELLIS PARK", "CHURCHILL DOWNS", "GULFSTREAM PARK", "FAIR HILL", "TURFWAY PARK", "OAKLAWN PARK", "PRAIRIE MEADOWS", "KEENELAND", "LAUREL PARK", "MEADOWLANDS"]:
                             if candidate in combined_detail.upper():
@@ -923,6 +1172,64 @@ def parse_draftkings_pdf(
 
                 i += 1
 
+    # The classic web-program layout repeats navigation and can split one horse
+    # across pages.  Prefer identity-bounded text sections whenever they yield
+    # a credible field; retain the older coordinate parser as a compatibility
+    # fallback for the legacy fixture layout.
+    sections = extract_runner_sections(pages_text)
+    if (len(entries) < 4 and len(sections) >= 4 and "dkhorse_classic_url" in source_detection["source_detection_signals"]
+            and len(sections) <= max(len(entries) + 2, 12)):
+        section_entries: list[DraftKingsEntryRecord] = []
+        section_starts: list[DraftKingsStartRecord] = []
+        section_workouts: list[DraftKingsWorkoutRecord] = []
+        section_scratches: list[DraftKingsScratchRecord] = []
+        for section in sections:
+            color, sex, age, foal_year, state_bred, lasix = _extract_breeding(section.raw_text[:800], target_date.year)
+            source_key = _build_provisional_horse_source_key(section.horse_name_raw, sex, foal_year, state_bred)
+            ml_decimal = None
+            if section.morning_line_raw:
+                try:
+                    numerator, denominator = (section.morning_line_raw.split("/") + ["1"])[:2]
+                    ml_decimal = float(numerator) / float(denominator) + 1.0
+                except (TypeError, ValueError, ZeroDivisionError):
+                    pass
+            section_entries.append(DraftKingsEntryRecord(
+                post_position=section.post_position or 0,
+                program_number=section.program_number or 0,
+                horse_name=section.horse_name_raw,
+                horse_source_key=source_key,
+                morning_line_raw=section.morning_line_raw,
+                morning_line_decimal=ml_decimal,
+                other_odds_raw=None,
+                odds_type="unknown",
+                sex=sex, age=age, foaling_year=foal_year, color=color,
+                state_bred=state_bred, lasix=lasix, angles=[],
+                source_page_number=section.source_page_start,
+                source_row_id=f"{doc_id}:p{section.source_page_start}:entry:{section.program_number or len(section_entries)+1}",
+                raw_text=section.raw_text,
+                parse_confidence=0.96,
+            ))
+            pps, works, historical_scratches = _section_pp_rows(section, target_date, doc_id)
+            # Always attach with the canonical entry key, never a weak global name match.
+            for pp in pps:
+                pp.horse_source_key = source_key
+            for work in works:
+                work.horse_source_key = source_key
+            section_starts.extend(pps)
+            section_workouts.extend(works)
+            section_scratches.extend(historical_scratches)
+        entries, starts, workouts, scratches = section_entries, section_starts, section_workouts, section_scratches
+
+    declared_match = re.search(r"\b(?:FIELD\s+SIZE\s*[:#]?|HORSES\s*[:#]?)\s*(\d{1,2})\b|\b(\d{1,2})\s+HORSES\b", p1_text, re.I)
+    declared_field_size = int(next(group for group in declared_match.groups() if group)) if declared_match else len(entries)
+    active_entry_count = len(entries)
+    # A missing program number is not proof of a scratch: DK web programs can
+    # omit coupled entries, reflect a changed view, or expose an extraction
+    # defect.  Only a source-row-level current-race SCR/NONSTARTER record may
+    # set nonstarter_count and late_scratch_explained.  Historical SCR rows are
+    # deliberately excluded from this reconciliation.
+    nonstarter_count = 0
+    reconciliation = "exact" if declared_field_size == active_entry_count else "unexplained"
     raw_text_sha256 = hashlib.sha256(full_raw_text.encode("utf-8")).hexdigest()
     first_500_chars = full_raw_text[:500]
     stored_path_resolved = (
@@ -942,10 +1249,20 @@ def parse_draftkings_pdf(
         "parser": DebugContainer({
             "adapter_selected": "draftkings_pdf",
             "adapter_version": "1.0.0",
+            "source_format": source_detection["source_format"] or "dkhorse_program_pdf",
+            "source_confidence": source_detection["source_confidence"],
+            "source_detection_signals": source_detection["source_detection_signals"],
             "raw_text_sha256": raw_text_sha256,
             "first_500_chars": first_500_chars,
             "page_count": num_pages,
             "raw_text": full_raw_text,
+            "runner_sections": [
+                {"program_number": s.program_number, "post_position": s.post_position,
+                 "horse_name_raw": s.horse_name_raw, "horse_name_key": s.horse_name_key,
+                 "source_page_start": s.source_page_start, "source_page_end": s.source_page_end,
+                 "raw_text": s.raw_text}
+                for s in sections
+            ],
         }),
         "race_resolution": DebugContainer({
             "filename_race_number": fn_race,
@@ -1004,7 +1321,7 @@ def parse_draftkings_pdf(
         distance_furlongs=distance_furlongs,
         surface=surface,
         conditions=conditions,
-        field_size_declared=len(entries),
+        field_size_declared=declared_field_size,
         captured_at=captured_at,
         is_post_race=is_post_race,
         production_eligible=production_eligible,
@@ -1100,6 +1417,173 @@ def to_dk_legacy_race_result(
     race_date_str = parsed.target_race_date.isoformat()
     surface_norm = (parsed.surface.capitalize() if parsed.surface else "Turf")
 
+    active_entry_count = len(runners)
+    declared_field_size = parsed.field_size_declared
+    reconciliation = "exact" if declared_field_size in (None, active_entry_count) else "unexplained"
+
+    prog_counts: dict[int, int] = {}
+    key_counts: dict[str, int] = {}
+    for source_entry in parsed.entries:
+        if source_entry.program_number is not None:
+            prog_counts[source_entry.program_number] = prog_counts.get(source_entry.program_number, 0) + 1
+        key = canonical_horse_name(source_entry.horse_name)
+        if key:
+            key_counts[key] = key_counts.get(key, 0) + 1
+
+    runner_diagnostics = []
+    blocking_errors: list[str] = []
+
+    for entry, source_entry in zip(runners, parsed.entries):
+        key = canonical_horse_name(source_entry.horse_name)
+        linked = [s for s in parsed.starts if s.horse_source_key == source_entry.horse_source_key and not s.is_scratch]
+        workouts = [w for w in parsed.workouts if w.horse_source_key == source_entry.horse_source_key]
+        entry_scratches = [s for s in parsed.scratches if s.horse_name == source_entry.horse_name]
+
+        is_no_races = getattr(source_entry, "has_explicit_no_races", False)
+        if not is_no_races:
+            is_no_races = any(
+                re.search(r"\bNO\s+RACES\b", getattr(s, "raw_text", ""), re.I)
+                for s in parser_dict.get("runner_sections", [])
+                if s.get("horse_name_key") == key
+            )
+        if not is_no_races and hasattr(source_entry, "raw_text") and "NO RACES" in getattr(source_entry, "raw_text", ""):
+            is_no_races = True
+
+        id_reasons: list[str] = []
+        if source_entry.program_number is None or source_entry.program_number <= 0:
+            id_reasons.append("missing_program_number")
+        elif prog_counts.get(source_entry.program_number, 0) > 1:
+            id_reasons.append("duplicate_program_number")
+            blocking_errors.append(f"duplicate_program_number: Program number {source_entry.program_number} is assigned to multiple active entries.")
+
+        if not key or key in GENERIC_CHROME_KEYS:
+            id_reasons.append("page_chrome_contaminated_name")
+            blocking_errors.append(f"page_chrome_contaminated_name: Runner identity is contaminated with DK page chrome ('{source_entry.horse_name}').")
+        elif key_counts.get(key, 0) > 1:
+            id_reasons.append("duplicate_horse_name_key")
+            blocking_errors.append(f"duplicate_horse_name_key: Canonical horse key '{key}' is assigned to multiple active entries.")
+
+        if not source_entry.horse_name or not source_entry.horse_name.strip():
+            id_reasons.append("missing_runner_name")
+            blocking_errors.append("missing_runner_name: An active entry is missing a runner name.")
+
+        no_history_reason = None
+        if id_reasons:
+            status = "unresolved_identity"
+        elif len(linked) >= 1:
+            status = "linked_history"
+        elif is_no_races:
+            status = "resolved_no_history"
+            no_history_reason = "explicit_no_races"
+        elif len(entry_scratches) >= 1:
+            status = "resolved_no_history"
+            no_history_reason = "scratches_only"
+        else:
+            status = "unresolved_history"
+
+        runner_diagnostics.append({
+            "program_number": source_entry.program_number,
+            "horse_name_raw": source_entry.horse_name,
+            "horse_name_key": key,
+            "runner_data_status": status,
+            "no_history_reason": no_history_reason,
+            "diagnostic_reasons": id_reasons,
+            "source_page_start": source_entry.source_page_number,
+            "source_page_end": next((s.get("source_page_end") for s in parser_dict.get("runner_sections", []) if s.get("horse_name_key") == key), source_entry.source_page_number),
+            "past_performances_found": len(linked),
+            "past_performances_linked": len(linked),
+            "workouts_found": len(workouts),
+            "historical_scratches_found": len(entry_scratches),
+            "exclusion_reason": None,
+            "warnings": [],
+        })
+
+    total_linked = sum(r["past_performances_linked"] for r in runner_diagnostics)
+    linked_history_count = sum(1 for r in runner_diagnostics if r["runner_data_status"] == "linked_history")
+    resolved_no_history_count = sum(1 for r in runner_diagnostics if r["runner_data_status"] == "resolved_no_history")
+    unresolved_identity_count = sum(1 for r in runner_diagnostics if r["runner_data_status"] == "unresolved_identity")
+    unresolved_history_count = sum(1 for r in runner_diagnostics if r["runner_data_status"] == "unresolved_history")
+
+    identity_resolution_rate = round((linked_history_count + resolved_no_history_count) / active_entry_count, 4) if active_entry_count else 0.0
+    starter_pp_link_rate = round(linked_history_count / active_entry_count, 4) if active_entry_count else 0.0
+    runners_expected_to_have_history = linked_history_count + unresolved_history_count
+    experienced_field_pp_coverage = round(linked_history_count / runners_expected_to_have_history, 4) if runners_expected_to_have_history > 0 else 1.0
+
+    runner_data_status_counts = {
+        "linked_history": linked_history_count,
+        "resolved_no_history": resolved_no_history_count,
+        "unresolved_identity": unresolved_identity_count,
+        "unresolved_history": unresolved_history_count,
+    }
+
+    from src.ingest.run_state import DataQuality, RunMode, resolve_run_mode
+    dq = DataQuality(
+        entries_parsed=active_entry_count,
+        field_size_declared=declared_field_size,
+        entries_with_pp_history=linked_history_count,
+        starter_match_rate=identity_resolution_rate,
+        race_metadata_complete=bool(track_code and race_number and race_date_str),
+        has_morning_lines=any(r.get("morning_line") or r.get("ml") for r in runners),
+        has_live_odds=any(r.get("other_odds_raw") for r in runners),
+        required_model_features_complete=True,
+        blocking_errors=list(dict.fromkeys(blocking_errors)),
+        active_entry_count=active_entry_count,
+        field_reconciliation_status=reconciliation,
+        experienced_field=True,
+        workout_forward_low_history=False,
+        source_format=parser_dict.get("source_format", "dkhorse_program_pdf"),
+        identity_resolution_rate=identity_resolution_rate,
+        starter_pp_link_rate=starter_pp_link_rate,
+        experienced_field_pp_coverage=experienced_field_pp_coverage,
+        resolved_no_history_count=resolved_no_history_count,
+        unresolved_identity_count=unresolved_identity_count,
+        unresolved_history_count=unresolved_history_count,
+    )
+    run_mode, gate_reasons = resolve_run_mode(dq)
+    block_reasons = list(gate_reasons) if run_mode == RunMode.BLOCKED else []
+
+    if run_mode == RunMode.BLOCKED:
+        if total_linked > 0 and (unresolved_identity_count > 0 or any("unresolved" in r or "duplicate" in r or "chrome" in r for r in block_reasons)):
+            recommended_action = (
+                "DraftKings Horse program PDF detected. Historical starts were linked for part of the field, "
+                "but one or more runner identities are malformed or duplicated. Scoring remains blocked "
+                "until active-entry identity is resolved."
+            )
+        elif total_linked == 0 or unresolved_history_count > 0:
+            recommended_action = (
+                "DraftKings Horse program PDF detected. Runner headers were found, but past-performance "
+                "sections could not yet be linked to runners. Inspect parser diagnostics or upload a supported native PP source."
+            )
+        elif reconciliation != "exact":
+            recommended_action = "Review field reconciliation before scoring."
+        else:
+            recommended_action = "Review parser diagnostics before scoring."
+    else:
+        recommended_action = "Ready for scoring."
+
+    diagnostics = {
+        "source_format": parser_dict.get("source_format", "dkhorse_program_pdf"),
+        "source_confidence": parser_dict.get("source_confidence", 0.0),
+        "source_detection_signals": parser_dict.get("source_detection_signals", []),
+        "declared_field_size": declared_field_size,
+        "active_entry_count": active_entry_count,
+        "nonstarter_count": 0,
+        "field_reconciliation_status": reconciliation,
+        "runners": runner_diagnostics,
+        "total_pp_records_found": len(parsed.starts),
+        "total_pp_records_linked": total_linked,
+        "starter_match_rate": identity_resolution_rate,
+        "identity_resolution_rate": identity_resolution_rate,
+        "starter_pp_link_rate": starter_pp_link_rate,
+        "experienced_field_pp_coverage": experienced_field_pp_coverage,
+        "runner_data_status_counts": runner_data_status_counts,
+        "resolved_no_history_count": resolved_no_history_count,
+        "unresolved_identity_count": unresolved_identity_count,
+        "unresolved_history_count": unresolved_history_count,
+        "run_mode": run_mode.value,
+        "block_reasons": block_reasons,
+        "recommended_action": recommended_action,
+    }
     race_payload = {
         "track_code": track_code,
         "race_date": race_date_str,
@@ -1108,7 +1592,11 @@ def to_dk_legacy_race_result(
         "surface": surface_norm,
         "runners_count": len(runners),
         "runners": runners,
-        "field_size": parsed.field_size_declared or len(runners),
+        "field_size": active_entry_count,
+        "declared_field_size": declared_field_size,
+        "active_entry_count": active_entry_count,
+        "nonstarter_count": 0,
+        "field_reconciliation_status": reconciliation,
         "purse": parsed.purse,
         "race_type": parsed.race_class or "Claiming",
         "conditions": parsed.conditions,
@@ -1121,6 +1609,7 @@ def to_dk_legacy_race_result(
         "warnings": [],
         "upload": DebugContainer(upload_dict),
         "parser": DebugContainer(parser_dict),
+        "parser_diagnostics": diagnostics,
         "race_resolution": DebugContainer(race_res_dict),
         "race": race_payload,
         "track_code": track_code,
@@ -1131,7 +1620,11 @@ def to_dk_legacy_race_result(
         "surface": surface_norm,
         "race_type": parsed.race_class or "Claiming",
         "purse_usd": parsed.purse,
-        "field_size": parsed.field_size_declared or len(runners),
+        "field_size": active_entry_count,
+        "declared_field_size": declared_field_size,
+        "active_entry_count": active_entry_count,
+        "nonstarter_count": 0,
+        "field_reconciliation_status": reconciliation,
         "runners": runners,
         "runners_count": len(runners),
         "is_draftkings": True,

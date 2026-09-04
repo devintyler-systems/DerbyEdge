@@ -25,12 +25,12 @@ def _quality(**overrides) -> DataQuality:
     return DataQuality(**values)
 
 
-def test_zero_attached_pps_is_market_baseline_only():
+def test_zero_attached_pps_in_experienced_field_is_blocked():
     mode, reasons = resolve_run_mode(
         _quality(entries_with_pp_history=0, starter_match_rate=0.0)
     )
-    assert mode == RunMode.MARKET_BASELINE_ONLY
-    assert "not model output" in reasons[1]
+    assert mode == RunMode.BLOCKED
+    assert "experienced field" in reasons[0]
 
 
 def test_incomplete_declared_field_blocks():
@@ -120,5 +120,5 @@ def test_model_call_guard_rejects_ml_only_card(tmp_path):
         INSERT INTO entries VALUES (1, 8, 4.0, 0), (2, 8, 5.0, 0);
         """
     )
-    with pytest.raises(ScoringBlockedError, match="MARKET_BASELINE_ONLY"):
+    with pytest.raises(ScoringBlockedError, match="BLOCKED"):
         ensure_scoring_eligible(conn, 8, runs_root=tmp_path)

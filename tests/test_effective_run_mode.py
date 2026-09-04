@@ -14,13 +14,13 @@ def test_immutable_limited_audit_promotes_to_effective_model_ready(mem_conn, tmp
     card_id = mem_conn.execute(
         """INSERT INTO race_cards
                (track_id, card_date, race_number, distance_yards, surface, field_size)
-           VALUES (?, '2026-09-02', 8, 1430, 'dirt', 2)""",
+               VALUES (?, '2026-09-02', 8, 1430, 'dirt', 4)""",
         (track_id,),
     ).lastrowid
 
     entry_ids = []
     horse_ids = []
-    for post, name in enumerate(("Alpha", "Bravo"), start=1):
+    for post, name in enumerate(("Alpha", "Bravo", "Charlie", "Delta"), start=1):
         horse_id = mem_conn.execute(
             "INSERT INTO horses (name) VALUES (?)", (name,)
         ).lastrowid
@@ -45,7 +45,7 @@ def test_immutable_limited_audit_promotes_to_effective_model_ready(mem_conn, tmp
     ]
     placeholders = ",".join("?" for _ in columns)
     for index, (entry_id, horse_id, name) in enumerate(
-        zip(entry_ids, horse_ids, ("Alpha", "Bravo")), start=1
+            zip(entry_ids, horse_ids, ("Alpha", "Bravo", "Charlie", "Delta")), start=1
     ):
         feature_values = [0.1 * index + offset * 0.01 for offset in range(len(required))]
         mem_conn.execute(
@@ -64,7 +64,9 @@ def test_immutable_limited_audit_promotes_to_effective_model_ready(mem_conn, tmp
         "INSERT INTO live_odds VALUES (?, 'manual', ?, ?, ?, ?, 0, 0)",
         [
             ("2026-09-02T20:31:00Z", card_id, entry_ids[0], 1, 3.2),
-            ("2026-09-02T20:31:00Z", card_id, entry_ids[1], 2, 4.4),
+                ("2026-09-02T20:31:00Z", card_id, entry_ids[1], 2, 4.4),
+                ("2026-09-02T20:31:00Z", card_id, entry_ids[2], 3, 5.4),
+                ("2026-09-02T20:31:00Z", card_id, entry_ids[3], 4, 6.4),
         ],
     )
     mem_conn.commit()
@@ -76,9 +78,9 @@ def test_immutable_limited_audit_promotes_to_effective_model_ready(mem_conn, tmp
         "run_mode": RunMode.MODEL_READY_LIMITED.value,
         "ingest_run_mode": RunMode.MODEL_READY_LIMITED.value,
         "source_provider": "1stbet",
-        "field_size_declared": 2,
-        "entries_parsed": 2,
-        "entries_with_pp_history": 2,
+            "field_size_declared": 4,
+            "entries_parsed": 4,
+            "entries_with_pp_history": 4,
         "starter_match_rate": 1.0,
         "race_metadata_complete": True,
         "has_morning_lines": True,
