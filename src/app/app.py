@@ -107,6 +107,7 @@ from src.app.board_state import (
 )
 from src.app.board_formatting import (
     _edge_str,
+    blocked_state_guidance,
     morning_line_str,
     prepare_probability_display_columns,
 )
@@ -855,6 +856,8 @@ if "startup_ddl_done" not in st.session_state:
     try:
         _startup_conn = get_connection()
         ensure_is_hidden_column(_startup_conn)
+        from src.ingest.ingestion_run import ensure_ingestion_run_column
+        ensure_ingestion_run_column(_startup_conn)
         ensure_firstbet_pp_table(_startup_conn)
         ensure_race_review_view(_startup_conn)
         ensure_entry_scores_columns(_startup_conn)
@@ -1244,7 +1247,7 @@ if active_card_id:
             f"Reason: {_reason}\n\n"
             f"Starter match rate: {_match_rate:.0%} · "
             f"Parsed past-performance starts: {_pp_starts}\n\n"
-            "Action: Re-upload the original 1/ST PDF or inspect parser diagnostics."
+            f"Action: {blocked_state_guidance(_audit)}"
         )
     elif _run_mode == RunMode.MARKET_BASELINE_ONLY:
         st.warning(
@@ -2702,6 +2705,19 @@ with tab5:
                 )
                 if _parsed_pr5.get("is_draftkings"):
                     _pr5 = _parsed_pr5
+                    # Immutable ingestion-run contract: persist the exact parse
+                    # result and keep only its id. Rendering/scoring read it
+                    # back by id via get_card_run_state — never a race-key or
+                    # "latest card" lookup.
+                    from src.ingest.ingestion_run import (
+                        build_ingestion_run as _build_ing_run,
+                        persist_ingestion_run as _persist_ing_run,
+                    )
+                    _dk_ing_run = _build_ing_run(
+                        _pdf5_bytes, filename=_pdf5_file.name, parse_result=_pr5,
+                    )
+                    _persist_ing_run(_dk_ing_run, runs_root=ROOT / "data" / "runs")
+                    _pr5["ingestion_run_id"] = _dk_ing_run.ingestion_run_id
                 elif _parsed_pr5.get("is_1stbet"):
                     _firstbet_run = ingest_firstbet_pdf(
                         _pdf5_bytes,
@@ -2711,8 +2727,14 @@ with tab5:
                     _pr5 = to_legacy_race_result(
                         _firstbet_run["payload"], _firstbet_run["feature_audit"]
                     )
+                    for _fb_key in ("track_code", "race_date", "race_number",
+                                    "distance_text", "surface", "race_type",
+                                    "purse_usd", "field_size"):
+                        if not _pr5.get(_fb_key) and _parsed_pr5.get(_fb_key):
+                            _pr5[_fb_key] = _parsed_pr5[_fb_key]
                     _pr5.update({
                         "normalized_payload": _firstbet_run["payload"],
+                        "race": _firstbet_run["payload"],
                         "feature_audit": _firstbet_run["feature_audit"],
                         "ingest_run_id": _firstbet_run["run_id"],
                         "artifact_paths": _firstbet_run["paths"],
@@ -2723,6 +2745,22 @@ with tab5:
                         "parser": _parsed_pr5.get("parser"),
                         "race_resolution": _parsed_pr5.get("race_resolution"),
                     })
+                    # Bring 1/ST onto the immutable ingestion-run contract too:
+                    # write ingestion_run.json into the 1/ST ingester's own run
+                    # dir and expose the id for card binding.
+                    from src.ingest.ingestion_run import (
+                        build_ingestion_run as _build_ing_run,
+                        persist_ingestion_run as _persist_ing_run,
+                    )
+                    _fb_ing_run = _build_ing_run(
+                        _pdf5_bytes, filename=_pdf5_file.name, parse_result=_pr5,
+                        ingestion_run_id=_firstbet_run["run_id"],
+                    )
+                    _persist_ing_run(
+                        _fb_ing_run, runs_root=ROOT / "data" / "runs",
+                        allow_existing_dir=True,
+                    )
+                    _pr5["ingestion_run_id"] = _fb_ing_run.ingestion_run_id
                 else:
                     _pr5 = _parsed_pr5
             st.session_state["_pdf5_parse_cache"] = {
@@ -2941,6 +2979,14 @@ with tab5:
                             int(_p5_cid),
                             runs_root=ROOT / "data" / "runs",
                         )
+                    # Exact immutable binding: the card points at this precise
+                    # ingestion run id. Renderer/scorer resolve state from it.
+                    if _pr5.get("ingestion_run_id"):
+                        from src.ingest.ingestion_run import bind_card_to_ingestion_run
+                        bind_card_to_ingestion_run(
+                            _conn5, int(_p5_cid), _pr5["ingestion_run_id"],
+                        )
+                        st.session_state["_pdf5_ingestion_run_id"] = _pr5["ingestion_run_id"]
                     st.session_state["active_card_id"] = _p5_cid
                     st.cache_data.clear()
                     st.rerun()

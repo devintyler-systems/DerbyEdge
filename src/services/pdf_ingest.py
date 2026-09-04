@@ -37,6 +37,7 @@ import io
 import logging
 from pathlib import Path
 import re
+import uuid
 from typing import Any
 
 from src.ingest.draftkings_pdf import (
@@ -45,6 +46,88 @@ from src.ingest.draftkings_pdf import (
     to_dk_legacy_race_result,
     DebugContainer,
 )
+from src.ingest.firstbet_pdf import persist_run_artifacts
+
+
+PARSER_PIPELINE_VERSION = "dkhorse_sections_v1"
+
+
+def pdf_upload_cache_key(
+    pdf_bytes: bytes, filename: str, *,
+    pipeline_version: str = PARSER_PIPELINE_VERSION,
+) -> str:
+    """Content/version cache key; filenames alone are never parser identity."""
+    return f"{hashlib.sha256(pdf_bytes).hexdigest()}:{filename}:{pipeline_version}:full"
+
+
+def build_dk_upload_audit(
+    result: dict[str, Any], *, pdf_bytes: bytes, filename: str,
+) -> dict[str, Any]:
+    """Build the card-run-state feature audit for a DK parse result.
+
+    Pure: no persistence, no parser calls. Shared by ``persist_dk_upload_run``
+    and the immutable ingestion-run contract so both derive an identical audit
+    from the same parse-time diagnostics.
+    """
+    diagnostics = dict(result.get("parser_diagnostics") or {})
+    parser = result.get("parser") or {}
+    upload_hash = hashlib.sha256(pdf_bytes).hexdigest()
+    active_entries = int(diagnostics.get("active_entry_count") or len(result.get("runners") or []))
+    audit = {
+        **diagnostics,
+        "source_provider": "draftkings",
+        "source_format": diagnostics.get("source_format") or parser.get("source_format") or "dkhorse_program_pdf",
+        "source_detection_signals": diagnostics.get("source_detection_signals") or parser.get("source_detection_signals") or [],
+        "active_entries": active_entries,
+        "entries_parsed": active_entries,
+        "entries_with_pp_history": sum(1 for runner in diagnostics.get("runners") or [] if runner.get("past_performances_linked")),
+        "total_pp_starts_parsed": int(diagnostics.get("total_pp_records_found") or 0),
+        "starter_match_rate": diagnostics.get("starter_match_rate") or 0.0,
+        "identity_resolution_rate": diagnostics.get("identity_resolution_rate"),
+        "starter_pp_link_rate": diagnostics.get("starter_pp_link_rate"),
+        "experienced_field_pp_coverage": diagnostics.get("experienced_field_pp_coverage"),
+        "runner_data_status_counts": diagnostics.get("runner_data_status_counts"),
+        "resolved_no_history_count": diagnostics.get("resolved_no_history_count"),
+        "unresolved_identity_count": diagnostics.get("unresolved_identity_count"),
+        "unresolved_history_count": diagnostics.get("unresolved_history_count"),
+        "field_size_declared": diagnostics.get("declared_field_size"),
+        "field_reconciliation_status": diagnostics.get("field_reconciliation_status", "unknown"),
+        "race_metadata_complete": bool(result.get("track_code") and result.get("race_date") and result.get("race_number")),
+        "has_morning_lines": any(runner.get("morning_line") or runner.get("ml") for runner in result.get("runners") or []),
+        "blocking_errors": list(diagnostics.get("block_reasons") or []),
+        "block_reasons": list(diagnostics.get("block_reasons") or []),
+        "recommended_action": diagnostics.get("recommended_action"),
+        "parser_pipeline_version": PARSER_PIPELINE_VERSION,
+        "integration_trace": {
+            "upload_filename": filename, "upload_size_bytes": len(pdf_bytes),
+            "pdf_text_length": len(result.get("raw_text") or ""),
+            "pdf_text_has_dk_url": "dkhorse.com/bet/program/classic" in (result.get("raw_text") or "").lower(),
+            "pdf_text_has_program_signal": "PROGRAM" in (result.get("raw_text") or "").upper(),
+            "detected_source_format": diagnostics.get("source_format") or parser.get("source_format"),
+            "source_detection_signals": diagnostics.get("source_detection_signals") or parser.get("source_detection_signals") or [],
+            "parser_selected": parser.get("adapter_selected"),
+            "active_entry_count": active_entries,
+            "total_pp_records_found": int(diagnostics.get("total_pp_records_found") or 0),
+            "total_pp_records_linked": int(diagnostics.get("total_pp_records_linked") or 0),
+            "starter_match_rate": diagnostics.get("starter_match_rate") or 0.0,
+            "audit_source_format": diagnostics.get("source_format") or parser.get("source_format"),
+            "run_state_type": "CardRunState",
+        },
+    }
+    return audit
+
+
+def persist_dk_upload_run(
+    result: dict[str, Any], *, pdf_bytes: bytes, filename: str,
+    runs_root: Path | str,
+) -> dict[str, Any]:
+    """Persist DK diagnostics for later card-bound run-state lookup."""
+    upload_hash = hashlib.sha256(pdf_bytes).hexdigest()
+    audit = build_dk_upload_audit(result, pdf_bytes=pdf_bytes, filename=filename)
+    run_id = f"dk-{upload_hash[:12]}-{uuid.uuid4().hex[:8]}"
+    paths = persist_run_artifacts(run_id, {"race": result.get("race") or {}, "runners": result.get("runners") or []}, audit, runs_root=runs_root)
+    result.update({"feature_audit": audit, "ingest_run_id": run_id, "artifact_paths": paths})
+    return result
 
 _log = logging.getLogger(__name__)
 

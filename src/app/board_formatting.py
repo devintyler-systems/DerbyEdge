@@ -13,11 +13,19 @@ DK_BLOCKED_GUIDANCE = (
     "parser diagnostics or upload a supported native PP source."
 )
 GENERIC_BLOCKED_GUIDANCE = "Re-upload the original 1/ST PDF or inspect parser diagnostics."
+BINDING_INVALID_GUIDANCE = (
+    "Upload state mismatch: this card is not bound to the current immutable ingestion result.\n"
+    "Re-upload the source PDF to create a new validated ingestion run."
+)
+# Only these source-format values may ever surface the generic 1/ST guidance.
+_GENERIC_GUIDANCE_SOURCE_FORMATS = frozenset({"", "unknown", "unsupported"})
 
 
 def blocked_state_guidance(audit: object) -> str:
     """Choose safe, source-aware blocked-card guidance for partial UI state."""
     safe_audit = audit if isinstance(audit, dict) else {}
+    if safe_audit.get("binding_invalid"):
+        return BINDING_INVALID_GUIDANCE
     if safe_audit.get("recommended_action"):
         action = str(safe_audit["recommended_action"])
         if safe_audit.get("field_reconciliation_status") == "exact" and "reconciliation" in action.lower():
@@ -34,7 +42,13 @@ def blocked_state_guidance(audit: object) -> str:
                 "until active-entry identity is resolved."
             )
         return DK_BLOCKED_GUIDANCE
-    return GENERIC_BLOCKED_GUIDANCE
+    if source_format.lower() in _GENERIC_GUIDANCE_SOURCE_FORMATS:
+        return GENERIC_BLOCKED_GUIDANCE
+    # A known, non-DK source format: never claim it was a 1/ST upload problem.
+    return (
+        f"Upload parsed as '{source_format}' but scoring is blocked. "
+        "Inspect parser diagnostics for this source."
+    )
 
 
 def _edge_str(value: object) -> str:

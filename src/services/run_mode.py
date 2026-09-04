@@ -8,9 +8,16 @@ from pathlib import Path
 from typing import Any
 
 from src.ingest.firstbet_pdf import load_latest_card_audit
+from src.ingest.ingestion_run import (
+    IngestionRunBindingInvalid,
+    card_ingestion_run_id,
+    load_ingestion_run,
+    validate_ingestion_run,
+)
 from src.ingest.run_state import DataQuality, RunMode, resolve_mode_with_feature_checks
 from src.services.feature_state import FeatureVerification, verify_card_features
 from src.services.odds_intake import load_live_odds_by_pp
+from src.utils.ingest_trace import audit_trace_fields, trace_ingest
 
 
 @dataclass(frozen=True)
@@ -40,8 +47,70 @@ def get_card_run_state(
     *,
     runs_root: Path | str = Path("data/runs"),
 ) -> CardRunState:
-    """Recompute effective state from immutable ingest and current DB facts."""
+    """Recompute effective state from immutable ingest and current DB facts.
+
+    When the card is bound to an immutable ingestion run, that run — looked up
+    by ``ingestion_run_id`` only — is the sole source of the parse result. A
+    binding that cannot be matched to a valid run fails closed; it never falls
+    back to a race-key / "latest card" audit lookup.
+    """
+    bound_run_id = card_ingestion_run_id(conn, card_id)
+    if bound_run_id:
+        try:
+            run = validate_ingestion_run(
+                load_ingestion_run(bound_run_id, runs_root=runs_root)
+            )
+        except IngestionRunBindingInvalid as exc:
+            trace_ingest(
+                "render", card_id=card_id, ingestion_run_id=bound_run_id,
+                binding_invalid=exc.detail,
+            )
+            return CardRunState(
+                RunMode.BLOCKED,
+                [f"{IngestionRunBindingInvalid.reason}: {exc.detail}"],
+                {
+                    "binding_invalid": True,
+                    "ingestion_run_binding_invalid_reason": exc.detail,
+                    "ingestion_run_id": bound_run_id,
+                },
+            )
+        return _card_run_state_from_ingestion_run(conn, card_id, run, runs_root=runs_root)
+
     audit = load_latest_card_audit(card_id, runs_root=runs_root)
+    return _finalize_card_run_state(conn, card_id, audit)
+
+
+def _card_run_state_from_ingestion_run(
+    conn: sqlite3.Connection,
+    card_id: int,
+    run: "Any",
+    *,
+    runs_root: Path | str = Path("data/runs"),
+) -> CardRunState:
+    """Build the card state from the exact immutable ingestion run it is bound to."""
+    audit = dict(run.feature_audit)
+    audit.setdefault("source_format", run.source_format)
+    audit["ingestion_run_id"] = run.ingestion_run_id
+    audit["ingestion_run_upload_sha256"] = run.upload_sha256
+    audit["ingestion_run_parser_pipeline_version"] = run.parser_pipeline_version
+    trace_ingest(
+        "render",
+        ingestion_run_id=run.ingestion_run_id,
+        card_id=card_id,
+        upload_sha256=run.upload_sha256,
+        parser_pipeline_version=run.parser_pipeline_version,
+        parser_selected=run.parser_selected,
+        race_key=run.race_key,
+        **audit_trace_fields(audit),
+    )
+    return _finalize_card_run_state(conn, card_id, audit)
+
+
+def _finalize_card_run_state(
+    conn: sqlite3.Connection,
+    card_id: int,
+    audit: dict | None,
+) -> CardRunState:
     expected_entries = (
         int(audit.get("active_entries", audit.get("entries_parsed")) or 0)
         if audit else _active_entry_count(conn, card_id)
@@ -87,6 +156,15 @@ def ensure_scoring_eligible(
 ) -> CardRunState:
     """Raise before any model call unless the card is forecast-eligible."""
     state = get_card_run_state(conn, card_id, runs_root=runs_root)
+    _sa = state.audit or {}
+    trace_ingest("score", card_id=card_id, **{
+        **audit_trace_fields(_sa),
+        "ingestion_run_id": _sa.get("ingestion_run_id"),
+        "upload_sha256": _sa.get("ingestion_run_upload_sha256"),
+        "parser_pipeline_version": _sa.get("ingestion_run_parser_pipeline_version"),
+        "run_mode": state.mode.value,
+        "scoring_eligible": state.scoring_eligible,
+    })
     if not state.scoring_eligible:
         reason = "; ".join(state.reasons) or "Data-quality gate rejected the card."
         raise ScoringBlockedError(f"SCORING BLOCKED [{state.mode.value}]: {reason}")

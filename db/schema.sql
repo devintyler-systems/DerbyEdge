@@ -42,6 +42,7 @@ CREATE TABLE IF NOT EXISTS race_cards (
     conditions        TEXT,
     field_size        INTEGER,
     scheduled_post_time_utc TEXT,                    -- optional ISO-8601; required to validate live-tote pre-post eligibility
+    ingestion_run_id  TEXT,                          -- exact immutable ingestion run this card's parse result is bound to
     created_at        TEXT    NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
     UNIQUE(track_id, card_date, race_number)
 );
