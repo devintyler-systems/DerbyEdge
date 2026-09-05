@@ -1080,7 +1080,9 @@ def _canonical_history_overlay(feat_df: pd.DataFrame, card_id: int, conn) -> pd.
                 result.at[idx, "prior_publicness"] = round(
                     (weighted + 3.0 * 0.10) / (weight_sum + 3.0), 4
                 )
-            dk_starts = int((hs["source_provider"].fillna("") == "draftkings").sum())
+            dk_starts = int(
+                hs["source_provider"].fillna("").str.startswith("draftkings").sum()
+            )
             result.at[idx, "dk_history_start_count"] = dk_starts
 
         hw = workouts[workouts["horse_id"] == horse_id].copy() if not workouts.empty else workouts
@@ -1135,7 +1137,9 @@ def _canonical_history_overlay(feat_df: pd.DataFrame, card_id: int, conn) -> pd.
                 result.at[idx, "workout_time_normalization_available"] = int(normalized)
             sources = sorted(set(str(value) for value in hw["source_provider"].dropna()))
             result.at[idx, "workout_data_source"] = ",".join(sources) or "canonical"
-            result.at[idx, "dk_workout_count"] = int((hw["source_provider"].fillna("") == "draftkings").sum())
+            result.at[idx, "dk_workout_count"] = int(
+                hw["source_provider"].fillna("").str.startswith("draftkings").sum()
+            )
 
         sources = [str(result.at[idx, "feature_source_mix"] or "seed")]
         if int(result.at[idx, "dk_history_start_count"] or 0) or int(result.at[idx, "dk_workout_count"] or 0):
