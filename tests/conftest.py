@@ -4,9 +4,20 @@ from __future__ import annotations
 import sqlite3
 from pathlib import Path
 
+import httpx
 import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
+
+
+@pytest.fixture
+def client():
+    """HTTP client for the WSGI API tests in a clean checkout."""
+    from src.api.app import app
+
+    transport = httpx.WSGITransport(app=app)
+    with httpx.Client(transport=transport, base_url="http://testserver") as test_client:
+        yield test_client
 
 
 @pytest.fixture

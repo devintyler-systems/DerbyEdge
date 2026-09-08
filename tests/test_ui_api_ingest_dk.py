@@ -36,16 +36,11 @@ def fixture_bytes() -> bytes:
     return FIXTURE_PATH.read_bytes()
 
 
-def test_ui_ingest_dk_r9_golden_fixture_uses_dk_adapter(tmp_path, client):
+def test_ui_ingest_dk_r9_golden_fixture_uses_dk_adapter(fixture_bytes, client):
     """Exact regression test specified in user diagnostic directive."""
-    fixture = Path(
-        "draftkings_racedata_pdfs/fixtures/"
-        "SAR_DK_Horse_R9_9-2-26.pdf"
-    )
-
     response = client.post(
         "/api/ingest/pdf",
-        files={"file": ("SAR_DK_Horse_R9_9-2-26.pdf", fixture.read_bytes())},
+        files={"file": (FIXTURE_FILENAME, fixture_bytes)},
     )
 
     assert response.status_code == 200, f"API error: {response.text}"

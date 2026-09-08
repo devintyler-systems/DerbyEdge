@@ -250,14 +250,16 @@ def _parse_filename_date(source_path: str) -> date | None:
     return None
 
 
-def _read_source(source: str | Path, source_path: str | None) -> tuple[str, str]:
+def _read_source(source: str | Path, source_path: str | None) -> tuple[str, str, bytes]:
     if isinstance(source, Path):
-        return source.read_text(encoding="utf-8"), str(source)
+        raw_bytes = source.read_bytes()
+        return raw_bytes.decode("utf-8"), str(source), raw_bytes
     if source_path is None and "\n" not in source:
         candidate = Path(source)
         if candidate.is_file():
-            return candidate.read_text(encoding="utf-8"), str(candidate)
-    return source, source_path or "<in-memory-markdown>"
+            raw_bytes = candidate.read_bytes()
+            return raw_bytes.decode("utf-8"), str(candidate), raw_bytes
+    return source, source_path or "<in-memory-markdown>", source.encode("utf-8")
 
 
 def _normal_surface(value: str | None) -> str | None:
@@ -681,7 +683,7 @@ def parse_draftkings_markdown(
     attaches ALL RACES / WORKOUTS as optional child sections; a subsection parse
     failure yields warnings and completeness flags, never a dropped runner.
     """
-    raw, resolved_path = _read_source(source, source_path)
+    raw, resolved_path, raw_bytes = _read_source(source, source_path)
     as_of = as_of or datetime.now(timezone.utc)
     if as_of.tzinfo is None:
         raise ValueError("as_of must be timezone-aware")
@@ -800,13 +802,13 @@ def parse_draftkings_markdown(
 
     expected_match = re.search(r"\b(\d+)\s+(?:runners|starters)\b", raw, re.I)
     return DraftKingsMarkdownCard(
-        source_path=resolved_path, source_sha256=hashlib.sha256(raw.encode("utf-8")).hexdigest(),
+        source_path=resolved_path, source_sha256=hashlib.sha256(raw_bytes).hexdigest(),
         source_format="draftkings_markdown", parser_version=PARSER_VERSION, as_of=as_of,
         race=race, entries=entries, past_performances=pps, workouts=workouts,
         parser_errors=errors, parser_warnings=warnings,
         expected_runner_count=int(expected_match.group(1)) if expected_match else None,
         declared_pp_header=pp_header, declared_workout_header=workout_header, open_sections=open_sections,
-        raw_bytes=raw.encode("utf-8"),
+        raw_bytes=raw_bytes,
     )
 
 
