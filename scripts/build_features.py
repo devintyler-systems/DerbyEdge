@@ -278,7 +278,7 @@ CATALOG_COLUMNS = [
 def write_catalog(path: Path) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("w", newline="", encoding="utf-8") as fh:
-        writer = csv.writer(fh)
+        writer = csv.writer(fh, lineterminator="\n")
         writer.writerow(CATALOG_COLUMNS)
         writer.writerows(CATALOG)
     print(f"  [catalog]  {len(CATALOG)} features -> {path}")

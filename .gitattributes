@@ -4,3 +4,6 @@ draftkings_racedata_pdfs/fixtures/*.pdf binary
 
 # Preserve captured audit output verbatim.
 audit_run.txt whitespace=-blank-at-eol
+
+# Keep the generated feature catalog byte-identical across platforms.
+output/feature_catalog.csv text eol=lf
