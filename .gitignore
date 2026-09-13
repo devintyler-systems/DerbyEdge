@@ -12,6 +12,8 @@ ENV/
 
 # Local databases
 db/derbyedge.db
+db/derbyedge.db-shm
+db/derbyedge.db-wal
 *.db
 *.sqlite
 *.sqlite3
@@ -66,6 +68,7 @@ data/raw/
 data/raw-inputs/
 data/raw_input/
 data/downloads/
+data/runs/
 samples/
 
 # Local scratch space (schemas/, docs/, manifests/, and tests/ stay tracked)
