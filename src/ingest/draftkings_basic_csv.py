@@ -90,6 +90,14 @@ def parse_draftkings_basic_csv(
     unsafe.  Blank WEIGHT cells remain absent; non-blank malformed values reject
     the source rather than being guessed or silently discarded.
     """
+    xlsx_path = Path(source) if isinstance(source, (str, Path)) and str(source).lower().endswith(".xlsx") else None
+    if xlsx_path is not None and xlsx_path.is_file():
+        import pandas as pd
+
+        frame = pd.read_excel(xlsx_path, dtype=str, keep_default_na=False)
+        parsed = parse_draftkings_basic_csv(frame.to_csv(index=False), source_path=str(xlsx_path))
+        return dataclasses.replace(parsed, source_sha256=hashlib.sha256(xlsx_path.read_bytes()).hexdigest())
+
     text, resolved_path, raw_bytes = _read_source(source, source_path)
     reader = csv.DictReader(StringIO(text))
     headers = _required_headers(reader.fieldnames or ())
