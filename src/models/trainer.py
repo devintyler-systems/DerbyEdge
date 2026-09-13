@@ -33,6 +33,15 @@ ROOT       = Path(__file__).resolve().parents[2]
 MODELS_DIR = ROOT / "saved_models"
 
 FEATURE_SCHEMA_VERSION = "2.0.0-pre-race-reliability"
+MODEL_ARTIFACT_SCHEMA_VERSION = 2
+
+# This is deliberately a negative audit state.  It is used only when an old
+# pickle predates calibration provenance and must never be presented as a pass.
+LEGACY_CALIBRATION_AUDIT = {
+    "schema_status": "missing_on_legacy_artifact",
+    "calibration_status": "not_available",
+    "temperature_adjustment_status": "not_available",
+}
 
 
 @dataclasses.dataclass(frozen=True)
@@ -501,6 +510,52 @@ class ModelArtifact:
     config:              dict
     calibration_audit:   dict = dataclasses.field(default_factory=dict)
     dispatcher_audit:    dict = dataclasses.field(default_factory=dict)
+    artifact_schema_version: int = MODEL_ARTIFACT_SCHEMA_VERSION
+
+
+def _legacy_calibration_audit() -> dict:
+    """Return a fresh, explicitly unavailable audit for pre-audit artifacts."""
+    return dict(LEGACY_CALIBRATION_AUDIT)
+
+
+def normalize_or_migrate_model_artifact(artifact: ModelArtifact | dict) -> ModelArtifact | dict:
+    """Normalize a deserialized model artifact to the current readable schema.
+
+    Pickle bypasses dataclass defaults when restoring old instances, so fields
+    introduced after an artifact was written are absent rather than defaulted.
+    This function is intentionally the single migration boundary for those
+    artifacts.  It does not infer a successful calibration from missing data.
+    """
+    if isinstance(artifact, dict):
+        artifact.setdefault("artifact_schema_version", 1)
+        if artifact.get("calibration_audit") is None:
+            artifact["calibration_audit"] = _legacy_calibration_audit()
+        return artifact
+
+    # Dataclass class defaults can make ``hasattr`` true for an old pickle even
+    # when its serialized instance state has no schema field.
+    if "artifact_schema_version" not in vars(artifact):
+        artifact.artifact_schema_version = 1
+    if not hasattr(artifact, "calibration_audit") or artifact.calibration_audit is None:
+        artifact.calibration_audit = _legacy_calibration_audit()
+    if not hasattr(artifact, "dispatcher_audit") or artifact.dispatcher_audit is None:
+        artifact.dispatcher_audit = {}
+    return artifact
+
+
+def calibration_audit_for_display(artifact: object) -> dict:
+    """Return a safe display/reporting audit without implying missing metadata passed."""
+    audit = artifact.get("calibration_audit") if isinstance(artifact, dict) else getattr(
+        artifact, "calibration_audit", None
+    )
+    return audit if isinstance(audit, dict) else _legacy_calibration_audit()
+
+
+def load_model_artifact(path: Path) -> ModelArtifact | dict:
+    """Deserialize and immediately normalize a persisted model artifact."""
+    with path.open("rb") as handle:
+        artifact = pickle.load(handle)
+    return normalize_or_migrate_model_artifact(artifact)
 
 
 # ---------------------------------------------------------------------------
@@ -1179,8 +1234,7 @@ def train_or_build(
             candidate_path = Path(str(candidate["artifact_path"]))
             if not candidate_path.is_file():
                 raise FileNotFoundError(candidate_path)
-            with candidate_path.open("rb") as handle:
-                promoted = pickle.load(handle)
+            promoted = load_model_artifact(candidate_path)
             if not isinstance(promoted, ModelArtifact) or promoted.race_type_key != race_type_key:
                 raise ValueError("registered artifact family mismatch")
             feat_cols = promoted.feature_cols  # type: ignore[attr-defined]

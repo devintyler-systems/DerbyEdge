@@ -1,0 +1,11 @@
+﻿Feature,Tier,Source,Evidence,Reason,Weight
+speed_best_3,PLACEHOLDER,seeded/default,0,no runtime evidence for this feature,0.1
+pace_fit_score,UNAVAILABLE,seeded/default,0,pace calls/sectionals are unavailable; no run-style evidence,0.0975
+distance_fit,DERIVED,draftkings_markdown,8,,0.0935
+speed_last,UNAVAILABLE,seeded/default,0,official speed or sectional source is unavailable,0.0875
+surface_fit,DERIVED,draftkings_markdown,8,,0.0765
+derby_override_score,PLACEHOLDER,seeded/default,0,no runtime evidence for this feature,0.07
+work_readiness_score,DERIVED,draftkings_markdown,35,,0.065
+form_cycle_idx,DERIVED,draftkings_markdown,8,,0.063
+beyer_last,UNAVAILABLE,seeded/default,0,official speed or sectional source is unavailable,0.0625
+class_delta,DERIVED,draftkings_markdown,1,,0.054

@@ -1,0 +1,29 @@
+{
+  "artifact_path_or_uri": "__REQUIRED__",
+  "sha256": "__REQUIRED_64_HEX_SHA256__",
+  "source_provider": "__REQUIRED__",
+  "parser_version": "__REQUIRED__",
+  "source_as_of_timestamp": "__REQUIRED_ISO8601_WITH_TIMEZONE__",
+  "source_as_of_tier": "__REQUIRED_PROVEN_OR_OPERATOR_ATTESTED__",
+  "source_as_of_provenance": "__REQUIRED__",
+  "target_track_code": "__REQUIRED__",
+  "target_race_date": "__REQUIRED_YYYY-MM-DD__",
+  "target_race_number": 0,
+  "target_scheduled_post_timestamp": "__REQUIRED_ISO8601_WITH_TIMEZONE__",
+  "target_surface": "__REQUIRED__",
+  "target_distance_furlongs": 0,
+  "expected_active_starter_count": 0,
+  "observed_active_starter_count": 0,
+  "identity_reconciliation_status": "__REQUIRED_COMPLETE__",
+  "field_completeness_status": "__REQUIRED_COMPLETE__",
+  "feature_vector_status": "__REQUIRED_COMPLETE__",
+  "raw_artifact_retained": false,
+  "pre_race_fields_only": false,
+  "outcome_reference": {
+    "path_or_uri": "__REQUIRED__",
+    "sha256": "__REQUIRED_64_HEX_SHA256__",
+    "source_provider": "__REQUIRED__",
+    "parser_version": "__REQUIRED__"
+  },
+  "outcome_provenance_status": "__REQUIRED_PROVEN_OR_OPERATOR_ATTESTED__"
+}

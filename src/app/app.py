@@ -10,7 +10,9 @@ import json
 import math
 import os
 import pickle
+import sqlite3
 import subprocess
+import json
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
@@ -25,6 +27,7 @@ import plotly.graph_objects as go
 import streamlit as st
 
 from src.utils.db import (
+    DB_PATH,
     get_connection,
     ensure_entry_scores_columns,
     ensure_score_runs_columns,
@@ -49,13 +52,43 @@ from src.services.race_card_builder import (
     norm_surface as _rcb_norm_surface,
 )
 from src.services.pdf_ingest import parse_race_pdf, parse_results_pdf
+from src.app.race_import import (
+    EXCEL_QC_HELPER_TEXT,
+    EXCEL_QC_LABEL,
+    PRIMARY_HELPER_TEXT,
+    PRIMARY_UPLOAD_FORMAT_TEXT,
+    PRIMARY_UPLOAD_LABEL,
+    RaceImportDispatchError,
+    dispatch_excel_qc_reconciliation,
+    dispatch_primary_race_card_import,
+    excel_qc_uploader_config,
+    markdown_import_summary,
+    primary_uploader_config,
+)
+from src.services.draftkings_markdown_intake import (
+    MarkdownCardScoreReadiness,
+    ScoreReadinessBlocker,
+    canonical_markdown_card_ui_payload,
+    exportable_markdown_card_entries,
+    markdown_card_score_readiness,
+    persist_validated_draftkings_markdown,
+)
 from src.ingest.firstbet_pdf import (
     bind_run_to_card,
     ingest_firstbet_pdf,
     to_legacy_race_result,
 )
 from src.ingest.run_state import RunMode
+from src.models.trainer import (
+    calibration_audit_for_display,
+    load_model_artifact,
+)
 from src.services.run_mode import CardRunState, get_card_run_state
+from src.services.score_delivery import contain_ineligible_board
+from src.services.feature_lineage import (
+    entry_details_feature_status_rows,
+    model_diagnostics_feature_status_rows,
+)
 from src.services.pp_intake import (
     ingest_pp_rows,
     parse_pp_csv,
@@ -276,6 +309,14 @@ def load_board(
         ).fetchone()
         conn.close()
         meta = dict(meta_row) if meta_row else {}
+        if not df.empty and meta.get("card_id") is not None:
+            # Persisted scores are historical audit data until the current
+            # feature/artifact/calibration context passes the fail-closed gate.
+            df, _eligibility = contain_ineligible_board(df, DB_PATH, int(meta["card_id"]))
+            meta["score_eligibility"] = {
+                str(entry_id): audit.get("reason_codes", [])
+                for entry_id, audit in _eligibility.items()
+            }
         return (df if not df.empty else None), meta
     except Exception as exc:
         st.exception(exc)
@@ -507,8 +548,7 @@ def load_artifact():
     path = ROOT / "saved_models" / "dirt_route_v1.pkl"
     if not path.exists():
         return None
-    with open(path, "rb") as fh:
-        return pickle.load(fh)
+    return load_model_artifact(path)
 
 
 @st.cache_data(ttl=30)
@@ -823,8 +863,7 @@ def _run_bet_thresholds(meta: dict | None) -> tuple[float, float]:
     if not artifact_path:
         return default
     try:
-        with open(artifact_path, "rb") as fh:
-            artifact = pickle.load(fh)
+        artifact = load_model_artifact(Path(artifact_path))
         config = (
             artifact.get("config", {})
             if isinstance(artifact, dict)
@@ -883,6 +922,8 @@ _rdns: dict = {
 }
 _card_run_state = CardRunState(RunMode.BLOCKED, ["No active race."], None)
 _run_mode = RunMode.BLOCKED
+_markdown_score_readiness = None
+_markdown_input_eligible = False
 _sidebar_contract = race_board_contract(_run_mode)
 
 # ── Sidebar ────────────────────────────────────────────────────────────────────
@@ -1012,6 +1053,28 @@ with st.sidebar:
         finally:
             _mode_conn.close()
         _run_mode = _card_run_state.mode
+        _markdown_conn = get_connection()
+        try:
+            _markdown_score_readiness = markdown_card_score_readiness(
+                _markdown_conn, int(active_card_id)
+            )
+        except sqlite3.Error:
+            _markdown_score_readiness = MarkdownCardScoreReadiness(
+                score_eligible=False,
+                blockers=(ScoreReadinessBlocker(
+                    "MARKDOWN_READINESS_SQLITE_ERROR",
+                    "Cannot score: Markdown readiness check failed due to a database error.",
+                ),),
+                validated_runner_count=0,
+                persisted_runner_count=0,
+                active_runner_count=0,
+            )
+        finally:
+            _markdown_conn.close()
+        _markdown_input_eligible = (
+            _markdown_score_readiness is not None
+            and _markdown_score_readiness.score_eligible
+        )
         _sidebar_contract = race_board_contract(
             _run_mode, has_live_odds=_rdns["live_odds_loaded"]
         )
@@ -1351,6 +1414,18 @@ with tab1:
             _blocked_show = _blocked_entries.drop(columns=["ML Odds"], errors="ignore")
             st.dataframe(_blocked_show, use_container_width=True, hide_index=True)
         st.caption("Race metadata and diagnostics are available above. No scoring artifacts are rendered.")
+        if _markdown_score_readiness is not None:
+            st.subheader("Score Race")
+            st.caption(
+                f"Validated runners: {_markdown_score_readiness.validated_runner_count} · "
+                f"Persisted runners: {_markdown_score_readiness.persisted_runner_count} · "
+                f"Active runners: {_markdown_score_readiness.active_runner_count}"
+            )
+            st.button("Score blocked", disabled=True, key="markdown_score_blocked_tab1")
+            for _markdown_blocker in _markdown_score_readiness.blockers:
+                st.error(f"{_markdown_blocker.code}: {_markdown_blocker.message}")
+            for _run_state_reason in _card_run_state.reasons:
+                st.caption(f"Existing scoring prerequisite: {_run_state_reason}")
 
     elif _run_mode in (RunMode.MARKET_BASELINE_ONLY, RunMode.MARKET_ANCHORED_NOT_ACTIONABLE):
         st.subheader("Morning-Line Baseline")
@@ -1429,11 +1504,15 @@ with tab1:
             )
         else:
             st.subheader("Build & Score Actions")
+            if not _markdown_input_eligible:
+                st.error("Score blocked — validated Markdown persistence is incomplete.")
+                for _markdown_blocker in _markdown_score_readiness.blockers:
+                    st.caption(f"{_markdown_blocker.code}: {_markdown_blocker.message}")
             _ba1, _ba2, _ba3 = st.columns(3)
 
             with _ba1:
                 if st.button("⚙ Build features", use_container_width=True,
-                             key="bld_tab1"):
+                             key="bld_tab1", disabled=not _markdown_input_eligible):
                     with st.spinner(
                         f"Building features for card_id={active_card_id}…"
                     ):
@@ -1450,7 +1529,10 @@ with tab1:
 
             with _ba2:
                 if st.button("🏁 Score this race", use_container_width=True,
-                             key="scr_tab1"):
+                             key="scr_tab1", disabled=(
+                                 not _markdown_input_eligible
+                                 or not _card_run_state.scoring_eligible
+                             )):
                     with st.spinner(f"Scoring card_id={active_card_id}…"):
                         _ok2, _out2 = _run_pipeline_step(
                             "score.py", active_card_id
@@ -1465,10 +1547,21 @@ with tab1:
                             st.error("Scoring completed but did not create a score run for this card.")
                     else:
                         st.error("Score failed — run Build features first.")
+                if not (_markdown_input_eligible and _card_run_state.scoring_eligible):
+                    if not _markdown_input_eligible:
+                        _markdown_blocker = _markdown_score_readiness.blockers[0]
+                        _score_block_reason = f"{_markdown_blocker.code}: {_markdown_blocker.message}"
+                    else:
+                        _score_block_reason = next(
+                            iter(_card_run_state.reasons),
+                            "Build the required feature frame before direct scoring.",
+                        )
+                    st.caption(f"Score blocked: {_score_block_reason}")
 
             with _ba3:
                 if st.button("⚡ Build + Score now", use_container_width=True,
-                             type="primary", key="bns_tab1"):
+                             type="primary", key="bns_tab1",
+                             disabled=not _markdown_input_eligible):
                     with st.spinner(
                         f"Build + Score for card_id={active_card_id}…"
                     ):
@@ -2008,7 +2101,7 @@ with tab2:
 
             def _last5_str(starts, wins):
                 if starts is None:
-                    return "—"
+                    return "Unavailable from current pre-race source"
                 return f"{int(starts)}S" + (f" {int(wins)}W" if wins is not None else "")
 
             cs  = _hf("career_starts");  cw  = _hf("career_wins")
@@ -2021,6 +2114,7 @@ with tab2:
             if cw  is None: cw  = _prof.get("career_wins")
             if cp  is None: cp  = _prof.get("career_places")
             if csh is None: csh = _prof.get("career_shows")
+            if ce  is None: ce  = _prof.get("lifetime_earnings")
 
             # Dirt / distance: entries first, profile fallback
             _ds_v  = _hf("dirt_starts");  ds  = _ds_v  if _ds_v  is not None else _prof.get("dirt_last5_starts")
@@ -2056,9 +2150,9 @@ with tab2:
                 _pct_sfx    = "" if _prof["pct_source"] == "entries" else " *"
                 win_pct_str = f"{_prof['career_win_pct'] * 100:.0f}%{_pct_sfx}"
                 _itp        = _prof.get("career_itm_pct")
-                itm_pct_str = f"{_itp * 100:.0f}%{_pct_sfx}" if _itp is not None else "—"
+                itm_pct_str = f"{_itp * 100:.0f}%{_pct_sfx}" if _itp is not None else "Unavailable from current pre-race source"
             else:
-                win_pct_str = itm_pct_str = "—"
+                win_pct_str = itm_pct_str = "Unavailable from current pre-race source"
 
             # Career record: full record if seeded, else last-5 from PPs
             if None not in (cs, cw, cp, csh) and cs and cs > 0:
@@ -2069,7 +2163,7 @@ with tab2:
                     f"{_prof['last5_places']}-{_prof['last5_shows']}"
                 )
             else:
-                career_rec = "—"
+                career_rec = "Unavailable from current pre-race source"
 
             # Connections stats summary (local race_results data)
             _tr_s = _conn_s.get("trainer", {})
@@ -2081,23 +2175,25 @@ with tab2:
             if _jk_s.get("starts", 0) > 0:
                 _wp = f"{_jk_s['win_pct']*100:.0f}%" if _jk_s.get("win_pct") is not None else "?"
                 _conn_parts.append(f"J: {_jk_s['starts']}st {_wp}")
-            _conn_line = " · ".join(_conn_parts) + " *(local)" if _conn_parts else "—"
+            _conn_line = " · ".join(_conn_parts) + " *(local)" if _conn_parts else "Unavailable from current pre-race source"
 
             for k, v in [
-                ("Trainer",       horse.get("trainer") or "—"),
-                ("Jockey",        horse.get("jockey")  or "—"),
-                ("Sire / Dam",    f"{horse.get('sire') or '—'} / {horse.get('dam') or '—'}"),
-                ("Owner",         horse.get("owner") or "—"),
+                ("Trainer",       horse.get("trainer") or "Unavailable from current pre-race source"),
+                ("Jockey",        horse.get("jockey")  or "Unavailable from current pre-race source"),
+                ("Sire / Dam",    f"{_prof.get('sire') or 'Unavailable from current pre-race source'} / {_prof.get('dam') or 'Unavailable from current pre-race source'}"),
+                ("Dam sire / Breeder", f"{_prof.get('dam_sire') or 'Unavailable from current pre-race source'} / {_prof.get('breeder') or 'Unavailable from current pre-race source'}"),
+                ("Age / Sex / Color", " / ".join(str(value) for value in (_prof.get("age"), _prof.get("sex"), _prof.get("color")) if value) or "Unavailable from current pre-race source"),
+                ("Owner",         horse.get("owner") or _prof.get("owner") or "Unavailable from current pre-race source"),
                 ("Career record", career_rec),
                 ("Win% / ITM%",   f"{win_pct_str} / {itm_pct_str}"),
-                ("Earnings",      f"${int(ce):,}" if ce is not None else "—"),
+                ("Earnings",      f"${int(ce):,}" if ce is not None else "Unavailable from current pre-race source"),
                 ("Dirt (last 5)", _last5_str(ds, dw)),
                 ("@ Distance (last 5)", _last5_str(dts, dtw)),
                 ("Last race",     f"{int(lrd)}d ago, finished {int(lrf)}"
-                                  if None not in (lrd, lrf) else "—"),
+                                  if None not in (lrd, lrf) else "Unavailable from current pre-race source"),
                 ("T/J (local)",   _conn_line),
-                ("Pace style",    str(horse.get("pace_style") or "—").title()),
-                ("Stamina index", f"{si:.2f}" if si is not None else "—"),
+                ("Pace style",    str(horse.get("pace_style") or "Unavailable from current pre-race source").title()),
+                ("Stamina index", f"{si:.2f}" if si is not None else "Unavailable from current pre-race source"),
             ]:
                 st.markdown(
                     f'<div class="kv-row"><span class="kv-key">{k}</span>'
@@ -2192,43 +2288,25 @@ with tab2:
             if not h_feats.empty:
                 hrow = h_feats.iloc[0]
                 importances = artifact.feature_importances if artifact else {}
-
-                meta_cols = {"entry_id", "horse_id", "card_id", "horse_name",
-                             "post_position", "build_ts"}
-                feat_rows = []
-                for col in feat_df.columns:
-                    if col in meta_cols:
-                        continue
-                    val  = hrow.get(col)
-                    if isinstance(val, float) and np.isnan(val):
-                        val = None
-                    cat_row = catalog[catalog["feature_name"] == col]
-                    tier = cat_row["tier"].iloc[0]   if not cat_row.empty else "UNKNOWN"
-                    imp  = importances.get(col, 0.0)
-                    feat_rows.append({
-                        "feature":    col,
-                        "value":      _safe_num(val),
-                        "tier":       tier,
-                        "in_model":   imp > 0,
-                        "importance": imp,
-                    })
-
-                feat_tbl = pd.DataFrame(feat_rows)
+                feat_tbl = pd.DataFrame(entry_details_feature_status_rows(
+                    hrow, importances=importances,
+                ))
+                feat_tbl["value"] = feat_tbl["value"].map(_safe_num)
                 model_feats = feat_tbl[feat_tbl["in_model"]].sort_values(
                     "importance", ascending=False
                 )
-                other_feats = feat_tbl[~feat_tbl["in_model"] & (feat_tbl["tier"] != "PLACEHOLDER")]
-                phld_feats  = feat_tbl[feat_tbl["tier"] == "PLACEHOLDER"]
+                other_feats = feat_tbl[~feat_tbl["in_model"] & ~feat_tbl["tier"].isin(["PLACEHOLDER", "UNAVAILABLE"])]
+                phld_feats  = feat_tbl[feat_tbl["tier"].isin(["PLACEHOLDER", "UNAVAILABLE"])]
 
                 def _render_feat_table(df_sub: pd.DataFrame, show_imp: bool) -> None:
-                    display = df_sub[["feature", "value", "tier", "importance"]].copy()
-                    display.columns = ["Feature", "Value", "Tier", "Weight"]
+                    display = df_sub[["feature", "value", "tier", "source", "evidence", "reason", "importance"]].copy()
+                    display.columns = ["Feature", "Value", "Status", "Source", "Evidence", "Reason", "Weight"]
                     if not show_imp:
                         display = display.drop(columns=["Weight"])
                     # Tier color rows
                     def _tier_style(row):
-                        t = row.get("Tier", "")
-                        if t == "IMPLEMENTED":
+                        t = row.get("Status", "")
+                        if t in {"IMPLEMENTED", "SOURCE_BACKED", "DERIVED"}:
                             return ["background-color:rgba(46,160,67,.07)"] * len(row)
                         if t == "DEGRADED":
                             return ["background-color:rgba(210,153,34,.07)"] * len(row)
@@ -2241,13 +2319,11 @@ with tab2:
                 st.markdown(f"##### Model features ({len(model_feats)})")
                 _render_feat_table(model_feats, show_imp=True)
 
-                with st.expander(
-                    f"Other seed features ({len(other_feats)}) — IMPL/DEG, not in model"
-                ):
+                with st.expander(f"Other runtime features ({len(other_feats)})"):
                     _render_feat_table(other_feats, show_imp=False)
 
                 with st.expander(
-                    f"Placeholder features ({len(phld_feats)}) — all null (no historical data)"
+                    f"Unavailable/defaulted features ({len(phld_feats)})"
                 ):
                     _render_feat_table(phld_feats, show_imp=False)
 
@@ -2343,7 +2419,15 @@ with tab2:
         if horse["missing_data_flag"] == 1:
             conf_lbl = _conf_label(horse["confidence_flag"])
             is_derby_run = bool(meta.get("derby_override_active", 0)) if meta else False
-            base_flags = "no_race_splits, no_workout_detail, no_connections_stats, no_track_form, no_post_bias"
+            _entry_feature_row = feat_df[feat_df["horse_name"] == horse["horse_name"]] if not feat_df.empty else pd.DataFrame()
+            _has_workout_detail = bool(
+                not _entry_feature_row.empty
+                and float(_entry_feature_row.iloc[0].get("dk_workout_count") or 0) > 0
+            )
+            _base_flag_items = ["no_race_splits", "no_connections_stats", "no_track_form", "no_post_bias"]
+            if not _has_workout_detail:
+                _base_flag_items.insert(1, "no_workout_detail")
+            base_flags = ", ".join(_base_flag_items)
             derby_flags = ", no_jan_apr_curve, no_churchill_readiness" if is_derby_run else ""
             single_start = ", dist_fit_single_start" if conf_lbl == "low" else ""
             flags_str = base_flags + derby_flags + single_start
@@ -2416,11 +2500,14 @@ with tab3:
 
         with diag_right:
             if artifact is not None:
+                calibration_audit = calibration_audit_for_display(artifact)
+                calibration_status = calibration_audit.get("calibration_status", "not_available")
                 for k, v in [
                     ("Calibration method", "Temperature-scaled softmax"),
                     ("Temperature (T)",    artifact.temperature),
-                    ("Temperature adjustment", artifact.calibration_audit.get("temperature_adjustment_status", "n/a")),
-                    ("Calibration target", "Overround-adjusted morning line"),
+                    ("Calibration audit status", calibration_status),
+                    ("Temperature adjustment", calibration_audit.get("temperature_adjustment_status", "not_available")),
+                    ("Calibration target", "Overround-adjusted morning line" if calibration_status != "not_available" else "not_available (legacy metadata)"),
                 ]:
                     st.markdown(
                         f'<div class="kv-row"><span class="kv-key">{k}</span>'
@@ -2511,17 +2598,29 @@ with tab3:
     # ── Top 10 feature importances ─────────────────────────────────────────
     st.subheader("Top Feature Importances")
     st.caption("Effective weight = within-group weight × group weight, normalized to sum 1.0")
-    if artifact is not None:
-        fi = sorted(artifact.feature_importances.items(), key=lambda x: -x[1])[:10]
-        fi_df = pd.DataFrame(fi, columns=["Feature", "Weight"])
-        fi_df["Tier"] = fi_df["Feature"].apply(
-            lambda f: catalog[catalog["feature_name"] == f]["tier"].iloc[0]
-                      if not catalog.empty and len(catalog[catalog["feature_name"] == f]) > 0
-                      else "DEGRADED"
+    if artifact is not None and not feat_df.empty:
+        _diagnostic_entry_options = {
+            f"{int(row.entry_id)} · {row.horse_name}": row.entry_id
+            for row in feat_df[["entry_id", "horse_name"]].itertuples(index=False)
+        }
+        _diagnostic_entry_label = st.selectbox(
+            "Runtime lineage entry",
+            list(_diagnostic_entry_options),
+            key="model_diagnostics_lineage_entry",
         )
+        _diagnostic_entry_id = _diagnostic_entry_options[_diagnostic_entry_label]
+        _diagnostic_row = feat_df[feat_df["entry_id"] == _diagnostic_entry_id].iloc[0]
+        fi_df = pd.DataFrame(model_diagnostics_feature_status_rows(
+            _diagnostic_row, importances=artifact.feature_importances,
+        ))
+        fi_df = fi_df[fi_df["in_model"]].sort_values("importance", ascending=False).head(10)
+        fi_df = fi_df.rename(columns={
+            "feature": "Feature", "importance": "Weight", "tier": "Tier",
+            "source": "Source", "evidence": "Evidence", "reason": "Reason",
+        })
         bar_colors_fi = [
-            "#3fb950" if t == "IMPLEMENTED" else
-            "#d29922" if t == "DEGRADED"    else "#6e7681"
+            "#3fb950" if t in {"IMPLEMENTED", "SOURCE_BACKED", "DERIVED"} else
+            "#d29922" if t == "DEGRADED" else "#6e7681"
             for t in fi_df["Tier"]
         ]
         fig_fi = go.Figure(go.Bar(
@@ -2537,7 +2636,13 @@ with tab3:
             **_plotly_dark(),
         )
         st.plotly_chart(fig_fi, use_container_width=True)
-        st.caption("🟢 IMPLEMENTED · 🟡 DEGRADED · ⚫ PLACEHOLDER")
+        st.dataframe(
+            fi_df[["Feature", "Tier", "Source", "Evidence", "Reason", "Weight"]],
+            use_container_width=True, hide_index=True,
+        )
+        st.caption("🟢 SOURCE_BACKED / DERIVED · 🟡 DEGRADED · ⚫ PLACEHOLDER / UNAVAILABLE")
+    elif artifact is not None:
+        st.info("Build features to view per-entry runtime lineage for model features.")
 
 # ── TAB 4: Methodology + Limitations ──────────────────────────────────────────
 with tab4:
@@ -2661,21 +2766,45 @@ with tab5:
     _conn5 = get_connection()
     _card_id5 = active_card_id   # may be None if no races exist yet
 
-    # ── Section 1: PDF Race Import (Primary) ──────────────────────────────
-    st.subheader("1 · PDF Race Import")
+    # ── Section 1: Race Card Import (Primary) ─────────────────────────────
+    _p5_primary_config = primary_uploader_config()
+    _p5_excel_config = excel_qc_uploader_config()
+    st.subheader(f"1 · {_p5_primary_config['label']}")
     st.markdown(
-        '<div class="info-banner">ℹ Upload a text-based PDF race page, sportsbook '
-        'printout, or Equibase race card. Scanned / image-only PDFs require the '
-        'Screenshot Ingest tool in the advanced section below '
-        '(requires <code>ANTHROPIC_API_KEY</code>). '
-        'Requires: <code>pip install pdfplumber</code>.</div>',
+        f'<div class="info-banner">ℹ {_p5_primary_config["help_text"]}</div>',
         unsafe_allow_html=True,
     )
-
+    _p5_as_of_date = st.date_input(
+        "Markdown validation as-of date (UTC)",
+        value=datetime.now(timezone.utc).date(), key="race5_markdown_as_of_date",
+    )
+    _p5_as_of_time = st.time_input(
+        "Markdown validation as-of time (UTC)",
+        value=datetime.now(timezone.utc).time().replace(microsecond=0),
+        key="race5_markdown_as_of_time",
+    )
+    _p5_as_of = datetime.combine(_p5_as_of_date, _p5_as_of_time, tzinfo=timezone.utc)
+    st.caption(_p5_primary_config["format_text"])
     _pdf5_file = st.file_uploader(
-        "Upload race PDF", type=["pdf"],
+        _p5_primary_config["label"], type=list(_p5_primary_config["accepted_types"]),
         key="pdf_race_uploader", label_visibility="collapsed",
     )
+
+    _p5_excel_qc = None
+    with st.expander(_p5_excel_config["label"], expanded=False):
+        st.caption(_p5_excel_config["help_text"])
+        _p5_excel_file = st.file_uploader(
+            _p5_excel_config["label"], type=list(_p5_excel_config["accepted_types"]), key="race5_excel_qc_uploader",
+            label_visibility="collapsed",
+        )
+        if _p5_excel_file is not None:
+            try:
+                _p5_excel_qc = dispatch_excel_qc_reconciliation(
+                    _p5_excel_file.name, _p5_excel_file.getvalue(),
+                ).excel_result
+                st.success("Excel QC loaded. It remains isolated from model input.")
+            except RaceImportDispatchError as _p5_excel_error:
+                st.error(str(_p5_excel_error))
 
     if _pdf5_file is not None:
         _pdf5_bytes = _pdf5_file.getvalue()
@@ -2688,43 +2817,146 @@ with tab5:
         if not _stored_path.exists():
             _stored_path.write_bytes(_pdf5_bytes)
 
-        # Cache keyed by SHA-256, filename, parser version, and extract mode
+        # Preserve the legacy PDF cache boundary: a cached PDF must not be
+        # reparsed merely to classify its filename. Markdown is intentionally
+        # revalidated on each upload rerun so its visible audit remains current.
+        _p5_is_pdf = _pdf5_file.name.lower().endswith(".pdf")
         _cache_key = f"{_pdf5_sha}:{_pdf5_file.name}:v1.0.0:full"
         _cached_upload = st.session_state.get("_pdf5_parse_cache") or {}
-        if _cached_upload.get("cache_key") == _cache_key:
+        if _p5_is_pdf and _cached_upload.get("cache_key") == _cache_key:
+            _p5_dispatch = None
             _pr5 = _cached_upload["result"]
         else:
-            with st.spinner("Extracting and validating race data from PDF…"):
-                _parsed_pr5 = parse_race_pdf(
+            try:
+                _p5_spinner_text = (
+                    "Extracting and validating race data from PDF…"
+                    if _p5_is_pdf else "Parsing and validating DraftKings Markdown…"
+                )
+                with st.spinner(_p5_spinner_text):
+                    _p5_dispatch = dispatch_primary_race_card_import(
+                        _pdf5_file.name,
+                        _pdf5_bytes,
+                        as_of=_p5_as_of,
+                        source_metadata={"stored_path": str(_stored_path.resolve())},
+                    )
+            except RaceImportDispatchError as _p5_dispatch_error:
+                _p5_dispatch = None
+                _pr5 = {"ok": False, "error": str(_p5_dispatch_error), "warnings": []}
+
+        if _p5_dispatch is not None and _p5_dispatch.source_kind == "markdown":
+            _p5_md_summary = markdown_import_summary(_p5_dispatch)
+            st.markdown("**DraftKings Markdown Import Summary**")
+            _p5m1, _p5m2, _p5m3, _p5m4 = st.columns(4)
+            _p5m1.metric("Validation", _p5_md_summary["validation_status"])
+            _p5m2.metric("Track / Race", f"{_p5_md_summary['track']} R{_p5_md_summary['race_number'] or '?'}")
+            _p5m3.metric("Runners", _p5_md_summary["parsed_runner_count"])
+            _p5m4.metric("PP / Workouts", f"{_p5_md_summary['past_performance_count']} / {_p5_md_summary['workout_count']}")
+            st.json(_p5_md_summary)
+            if _p5_excel_qc is not None:
+                _p5_md_counts = {
+                    "Runners": _p5_md_summary["parsed_runner_count"],
+                    "PPs": _p5_md_summary["past_performance_count"],
+                    "Workouts": _p5_md_summary["workout_count"],
+                }
+                _p5_excel_counts = {
+                    "Runners": _p5_excel_qc.recognizable_runner_records,
+                    "PPs": _p5_excel_qc.recognizable_past_performance_records,
+                    "Workouts": _p5_excel_qc.recognizable_workout_records,
+                }
+                st.dataframe(pd.DataFrame([_p5_md_counts, _p5_excel_counts], index=["Markdown", "Excel QC"]), use_container_width=True)
+                if _p5_md_counts != _p5_excel_counts:
+                    st.warning("Excel QC counts differ from Markdown counts. Markdown validation remains authoritative.")
+            if not _p5_dispatch.feature_staging_allowed:
+                _pr5 = {
+                    "ok": False,
+                    "error": "IMPORT BLOCKED — CARD VALIDATION FAILED",
+                    "warnings": _p5_dispatch.validation.errors if _p5_dispatch.validation else [],
+                    "markdown_dispatch": _p5_dispatch,
+                }
+            else:
+                try:
+                    _p5_persist = persist_validated_draftkings_markdown(
+                        _conn5,
+                        _p5_dispatch.card,
+                        _p5_dispatch.validation,
+                        source_filename=_pdf5_file.name,
+                        source_path=str(_stored_path.resolve()),
+                    )
+                    # The following preview/export path must use canonical rows,
+                    # never the transient uploaded payload.
+                    _pr5 = canonical_markdown_card_ui_payload(_conn5, _p5_persist.card_id)
+                    _pr5["markdown_persistence"] = _p5_persist
+                    _p5_active_changed = (
+                        st.session_state.get("active_card_id") != _p5_persist.card_id
+                    )
+                    st.session_state["active_card_id"] = _p5_persist.card_id
+                    st.cache_data.clear()
+                    st.success(
+                        f"Validated Markdown persisted to card_id={_p5_persist.card_id}: "
+                        f"{_p5_persist.persisted_runner_count} entries · "
+                        f"{_p5_persist.persisted_past_performance_count} PPs · "
+                        f"{_p5_persist.persisted_workout_count} workouts."
+                    )
+                    if _p5_persist.repaired_existing_card:
+                        _p5_revision_message = (
+                            "Imported core entry data differed from the matched card; "
+                            "the validated source repaired it and a new SHA provenance revision was recorded."
+                            if _p5_persist.materially_different_from_existing
+                            else "The matched card already agreed on source-owned core entry fields; "
+                            "the validated source was recorded as an auditable revision."
+                        )
+                        st.info(_p5_revision_message)
+                    _p5_export_df = pd.DataFrame(
+                        exportable_markdown_card_entries(_conn5, _p5_persist.card_id)
+                    )
+                    st.download_button(
+                        "Download canonical card export CSV",
+                        data=_p5_export_df.to_csv(index=False).encode("utf-8"),
+                        file_name=f"{_pdf5_sha[:12]}_canonical_card.csv",
+                        mime="text/csv",
+                        key=f"markdown_card_export_{_p5_persist.card_id}",
+                    )
+                    # The board is rendered before Market Intake in this Streamlit
+                    # script.  Rerun once after changing active-card state so its
+                    # visible score controls hydrate from this same canonical card.
+                    if _p5_active_changed:
+                        st.rerun()
+                except (ValueError, sqlite3.Error) as _p5_persist_error:
+                    _pr5 = {
+                        "ok": False,
+                        "error": f"IMPORT BLOCKED — canonical persistence failed: {_p5_persist_error}",
+                        "warnings": [],
+                        "markdown_dispatch": _p5_dispatch,
+                    }
+        elif _p5_dispatch is not None:
+            # Cache keyed by SHA-256, filename, parser version, and extract mode.
+            # PDF dispatch deliberately retains the previous parsing/import flow.
+            _parsed_pr5 = _p5_dispatch.pdf_result or {}
+            if _parsed_pr5.get("is_draftkings"):
+                _pr5 = _parsed_pr5
+            elif _parsed_pr5.get("is_1stbet"):
+                _firstbet_run = ingest_firstbet_pdf(
                     _pdf5_bytes,
                     filename=_pdf5_file.name,
-                    stored_path=str(_stored_path.resolve()),
+                    runs_root=ROOT / "data" / "runs",
                 )
-                if _parsed_pr5.get("is_draftkings"):
-                    _pr5 = _parsed_pr5
-                elif _parsed_pr5.get("is_1stbet"):
-                    _firstbet_run = ingest_firstbet_pdf(
-                        _pdf5_bytes,
-                        filename=_pdf5_file.name,
-                        runs_root=ROOT / "data" / "runs",
-                    )
-                    _pr5 = to_legacy_race_result(
-                        _firstbet_run["payload"], _firstbet_run["feature_audit"]
-                    )
-                    _pr5.update({
-                        "normalized_payload": _firstbet_run["payload"],
-                        "feature_audit": _firstbet_run["feature_audit"],
-                        "ingest_run_id": _firstbet_run["run_id"],
-                        "artifact_paths": _firstbet_run["paths"],
-                        "raw_text": _parsed_pr5.get("raw_text"),
-                        "runners_primary": _parsed_pr5.get("runners_primary") or [],
-                        "runners_fallback": _parsed_pr5.get("runners_fallback") or [],
-                        "upload": _parsed_pr5.get("upload"),
-                        "parser": _parsed_pr5.get("parser"),
-                        "race_resolution": _parsed_pr5.get("race_resolution"),
-                    })
-                else:
-                    _pr5 = _parsed_pr5
+                _pr5 = to_legacy_race_result(
+                    _firstbet_run["payload"], _firstbet_run["feature_audit"]
+                )
+                _pr5.update({
+                    "normalized_payload": _firstbet_run["payload"],
+                    "feature_audit": _firstbet_run["feature_audit"],
+                    "ingest_run_id": _firstbet_run["run_id"],
+                    "artifact_paths": _firstbet_run["paths"],
+                    "raw_text": _parsed_pr5.get("raw_text"),
+                    "runners_primary": _parsed_pr5.get("runners_primary") or [],
+                    "runners_fallback": _parsed_pr5.get("runners_fallback") or [],
+                    "upload": _parsed_pr5.get("upload"),
+                    "parser": _parsed_pr5.get("parser"),
+                    "race_resolution": _parsed_pr5.get("race_resolution"),
+                })
+            else:
+                _pr5 = _parsed_pr5
             st.session_state["_pdf5_parse_cache"] = {
                 "cache_key": _cache_key,
                 "sha256": _pdf5_sha,
@@ -2732,10 +2964,18 @@ with tab5:
             }
 
         if not _pr5["ok"] and not _pr5.get("normalized_payload"):
-            st.markdown(
-                f'<div class="warn-banner">⚠ PDF parse failed: {_pr5["error"]}</div>',
-                unsafe_allow_html=True,
-            )
+            if _pr5.get("markdown_dispatch"):
+                st.error("IMPORT BLOCKED — CARD VALIDATION FAILED")
+                for _p5_validation_error in (_pr5.get("warnings") or []):
+                    st.caption(f"• {_p5_validation_error}")
+                _p5_failed_dispatch = _pr5["markdown_dispatch"]
+                with st.expander("Markdown import diagnostics", expanded=True):
+                    st.json(markdown_import_summary(_p5_failed_dispatch))
+            else:
+                st.markdown(
+                    f'<div class="warn-banner">⚠ PDF parse failed: {_pr5["error"]}</div>',
+                    unsafe_allow_html=True,
+                )
         else:
             _p5_runners      = _pr5.get("runners") or []
             _p5_runner_count = len(_p5_runners)
@@ -2842,7 +3082,15 @@ with tab5:
                 _p5_exist_cid = find_race_card(
                     _conn5, _p5_eff_code, _pr5["race_date"], int(_pr5["race_number"])
                 )
-            if _p5_exist_cid:
+            _p5_is_canonical_markdown = bool(_pr5.get("is_draftkings_markdown"))
+            if _p5_exist_cid and _p5_is_canonical_markdown:
+                st.markdown(
+                    f'<div class="info-banner">✓ Validated Markdown canonical upsert complete — '
+                    f'card_id=<strong>{_p5_exist_cid}</strong>. The preview, export, and '
+                    'active-race state below use the persisted canonical card.</div>',
+                    unsafe_allow_html=True,
+                )
+            elif _p5_exist_cid:
                 st.markdown(
                     f'<div class="info-banner">✓ Race already in DB — '
                     f'card_id=<strong>{_p5_exist_cid}</strong>.</div>',
@@ -2885,8 +3133,12 @@ with tab5:
 
             with _p5a1:
                 if st.button(
-                    "✓ Re-sync entries" if _p5_exist_cid else "Create race card",
-                    disabled=not _p5_can_create,
+                    (
+                        "✓ Canonical Markdown import persisted"
+                        if _p5_is_canonical_markdown
+                        else ("✓ Re-sync entries" if _p5_exist_cid else "Create race card")
+                    ),
+                    disabled=_p5_is_canonical_markdown or not _p5_can_create,
                     use_container_width=True, key="pdf5_create_btn",
                 ):
                     _p5_dist_yd = _rcb_parse_distance(_pr5.get("distance_text"))

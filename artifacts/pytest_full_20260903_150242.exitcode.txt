@@ -1,0 +1,4 @@
+﻿timestamp=2026-09-03T15:03:24.7838298-07:00
+command=pytest -q
+exit_code=0
+log=.\artifacts\pytest_full_20260903_150242.log

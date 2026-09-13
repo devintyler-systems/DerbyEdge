@@ -1,0 +1,92 @@
+============================= test session starts =============================
+platform win32 -- Python 3.12.10, pytest-8.4.2, pluggy-1.6.0 -- C:\Users\burly\AppData\Local\Programs\Python\Python312\python.exe
+cachedir: .pytest_cache
+hypothesis profile 'default'
+rootdir: C:\Projects\derbyedge-engine
+configfile: pytest.ini
+plugins: anyio-4.12.1, hypothesis-6.165.0, cov-7.1.0, typeguard-4.6.0
+collecting ... collected 26 items
+
+tests/test_dk_markdown_integration_audit.py::TestFixtureDiscovery::test_dmr_fixture_exists PASSED
+tests/test_dk_markdown_integration_audit.py::TestFixtureDiscovery::test_sar_fixture_exists PASSED
+tests/test_dk_markdown_integration_audit.py::TestProductionDbIntegrity::test_production_db_absent_or_unchanged_before PASSED
+tests/test_dk_markdown_integration_audit.py::TestProductionDbIntegrity::test_production_db_unchanged_after_all_tests PASSED
+tests/test_dk_markdown_integration_audit.py::TestTempDbBootstrap::test_schema_bootstrap_creates_required_tables PASSED
+tests/test_dk_markdown_integration_audit.py::TestTempDbBootstrap::test_temp_db_is_not_production_db PASSED
+tests/test_dk_markdown_integration_audit.py::TestTempDbBootstrap::test_temp_db_path_is_under_allowed_roots PASSED
+tests/test_dk_markdown_integration_audit.py::TestParsedIdentityCompleteness::test_dmr_runners_parsed PASSED
+tests/test_dk_markdown_integration_audit.py::TestParsedIdentityCompleteness::test_sar_runners_parsed PASSED
+tests/test_dk_markdown_integration_audit.py::TestParsedIdentityCompleteness::test_dmr_identity_completeness_report 
+=== DMR Identity Completeness [DMR_DK_Horse_R10_9-7-26.md] ===
+  PP 1 Its a Cinch: 11/11 ù COMPLETE
+  PP 2 Hondo Crouch [SCRATCHED]: 9/11 ù MISSING: breeder, owner
+  PP 3 Hard to Figure: 11/11 ù COMPLETE
+  PP 4 Disko Tribute: 11/11 ù COMPLETE
+  PP 5 Singlemore: 11/11 ù COMPLETE
+  PP 6 In the Tank: 11/11 ù COMPLETE
+  PP 7 See Through It: 11/11 ù COMPLETE
+  PP 8 Known Idea: 11/11 ù COMPLETE
+  PP 9 Whiskyginandbrandy: 11/11 ù COMPLETE
+  PP 10 Joint Venture: 11/11 ù COMPLETE
+  PP 11 Smokem Ez: 11/11 ù COMPLETE
+  PP 12 Soi Ngern: 11/11 ù COMPLETE
+  PP 13 Sendit Mo: 11/11 ù COMPLETE
+PASSED
+tests/test_dk_markdown_integration_audit.py::TestParsedIdentityCompleteness::test_sar_identity_completeness_report 
+=== SAR Identity Completeness [SAR_DK_Horse_R6_9-4-26.md] ===
+  PP 1 Magnum's Macrobrst: 11/11 ù COMPLETE
+  PP 2 Swiss Army Knife: 11/11 ù COMPLETE
+  PP 3 Big Brooklyn: 11/11 ù COMPLETE
+  PP 4 Corvus: 11/11 ù COMPLETE
+  PP 5 Whitby: 11/11 ù COMPLETE
+  PP 6 Mike's Magic: 11/11 ù COMPLETE
+  PP 7 Daiquiri Sommelier: 11/11 ù COMPLETE
+  PP 8 Hutchinson: 11/11 ù COMPLETE
+  PP 9 Paul's Recovery: 11/11 ù COMPLETE
+  PP 10 Shangrala Road: 11/11 ù COMPLETE
+PASSED
+tests/test_dk_markdown_integration_audit.py::TestValidatorVerdict::test_dmr_validator_verdict_is_recorded PASSED
+tests/test_dk_markdown_integration_audit.py::TestValidatorVerdict::test_sar_validator_passes_or_has_known_blockers PASSED
+tests/test_dk_markdown_integration_audit.py::TestPersistenceToTempDb::test_sar_persists_when_validation_passes PASSED
+tests/test_dk_markdown_integration_audit.py::TestPersistenceToTempDb::test_dmr_persists_when_validation_passes SKIPPED
+tests/test_dk_markdown_integration_audit.py::TestPersistenceToTempDb::test_persisted_entries_link_to_horses PASSED
+tests/test_dk_markdown_integration_audit.py::TestPersistenceToTempDb::test_temp_db_is_not_modified_at_production_path PASSED
+tests/test_dk_markdown_integration_audit.py::TestReadinessBlockers::test_dmr_readiness_blockers_emitted 
+=== DMR Readiness Blockers (validator FAIL) ===
+  VALIDATOR_BLOCKER: entry 1 missing required weight
+  VALIDATOR_BLOCKER: entry 2 missing required weight
+  VALIDATOR_BLOCKER: entry 3 missing required weight
+  VALIDATOR_BLOCKER: entry 4 missing required weight
+  VALIDATOR_BLOCKER: entry 5 missing required weight
+  VALIDATOR_BLOCKER: entry 6 missing required weight
+  VALIDATOR_BLOCKER: entry 7 missing required weight
+  VALIDATOR_BLOCKER: entry 8 missing required weight
+  VALIDATOR_BLOCKER: entry 9 missing required weight
+  VALIDATOR_BLOCKER: entry 10 missing required weight
+  VALIDATOR_BLOCKER: entry 11 missing required weight
+  VALIDATOR_BLOCKER: entry 12 missing required weight
+  VALIDATOR_BLOCKER: entry 13 missing required weight
+  DECISION: Del Mar ineligible ù weight requirement not relaxed.
+PASSED
+tests/test_dk_markdown_integration_audit.py::TestReadinessBlockers::test_dmr_weight_blocker_is_not_relaxed PASSED
+tests/test_dk_markdown_integration_audit.py::TestReadinessBlockers::test_sar_score_readiness_after_persistence PASSED
+tests/test_dk_markdown_integration_audit.py::TestFeatureFieldPresence::test_sar_feature_fields_per_runner 
+=== SAR Feature Vector Status ===
+  complete: 10 / 10
+  incomplete: 0 / 10
+PASSED
+tests/test_dk_markdown_integration_audit.py::TestFeatureFieldPresence::test_dmr_feature_fields_per_runner 
+=== DMR Feature Vector Status ===
+  UNAVAILABLE ù card did not pass validation.
+  Validator errors: ['entry 1 missing required weight', 'entry 2 missing required weight', 'entry 3 missing required weight', 'entry 4 missing required weight', 'entry 5 missing required weight', 'entry 6 missing required weight', 'entry 7 missing required weight', 'entry 8 missing required weight', 'entry 9 missing required weight', 'entry 10 missing required weight', 'entry 11 missing required weight', 'entry 12 missing required weight', 'entry 13 missing required weight']
+PASSED
+tests/test_dk_markdown_integration_audit.py::TestDelMarVsSaratogaDelta::test_track_codes_differ PASSED
+tests/test_dk_markdown_integration_audit.py::TestDelMarVsSaratogaDelta::test_eligibility_delta_report 
+=== Del Mar vs Saratoga Eligibility Delta ===
+  DMR: track='Del Mar' race=10 active=12 scratched=1 weight_null=12 validation=FAIL errors=['entry 1 missing required weight', 'entry 2 missing required weight', 'entry 3 missing required weight', 'entry 4 missing required weight', 'entry 5 missing required weight', 'entry 6 missing required weight', 'entry 7 missing required weight', 'entry 8 missing required weight', 'entry 9 missing required weight', 'entry 10 missing required weight', 'entry 11 missing required weight', 'entry 12 missing required weight', 'entry 13 missing required weight']
+  SAR: track='Saratoga' race=6 active=10 scratched=0 weight_null=0 validation=PASS errors=[]
+PASSED
+tests/test_dk_markdown_integration_audit.py::TestDelMarVsSaratogaDelta::test_dmr_weight_null_count_is_material_blocker PASSED
+tests/test_dk_markdown_integration_audit.py::TestPersistenceIdempotency::test_sar_reimport_is_idempotent PASSED
+
+======================= 25 passed, 1 skipped in 10.44s ========================

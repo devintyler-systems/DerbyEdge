@@ -22,6 +22,7 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
 from src.models.scorer import score_race
+from src.services.runtime_score_preflight import RaceScorePreflightResult
 from src.utils.db import get_connection, get_derby_card_id
 
 
@@ -60,13 +61,22 @@ def main() -> int:
     card_id = args.card_id if args.card_id is not None else get_derby_card_id()
     if card_id is None:
         raise RuntimeError("No default Kentucky Derby card found — pass --card-id.")
-    card_meta = _load_card_metadata(card_id)
-
     if args.rebuild_features:
         from src.features.builder import build_features
         build_features(card_id=card_id)
 
     board = score_race(card_id=card_id)
+    if isinstance(board, RaceScorePreflightResult):
+        print("\n  Score status: BLOCKED_INELIGIBLE")
+        print(f"  inference_ran: {board.score_generated}")
+        print(f"  score_persisted: {board.score_persisted}")
+        print(f"  artifact_written: {board.artifact_written}")
+        print("  race-level reasons: " + "; ".join(board.race_level_reason_codes))
+        for entry_id, reasons in board.entry_level_reason_codes.items():
+            print(f"  entry_id={entry_id}: " + "; ".join(reasons))
+        return 2
+
+    card_meta = _load_card_metadata(card_id)
 
     stakes = card_meta["stakes_name"] or "Race"
     print(

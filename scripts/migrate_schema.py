@@ -100,6 +100,9 @@ def step_apply_schema(conn):
         ensure_v_entries_live,
         ensure_workouts_columns,
     )
+    from src.services.draftkings_markdown_intake import (
+        ensure_draftkings_markdown_intake_tables,
+    )
     ensure_score_runs_columns(conn)
     ensure_entry_scores_columns(conn)
     ensure_starter_observations(conn)
@@ -110,6 +113,7 @@ def step_apply_schema(conn):
     ensure_model_registry_columns(conn)
     ensure_v_entries_live(conn)
     ensure_race_eval_log(conn)
+    ensure_draftkings_markdown_intake_tables(conn)
     print("  [schema]  V1 DDL applied.")
 
 

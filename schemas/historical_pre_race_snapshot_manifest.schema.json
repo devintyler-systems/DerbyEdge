@@ -1,0 +1,54 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://derbyedge.local/schemas/historical_pre_race_snapshot_manifest.schema.json",
+  "title": "DerbyEdge Historical Pre-Race Snapshot Manifest",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "artifact_path_or_uri", "sha256", "source_provider", "parser_version",
+    "source_as_of_timestamp", "source_as_of_tier", "source_as_of_provenance",
+    "target_track_code", "target_race_date", "target_race_number",
+    "target_scheduled_post_timestamp", "target_surface", "target_distance_furlongs",
+    "expected_active_starter_count", "observed_active_starter_count",
+    "identity_reconciliation_status", "field_completeness_status", "feature_vector_status",
+    "raw_artifact_retained", "pre_race_fields_only", "outcome_reference",
+    "outcome_provenance_status"
+  ],
+  "properties": {
+    "artifact_path_or_uri": {"type": "string", "minLength": 1},
+    "sha256": {"type": "string", "pattern": "^[A-Fa-f0-9]{64}$"},
+    "source_provider": {"type": "string", "minLength": 1},
+    "parser_version": {"type": "string", "minLength": 1},
+    "source_as_of_timestamp": {"type": "string", "format": "date-time"},
+    "source_as_of_tier": {"type": "string", "enum": ["PROVEN", "OPERATOR_ATTESTED"]},
+    "source_as_of_provenance": {
+      "type": "string",
+      "enum": ["PUBLISHER_TIMESTAMP", "SYSTEM_CAPTURED", "OPERATOR_ATTESTED", "FILENAME_DERIVED", "UNKNOWN"]
+    },
+    "target_track_code": {"type": "string", "pattern": "^[A-Za-z0-9_-]{2,12}$"},
+    "target_race_date": {"type": "string", "format": "date"},
+    "target_race_number": {"type": "integer", "minimum": 1},
+    "target_scheduled_post_timestamp": {"type": "string", "format": "date-time"},
+    "target_surface": {"type": "string", "enum": ["dirt", "turf", "synthetic", "all_weather", "all-weather"]},
+    "target_distance_furlongs": {"type": "number", "exclusiveMinimum": 0},
+    "expected_active_starter_count": {"type": "integer", "minimum": 2},
+    "observed_active_starter_count": {"type": "integer", "minimum": 0},
+    "identity_reconciliation_status": {"type": "string", "enum": ["COMPLETE", "INCOMPLETE", "UNRECONCILED"]},
+    "field_completeness_status": {"type": "string", "enum": ["COMPLETE", "PARTIAL", "UNKNOWN"]},
+    "feature_vector_status": {"type": "string", "enum": ["COMPLETE", "PARTIAL", "UNKNOWN"]},
+    "raw_artifact_retained": {"type": "boolean"},
+    "pre_race_fields_only": {"type": "boolean"},
+    "outcome_reference": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["path_or_uri", "sha256", "source_provider", "parser_version"],
+      "properties": {
+        "path_or_uri": {"type": "string", "minLength": 1},
+        "sha256": {"type": "string", "pattern": "^[A-Fa-f0-9]{64}$"},
+        "source_provider": {"type": "string", "minLength": 1},
+        "parser_version": {"type": "string", "minLength": 1}
+      }
+    },
+    "outcome_provenance_status": {"type": "string", "enum": ["PROVEN", "OPERATOR_ATTESTED", "UNPROVEN", "MISSING"]}
+  }
+}

@@ -1,0 +1,41 @@
+{
+  "draft_status": "DRAFT_NOT_ELIGIBLE",
+  "_note": "Future-race paired-capture worksheet. This template intentionally FAILS the contract audit until every __OPERATOR_REQUIRED__ value is replaced and every count/flag is set from real evidence. It is NOT the final manifest: once complete, transcribe it into templates/historical_pre_race_snapshot_manifest.template.json and run scripts/audit_historical_snapshot_contract.py.",
+
+  "pre_race_artifact_path_or_uri": "__OPERATOR_REQUIRED__",
+  "pre_race_sha256": "__OPERATOR_REQUIRED_64_HEX_SHA256__",
+
+  "result_artifact_path_or_uri": "__OPERATOR_REQUIRED__",
+  "result_sha256": "__OPERATOR_REQUIRED_64_HEX_SHA256__",
+
+  "source_provider": "__OPERATOR_REQUIRED__",
+  "parser_version": "__OPERATOR_REQUIRED__",
+
+  "source_as_of_timestamp": "__OPERATOR_REQUIRED_ISO8601_WITH_TIMEZONE__",
+  "source_as_of_tier": "__OPERATOR_REQUIRED_PROVEN_OR_OPERATOR_ATTESTED__",
+  "source_as_of_provenance": "__OPERATOR_REQUIRED_PUBLISHER_TIMESTAMP_OR_SYSTEM_CAPTURED_OR_OPERATOR_ATTESTED__",
+
+  "target_track_code": "__OPERATOR_REQUIRED__",
+  "target_race_date": "__OPERATOR_REQUIRED_YYYY-MM-DD__",
+  "target_race_number": 0,
+  "target_scheduled_post_timestamp": "__OPERATOR_REQUIRED_ISO8601_WITH_TIMEZONE__",
+  "target_surface": "__OPERATOR_REQUIRED__",
+  "target_distance_furlongs": 0,
+
+  "expected_active_starter_count": 0,
+  "observed_active_starter_count": 0,
+  "identity_reconciliation_status": "__OPERATOR_REQUIRED_COMPLETE__",
+  "field_completeness_status": "__OPERATOR_REQUIRED_COMPLETE__",
+  "feature_vector_status": "__OPERATOR_REQUIRED_COMPLETE__",
+
+  "raw_artifact_retained": false,
+  "pre_race_fields_only": false,
+
+  "outcome_reference": {
+    "path_or_uri": "__OPERATOR_REQUIRED__",
+    "sha256": "__OPERATOR_REQUIRED_64_HEX_SHA256__",
+    "source_provider": "__OPERATOR_REQUIRED__",
+    "parser_version": "__OPERATOR_REQUIRED__"
+  },
+  "outcome_provenance_status": "__OPERATOR_REQUIRED_PROVEN_OR_OPERATOR_ATTESTED__"
+}

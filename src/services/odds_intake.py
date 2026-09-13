@@ -50,8 +50,8 @@ def market_eligibility(
     """Apply the current-market evidence contract.
 
     Morning line is eligible only as a weak prior. Live tote requires both a
-    timestamp and a known scheduled post timestamp, with capture strictly no
-    later than post. Historical off odds and unknown values are never eligible.
+    timestamp and a known scheduled post timestamp, with capture strictly
+    before post. Historical off odds and unknown values are never eligible.
     """
     normalized = (odds_type or "unknown").strip().lower()
     if normalized not in ODDS_TYPES:
@@ -71,7 +71,7 @@ def market_eligibility(
             return False, "live_tote_timestamp_not_utc"
     except (TypeError, ValueError):
         return False, "live_tote_invalid_timestamp"
-    if capture > post:
+    if capture >= post:
         return False, "live_tote_after_post"
     return True, "live_tote_pre_post"
 

@@ -1,0 +1,6 @@
+# Retained race-source fixtures are byte-level evidence, including whitespace.
+draftkings_racedata_pdfs/fixtures/*.md whitespace=-blank-at-eol
+draftkings_racedata_pdfs/fixtures/*.pdf binary
+
+# Preserve captured audit output verbatim.
+audit_run.txt whitespace=-blank-at-eol

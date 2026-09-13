@@ -96,7 +96,7 @@ def step_build_features() -> None:
 def step_score() -> None:
     print("\n[4/4] score")
     from src.models.scorer import score_race
-    board = score_race(card_id=None)
+    board = score_race(card_id=None, execution_mode="RETROSPECTIVE_DIAGNOSTIC")
     _record("score: ran", PASS, f"run completed, {len(board)} rows")
     return board
 
@@ -368,7 +368,7 @@ def checks_scoring_board() -> None:
 def checks_app_data_loaders() -> None:
     print("\n[checks] App data loaders")
     from src.utils.db import get_connection
-    import pickle
+    from src.models.trainer import load_model_artifact
 
     # Artifact exists and loads
     art_path = ROOT / "saved_models" / "derby_override_v1.pkl"
@@ -377,8 +377,7 @@ def checks_app_data_loaders() -> None:
 
     if art_path.exists():
         try:
-            with open(art_path, "rb") as fh:
-                art = pickle.load(fh)
+            art = load_model_artifact(art_path)
             ok = (
                 hasattr(art, "feature_importances")
                 and hasattr(art, "group_scores")
@@ -471,11 +470,10 @@ def checks_derby_override() -> None:
                lambda: (n_low >= 8, f"{n_low} low-confidence entries"))
 
     # Derby artifact model name
-    import pickle
+    from src.models.trainer import load_model_artifact
     art_path = ROOT / "saved_models" / "derby_override_v1.pkl"
     if art_path.exists():
-        with open(art_path, "rb") as fh:
-            art = pickle.load(fh)
+        art = load_model_artifact(art_path)
         _check("derby: artifact model_name is derby_override_v1",
                lambda: (art.model_name == "derby_override_v1", art.model_name))
 

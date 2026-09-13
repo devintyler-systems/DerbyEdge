@@ -1,0 +1,26 @@
+{
+  "draft_status": "DRAFT_NOT_ELIGIBLE",
+  "created_from": "EVIDENCE_LEDGER_ONLY",
+  "_note": "Single artifact-event evidence worksheet. This is NOT a manifest and cannot satisfy the historical snapshot contract. Fill the operator-supplied fields at capture time; deterministic identity + SHA-256 are auto-filled by scripts/record_forward_capture_evidence.py when the local artifact exists.",
+
+  "event_type": "__OPERATOR_REQUIRED_PRE_RACE_CAPTURE__OR__RESULT_CAPTURE__OR__MANUAL_NOTE__",
+  "candidate_key": "__OPTIONAL_TRACK|YYYY-MM-DD|Rn__WHEN_KNOWN__",
+
+  "artifact_path": "__OPERATOR_REQUIRED_FOR_CAPTURE_EVENTS__LOCAL_PATH__",
+  "artifact_sha256": "__AUTO_STREAMED_IF_LOCAL__ELSE_OPERATOR_DECLARED_64_HEX__",
+
+  "source_provider_candidate": "__OPTIONAL__AUTO_FROM_DK_CARD__",
+  "target_track_code_or_name": "__OPTIONAL__AUTO_FROM_ARTIFACT__",
+  "target_race_date": "__OPTIONAL_YYYY-MM-DD__AUTO_FROM_ARTIFACT_FILENAME_DERIVED__",
+  "target_race_number": 0,
+  "observed_wall_clock_post_display": "__OPTIONAL__AS_DISPLAYED_ON_CARD__NOT_A_TIMESTAMP__",
+
+  "source_as_of_timestamp": "__OPERATOR_REQUIRED_FOR_CAPTURE__ISO8601__",
+  "source_as_of_timezone": "__OPERATOR_REQUIRED_FOR_CAPTURE__IANA_NAME_OR_UTC_OFFSET__",
+  "source_as_of_tier": "__OPERATOR_REQUIRED_FOR_CAPTURE__PROVEN__OR__OPERATOR_ATTESTED__",
+  "source_as_of_provenance": "__OPERATOR_REQUIRED_FOR_CAPTURE__PUBLISHER_TIMESTAMP__OR__SYSTEM_CAPTURED__OR__OPERATOR_ATTESTED__",
+
+  "operator_id": "__OPERATOR_REQUIRED__",
+  "note": "__OPERATOR_REQUIRED_FOR_MANUAL_NOTE__FREE_TEXT__",
+  "raw_bytes_preserved": false
+}

@@ -1,23 +1,23 @@
 DerbyEdge V0 -> V1 Migration Report
 ============================================
-Horses migrated    : 20
+Horses migrated    : 0
 Prediction rows    : 0
 
 V1 Table Row Counts
 --------------------------------------------
-  tracks                     1
-  race_cards                 1
-  horses                    20
-  people                    53
-  entries                   20
-  horse_starts               0
-  workouts                  77
-  odds_snapshots             0
+  tracks                    22
+  race_cards                60
+  horses                   560
+  people                   610
+  entries                  543
+  horse_starts             200
+  workouts                1173
+  odds_snapshots            30
   track_bias                 0
   trip_flags                 0
-  model_registry             0
-  score_runs                 0
-  entry_scores               0
+  model_registry            10
+  score_runs                88
+  entry_scores             553
 
 Breaking Changes
 --------------------------------------------

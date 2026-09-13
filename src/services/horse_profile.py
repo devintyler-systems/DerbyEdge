@@ -13,6 +13,7 @@ official Beyer or TimeForm speed figures.
 from __future__ import annotations
 
 import sqlite3
+import json
 from typing import Any
 
 
@@ -80,7 +81,7 @@ def get_horse_profile(conn: sqlite3.Connection, entry_id: int) -> dict[str, Any]
                e.dirt_starts, e.dirt_wins, e.dist_starts, e.dist_wins,
                e.last_race_days, e.last_race_finish,
                e.stamina_index, e.pace_style,
-               h.sire, h.dam,
+               h.sire, h.dam, h.dam_sire,
                p.full_name AS owner
         FROM entries e
         JOIN  horses h ON e.horse_id  = h.horse_id
@@ -89,6 +90,24 @@ def get_horse_profile(conn: sqlite3.Connection, entry_id: int) -> dict[str, Any]
     """, (entry_id,))
     if not e:
         return {}
+
+    # A DK profile is a pre-race snapshot, tied to both card and parser/source
+    # provenance.  It supplements stable horse identity fields without making
+    # an unproven source snapshot permanent identity.
+    try:
+        snapshot = _row(conn, """
+            SELECT breeder_name, age, sex_raw, color, sire, dam, dam_sire,
+                   record_splits_json, source_as_of
+            FROM dk_horse_profile_snapshots
+            WHERE horse_id=? AND card_id=?
+            ORDER BY snapshot_id DESC LIMIT 1
+        """, (e["horse_id"], e["card_id"]))
+    except Exception:
+        snapshot = {}
+    try:
+        record_splits = json.loads(snapshot.get("record_splits_json") or "{}")
+    except (TypeError, ValueError):
+        record_splits = {}
 
     # ── firstbet_career_stats (table may not exist on old DBs) ──────────────
     try:
@@ -110,6 +129,25 @@ def get_horse_profile(conn: sqlite3.Connection, entry_id: int) -> dict[str, Any]
         """, (entry_id,))
     except Exception:
         pp = []
+
+    # Markdown imports use canonical horse_starts rather than the 1/ST table.
+    # They are strictly pre-target-date and scratches are retained separately.
+    if not pp:
+        try:
+            pp = _rows(conn, """
+                SELECT start_date AS race_date, track_code, finish_position,
+                       field_size_last AS field_size, surface, distance_furlongs AS distance_text,
+                       race_class_raw AS race_class, trip_comment
+                FROM horse_starts hs
+                WHERE hs.horse_id=? AND hs.is_scratch=0
+                  AND hs.finish_position IS NOT NULL
+                  AND date(hs.start_date) < (
+                      SELECT date(card_date) FROM race_cards WHERE card_id=?
+                  )
+                ORDER BY date(hs.start_date) DESC LIMIT 5
+            """, (e["horse_id"], e["card_id"]))
+        except Exception:
+            pp = []
 
     # ── Derive counts from pp_starts -----------------------------------------
     pp_v      = [r for r in pp if r.get("finish_position") is not None]
@@ -190,9 +228,16 @@ def get_horse_profile(conn: sqlite3.Connection, entry_id: int) -> dict[str, Any]
         "recent_5_wins": fb.get("recent_5_wins"),
         "recent_5_itm":  fb.get("recent_5_itm"),
         # Bloodstock (from horses table; may be None for seed-only records)
-        "sire":  e.get("sire"),
-        "dam":   e.get("dam"),
+        "sire":  snapshot.get("sire") or e.get("sire"),
+        "dam":   snapshot.get("dam") or e.get("dam"),
+        "dam_sire": snapshot.get("dam_sire") or e.get("dam_sire"),
         "owner": e.get("owner"),
+        "breeder": snapshot.get("breeder_name"),
+        "age": snapshot.get("age"),
+        "sex": snapshot.get("sex_raw"),
+        "color": snapshot.get("color"),
+        "record_splits": record_splits,
+        "source_as_of": snapshot.get("source_as_of"),
         # Raw pp rows (list[dict], most-recent = index 0)
         "pp_starts": pp,
     }

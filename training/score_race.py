@@ -2,7 +2,8 @@
 training/score_race.py
 
 Score a pre-race starter CSV using the trained win-probability model.
-Returns model_win_prob, fair_odds (formatted), and within-race rank.
+This is an offline evaluation utility, not the DerbyEdge runtime scorer: its
+output is explicitly marked non-runtime/non-actionable.
 
 The CSV must contain at minimum:
     horse, post, ml_odds, pace_fit, form_score, field_size, distance_furlongs
@@ -57,6 +58,11 @@ def main() -> None:
         sys.exit(1)
 
     scored = score_dataframe(df, model, cal, feat_cols)
+    # Keep experiment output distinguishable from production scoring without
+    # changing any numeric value or invoking runtime persistence controls.
+    scored["execution_mode"] = "RETROSPECTIVE_DIAGNOSTIC"
+    scored["runtime_actionable"] = False
+    scored["output_status"] = "NON_RUNTIME_EXPERIMENT"
 
     cols = ["horse", "post", "model_win_prob", "fair_odds_fmt", "model_rank"]
     print(scored[[c for c in cols if c in scored.columns]].to_string(index=False))

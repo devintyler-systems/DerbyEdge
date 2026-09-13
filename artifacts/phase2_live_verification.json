@@ -1,0 +1,146 @@
+{
+  "SAR R10": {
+    "card_id": 70,
+    "ingestion_run_id": "ing-c780c57faa12-5fccb3f15c",
+    "upload_sha12": "c780c57faa12",
+    "parser_pipeline_version": "dkhorse_sections_v1",
+    "source_format": "dkhorse_program_pdf",
+    "parser_selected": "draftkings_pdf",
+    "parse_active": 12,
+    "parse_found": 63,
+    "parse_linked": 46,
+    "parse_idres": 1.0,
+    "render_active": 12,
+    "render_found": 63,
+    "render_linked": 46,
+    "render_idres": 1.0,
+    "render_run_id": "ing-c780c57faa12-5fccb3f15c",
+    "enrichment_state": "ENRICHED",
+    "hs_written": 63,
+    "wo_written": 206,
+    "linked_history": 9,
+    "resolved_no_history": 3,
+    "enr_version": "dk_enrich_v1",
+    "canonical_horse_starts": 63,
+    "horse_starts_run_ids": [
+      "ing-c780c57faa12-5fccb3f15c"
+    ],
+    "feature_store_rows": 12,
+    "feature_store_run_ids": [
+      "ing-c780c57faa12-5fccb3f15c"
+    ],
+    "card_bindings": 1,
+    "run_mode": "MODEL_READY_LIMITED",
+    "guidance": "Ready for scoring.",
+    "dk_unavailable_feature_families": [
+      "field_adjusted_form",
+      "fractional_pace",
+      "speed_figures"
+    ],
+    "dk_confidence_penalty": "limited_source_forecast",
+    "score_gate": "ELIGIBLE",
+    "reasons": [
+      "Forecast uses only DraftKings Horse PP-supported features.",
+      "No live odds supplied; edge, fair odds comparison, and bet tags remain disabled.",
+      "FEATURE_DEGENERACY_WARNING: pace_fit is constant across entries.",
+      "FEATURE_DEGENERACY_WARNING: form is constant across entries.",
+      "PACE_UNAVAILABLE: pace_fit_score is null for the active field and excluded from the forecast."
+    ]
+  },
+  "IND R5": {
+    "card_id": 71,
+    "ingestion_run_id": "ing-12b268f4c77f-cff3b14d08",
+    "upload_sha12": "12b268f4c77f",
+    "parser_pipeline_version": "dkhorse_sections_v1",
+    "source_format": "dkhorse_program_pdf",
+    "parser_selected": "draftkings_pdf",
+    "parse_active": 12,
+    "parse_found": 93,
+    "parse_linked": 71,
+    "parse_idres": 1.0,
+    "render_active": 12,
+    "render_found": 93,
+    "render_linked": 71,
+    "render_idres": 1.0,
+    "render_run_id": "ing-12b268f4c77f-cff3b14d08",
+    "enrichment_state": "ENRICHED",
+    "hs_written": 93,
+    "wo_written": 281,
+    "linked_history": 12,
+    "resolved_no_history": 0,
+    "enr_version": "dk_enrich_v1",
+    "canonical_horse_starts": 93,
+    "horse_starts_run_ids": [
+      "ing-12b268f4c77f-cff3b14d08"
+    ],
+    "feature_store_rows": 12,
+    "feature_store_run_ids": [
+      "ing-12b268f4c77f-cff3b14d08"
+    ],
+    "card_bindings": 1,
+    "run_mode": "MODEL_READY_LIMITED",
+    "guidance": "Ready for scoring.",
+    "dk_unavailable_feature_families": [
+      "field_adjusted_form",
+      "fractional_pace",
+      "speed_figures"
+    ],
+    "dk_confidence_penalty": "limited_source_forecast",
+    "score_gate": "ELIGIBLE",
+    "reasons": [
+      "Forecast uses only DraftKings Horse PP-supported features.",
+      "No live odds supplied; edge, fair odds comparison, and bet tags remain disabled.",
+      "FEATURE_DEGENERACY_WARNING: pace_fit is constant across entries.",
+      "FEATURE_DEGENERACY_WARNING: form is constant across entries.",
+      "PACE_UNAVAILABLE: pace_fit_score is null for the active field and excluded from the forecast."
+    ]
+  },
+  "DMR R4": {
+    "card_id": 69,
+    "ingestion_run_id": "ing-60311f168ff1-0c3e5c1bdd",
+    "upload_sha12": "60311f168ff1",
+    "parser_pipeline_version": "dkhorse_sections_v1",
+    "source_format": "dkhorse_program_pdf",
+    "parser_selected": "draftkings_pdf",
+    "parse_active": 8,
+    "parse_found": 86,
+    "parse_linked": 81,
+    "parse_idres": 1.0,
+    "render_active": 8,
+    "render_found": 86,
+    "render_linked": 81,
+    "render_idres": 1.0,
+    "render_run_id": "ing-60311f168ff1-0c3e5c1bdd",
+    "enrichment_state": "ENRICHED",
+    "hs_written": 86,
+    "wo_written": 319,
+    "linked_history": 8,
+    "resolved_no_history": 0,
+    "enr_version": "dk_enrich_v1",
+    "canonical_horse_starts": 86,
+    "horse_starts_run_ids": [
+      "ing-60311f168ff1-0c3e5c1bdd"
+    ],
+    "feature_store_rows": 8,
+    "feature_store_run_ids": [
+      "ing-60311f168ff1-0c3e5c1bdd"
+    ],
+    "card_bindings": 1,
+    "run_mode": "MODEL_READY_LIMITED",
+    "guidance": "Ready for scoring.",
+    "dk_unavailable_feature_families": [
+      "field_adjusted_form",
+      "fractional_pace",
+      "speed_figures"
+    ],
+    "dk_confidence_penalty": "limited_source_forecast",
+    "score_gate": "ELIGIBLE",
+    "reasons": [
+      "Forecast uses only DraftKings Horse PP-supported features.",
+      "No live odds supplied; edge, fair odds comparison, and bet tags remain disabled.",
+      "FEATURE_DEGENERACY_WARNING: pace_fit is constant across entries.",
+      "FEATURE_DEGENERACY_WARNING: form is constant across entries.",
+      "PACE_UNAVAILABLE: pace_fit_score is null for the active field and excluded from the forecast."
+    ]
+  }
+}

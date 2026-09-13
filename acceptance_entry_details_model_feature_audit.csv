@@ -1,0 +1,17 @@
+﻿Feature,Value,Status,Source,Evidence,Reason,Weight
+speed_best_3,,PLACEHOLDER,seeded/default,0,no runtime evidence for this feature,0.1
+pace_fit_score,,UNAVAILABLE,seeded/default,0,pace calls/sectionals are unavailable; no run-style evidence,0.0975
+distance_fit,0.2,DERIVED,draftkings_markdown,8,,0.0935
+speed_last,,UNAVAILABLE,seeded/default,0,official speed or sectional source is unavailable,0.0875
+surface_fit,0.2857,DERIVED,draftkings_markdown,8,,0.0765
+derby_override_score,,PLACEHOLDER,seeded/default,0,no runtime evidence for this feature,0.07
+work_readiness_score,0.585,DERIVED,draftkings_markdown,35,,0.065
+form_cycle_idx,0.315,DERIVED,draftkings_markdown,8,,0.063
+beyer_last,,UNAVAILABLE,seeded/default,0,official speed or sectional source is unavailable,0.0625
+class_delta,-0.9184,DERIVED,draftkings_markdown,1,,0.054
+traffic_resilience_proxy,,PLACEHOLDER,seeded/default,0,no runtime evidence for this feature,0.0525
+market_implied_prob,0.0476,DERIVED,draftkings_markdown,1,,0.05
+trainer_intent_proxy,,PLACEHOLDER,seeded/default,0,no runtime evidence for this feature,0.039
+horses_beaten_pct_last,,PLACEHOLDER,seeded/default,0,no runtime evidence for this feature,0.036
+career_win_pct,0.125,DERIVED,draftkings_markdown,8,,0.027
+finish_energy_proxy,,PLACEHOLDER,seeded/default,0,no runtime evidence for this feature,0.026
