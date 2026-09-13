@@ -399,13 +399,24 @@ def main() -> int:
     ap = argparse.ArgumentParser(description="DerbyEdge V1 feature store builder")
     ap.add_argument("--card-id", type=int, metavar="ID",
                     help="card_id to build (default: first Kentucky Derby card)")
+    ap.add_argument("--twinspires-summary", type=Path,
+                    help="TwinSpires summary explicitly associated with --card-id")
+    ap.add_argument("--twinspires-as-of",
+                    help="explicit timezone-aware source observation time (required unless embedded in file)")
     args = ap.parse_args()
+    if args.twinspires_summary and args.card_id is None:
+        ap.error("--twinspires-summary requires --card-id")
+    if args.twinspires_as_of and not args.twinspires_summary:
+        ap.error("--twinspires-as-of requires --twinspires-summary")
 
     print("\nDerbyEdge feature store build")
     print("=" * 44)
 
     # 1. Build features and persist to DB
-    feat_df = build_features(card_id=args.card_id)
+    feat_df = build_features(
+        card_id=args.card_id, twinspires_summary=args.twinspires_summary,
+        twinspires_as_of=args.twinspires_as_of,
+    )
     print(f"  [builder]  {len(feat_df)} entries, {len(feat_df.columns)} columns")
 
     feature_cols = [

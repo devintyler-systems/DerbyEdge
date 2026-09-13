@@ -56,6 +56,7 @@ CREATE TABLE IF NOT EXISTS horses (
     name         TEXT    NOT NULL UNIQUE COLLATE NOCASE,
     sire         TEXT,
     dam          TEXT,
+    dam_sire     TEXT,
     year_foaled  INTEGER,
     sex          TEXT    CHECK(sex IN ('C','F','H','G','R','M') OR sex IS NULL),
     color        TEXT,
@@ -92,7 +93,9 @@ CREATE TABLE IF NOT EXISTS entries (
     jockey_id         INTEGER          REFERENCES people(person_id),
     owner_id          INTEGER          REFERENCES people(person_id),
     post_position     INTEGER NOT NULL,
+    program_number    TEXT,
     weight            INTEGER NOT NULL DEFAULT 126,
+    medication_weight_equipment TEXT,
     morning_line_odds REAL    NOT NULL CHECK(morning_line_odds > 0),
     morning_line_prob REAL    NOT NULL
                       GENERATED ALWAYS AS (ROUND(1.0 / (morning_line_odds + 1.0), 6)) STORED,
@@ -124,6 +127,61 @@ CREATE TABLE IF NOT EXISTS entries (
     UNIQUE(card_id, horse_id)
 );
 
+-- Validated DraftKings Markdown provenance. Canonical race/entry/history data
+-- remains in the tables above; this is append-only import audit metadata.
+CREATE TABLE IF NOT EXISTS dk_markdown_imports (
+    import_id INTEGER PRIMARY KEY AUTOINCREMENT,
+    file_sha256 TEXT NOT NULL UNIQUE,
+    source_filename TEXT NOT NULL,
+    source_path TEXT,
+    source_format TEXT NOT NULL,
+    parser_version TEXT NOT NULL,
+    validation_status TEXT NOT NULL,
+    validation_json TEXT NOT NULL,
+    scoring_as_of TEXT NOT NULL,
+    card_id INTEGER REFERENCES race_cards(card_id),
+    parsed_runner_count INTEGER NOT NULL,
+    past_performance_count INTEGER NOT NULL,
+    workout_count INTEGER NOT NULL,
+    imported_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
+);
+
+CREATE TABLE IF NOT EXISTS dk_markdown_import_revisions (
+    revision_id INTEGER PRIMARY KEY AUTOINCREMENT,
+    file_sha256 TEXT NOT NULL,
+    parser_version TEXT NOT NULL,
+    source_filename TEXT NOT NULL,
+    source_path TEXT,
+    source_format TEXT NOT NULL,
+    validation_status TEXT NOT NULL,
+    validation_json TEXT NOT NULL,
+    scoring_as_of TEXT NOT NULL,
+    card_id INTEGER REFERENCES race_cards(card_id),
+    imported_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+    UNIQUE(file_sha256, parser_version)
+);
+
+CREATE TABLE IF NOT EXISTS dk_horse_profile_snapshots (
+    snapshot_id INTEGER PRIMARY KEY AUTOINCREMENT,
+    horse_id INTEGER NOT NULL REFERENCES horses(horse_id),
+    card_id INTEGER NOT NULL REFERENCES race_cards(card_id),
+    file_sha256 TEXT NOT NULL,
+    parser_version TEXT NOT NULL,
+    source_as_of TEXT NOT NULL,
+    owner_name TEXT,
+    breeder_name TEXT,
+    age INTEGER,
+    sex_raw TEXT,
+    color TEXT,
+    sire TEXT,
+    dam TEXT,
+    dam_sire TEXT,
+    raw_profile TEXT,
+    record_splits_json TEXT NOT NULL,
+    created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+    UNIQUE(horse_id, card_id, file_sha256, parser_version)
+);
+
 -- ============================================================
 -- 6. HORSE_STARTS
 --    Official result for one horse in one race.
@@ -152,6 +210,10 @@ CREATE TABLE IF NOT EXISTS horse_starts (
     source_provider    TEXT,
     source_document_id TEXT,
     source_row_id      TEXT,
+    surface_condition_raw TEXT,
+    program_or_post    TEXT,
+    historical_jockey  TEXT,
+    trip_comment       TEXT,
     created_at         TEXT    NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
 );
 
@@ -177,6 +239,10 @@ CREATE TABLE IF NOT EXISTS workouts (
     source_provider   TEXT,
     source_document_id TEXT,
     source_row_id     TEXT,
+    surface_condition_raw TEXT,
+    raw_time          TEXT,
+    workout_designation TEXT,
+    rank_denominator  INTEGER,
     created_at        TEXT    NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
 );
 
@@ -436,6 +502,8 @@ CREATE TABLE IF NOT EXISTS feature_store (
     -- Race shape (computed across full field)
     early_intent                REAL,   -- IMPLEMENTED: pace_style -> 0-1 scale
     run_style_bucket            TEXT,   -- IMPLEMENTED: pace_style pass-through
+    run_style_code              TEXT,   -- observed TwinSpires E, E/P, P, or S code
+    early_speed_points          INTEGER,-- observed TwinSpires run-style suffix
     run_style_evidence_count    INTEGER,-- 1/ST trip-comment terms supporting style
     run_style_source            TEXT,   -- e.g. 1stbet_trip_comment
     pace_pressure               REAL,   -- IMPLEMENTED: (front+presser)/field_size
@@ -496,6 +564,13 @@ CREATE TABLE IF NOT EXISTS feature_store (
     dk_history_start_count      INTEGER,
     dk_workout_count            INTEGER,
     feature_source_mix          TEXT,
+    feature_lineage_json        TEXT,
+    last_race_date              TEXT,
+    last_finish_position        INTEGER,
+    last_beaten_lengths         REAL,
+    days_since_last_start       INTEGER,
+    workout_rank_percentile     REAL,
+    last_workout_date           TEXT,
     market_implied_prob_source  TEXT,
     UNIQUE(card_id, entry_id)
 );

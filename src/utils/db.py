@@ -216,6 +216,10 @@ def ensure_horse_starts_columns(conn: sqlite3.Connection) -> None:
         ("source_provider", "TEXT"),
         ("source_document_id", "TEXT"),
         ("source_row_id", "TEXT"),
+        ("surface_condition_raw", "TEXT"),
+        ("program_or_post", "TEXT"),
+        ("historical_jockey", "TEXT"),
+        ("trip_comment", "TEXT"),
     ]
     changed = False
     for name, kind in additions:
@@ -233,6 +237,10 @@ def ensure_workouts_columns(conn: sqlite3.Connection) -> None:
         ("source_provider", "TEXT"),
         ("source_document_id", "TEXT"),
         ("source_row_id", "TEXT"),
+        ("surface_condition_raw", "TEXT"),
+        ("raw_time", "TEXT"),
+        ("workout_designation", "TEXT"),
+        ("rank_denominator", "INTEGER"),
     ]
     changed = False
     for name, kind in additions:
@@ -291,6 +299,8 @@ def ensure_feature_store_columns(conn: sqlite3.Connection) -> None:
         ("morning_line_delta",       "REAL"),
         ("run_style_evidence_count", "INTEGER"),
         ("run_style_source",         "TEXT"),
+        ("run_style_code",           "TEXT"),
+        ("early_speed_points",       "INTEGER"),
         ("pace_band",                "TEXT"),
         ("classified_runner_count",  "INTEGER"),
         ("active_runner_count",      "INTEGER"),
@@ -325,6 +335,13 @@ def ensure_feature_store_columns(conn: sqlite3.Connection) -> None:
         ("dk_history_start_count", "INTEGER"),
         ("dk_workout_count", "INTEGER"),
         ("feature_source_mix", "TEXT"),
+        ("feature_lineage_json", "TEXT"),
+        ("last_race_date", "TEXT"),
+        ("last_finish_position", "INTEGER"),
+        ("last_beaten_lengths", "REAL"),
+        ("days_since_last_start", "INTEGER"),
+        ("workout_rank_percentile", "REAL"),
+        ("last_workout_date", "TEXT"),
         ("market_implied_prob_source", "TEXT"),
     ]
     changed = False
@@ -502,6 +519,10 @@ def _migrate_db() -> None:
     ensure_model_registry_columns(conn)
     ensure_v_entries_live(conn)
     ensure_race_eval_log(conn)
+    # Local import avoids a module-level dependency from DB primitives back to
+    # a source-specific intake adapter.
+    from src.services.draftkings_markdown_intake import ensure_draftkings_markdown_intake_tables
+    ensure_draftkings_markdown_intake_tables(conn)
     conn.close()
 
 

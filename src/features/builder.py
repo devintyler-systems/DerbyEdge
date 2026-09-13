@@ -11,6 +11,7 @@ Feature tiers used throughout this module and in feature_catalog.csv:
 """
 
 import datetime
+import json
 import math
 import re
 from pathlib import Path
@@ -388,6 +389,8 @@ def _entry_features(row: pd.Series, field_df: pd.DataFrame) -> dict:
         "traffic_resilience_proxy":    traffic_resilience_proxy,
         "early_intent":                early_intent,
         "run_style_bucket":            run_style_bucket,
+        "run_style_code":              None,
+        "early_speed_points":          None,
         "run_style_evidence_count":    0,
         "run_style_source":            None,
         "speed_fig_adj":               None,   # filled in second pass
@@ -444,6 +447,12 @@ def _entry_features(row: pd.Series, field_df: pd.DataFrame) -> dict:
         "dk_history_start_count":      0,
         "dk_workout_count":            0,
         "feature_source_mix":          "seed",
+        "last_race_date":              None,
+        "last_finish_position":         None,
+        "last_beaten_lengths":          None,
+        "days_since_last_start":        None,
+        "workout_rank_percentile":      None,
+        "last_workout_date":            None,
     }
 
 
@@ -985,6 +994,14 @@ def _canonical_history_overlay(feat_df: pd.DataFrame, card_id: int, conn) -> pd.
             valid = valid[
                 pd.to_numeric(valid["finish_position"], errors="coerce").notna()
             ]
+            # Internal lineage-only counters.  They are removed before the
+            # feature frame is persisted and therefore cannot affect scoring.
+            # Completed starts are the evidence used by the last-race,
+            # layoff, and form overlays below.
+            dk_completed = valid[
+                valid["source_provider"].fillna("").astype(str).str.startswith("draftkings")
+            ]
+            result.at[idx, "_dk_completed_start_count"] = int(len(dk_completed))
             finish_values = pd.to_numeric(valid["finish_position"], errors="coerce")
             field_values = pd.to_numeric(valid["field_size_last"], errors="coerce")
             usable = valid[
@@ -1050,6 +1067,25 @@ def _canonical_history_overlay(feat_df: pd.DataFrame, card_id: int, conn) -> pd.
             latest = valid.sort_values("_date", ascending=False).head(1)
             if not latest.empty:
                 last = latest.iloc[0]
+                latest_is_dk = str(last.get("source_provider") or "").startswith("draftkings")
+                if latest_is_dk:
+                    # One canonical row directly supplies each last-race fact
+                    # and the layoff derivation.
+                    result.at[idx, "_dk_latest_start_evidence_count"] = 1
+                last_days = int(last["_days"])
+                last_finish = _f(last.get("finish_position"))
+                result.at[idx, "last_race_date"] = last["_date"].isoformat()
+                result.at[idx, "days_since_last_start"] = last_days
+                result.at[idx, "layoff_days"] = last_days
+                result.at[idx, "last_finish_position"] = int(last_finish) if last_finish is not None else None
+                result.at[idx, "last_beaten_lengths"] = _f(last.get("lengths_behind"))
+                # Re-evaluate only with the same existing formula now that an
+                # actual pre-race completed start is available.
+                career_itm = _f(result.at[idx, "career_itm_pct"])
+                if career_itm is not None and last_finish is not None:
+                    result.at[idx, "form_cycle_idx"] = round(
+                        0.6 * career_itm + 0.4 * _clamp(1.0 - (last_finish - 1.0) / 10.0), 4
+                    )
                 last_label = last.get("race_class_raw")
                 last_rank = _class_rank(last_label)
                 same_circuit = str(last.get("track_code") or "").upper() == today_track
@@ -1058,6 +1094,8 @@ def _canonical_history_overlay(feat_df: pd.DataFrame, card_id: int, conn) -> pd.
                         (last_rank - today_class_rank) / 100.0, 4
                     )
                     result.at[idx, "class_delta_confidence"] = "conditioned_same_circuit"
+                    if latest_is_dk:
+                        result.at[idx, "_dk_class_start_evidence_count"] = 1
                 result.at[idx, "last_class_label_raw"] = last_label
             result.at[idx, "today_class_label_raw"] = today_class_raw
 
@@ -1090,6 +1128,33 @@ def _canonical_history_overlay(feat_df: pd.DataFrame, card_id: int, conn) -> pd.
             hw["_date"] = pd.to_datetime(hw["workout_date"], errors="coerce").dt.date
             hw = hw[hw["_date"].notna()]
             hw["_days"] = hw["_date"].map(lambda value: (target_date - value).days)
+            # Rank evidence is independent of the 60-day readiness window.
+            # Use the most recent five pre-race rows with both persisted rank
+            # components, exactly as they were captured from DK (for example
+            # ``95 of 115`` -> source_rank=95, rank_denominator=115).
+            rank_rows = hw.copy()
+            rank_rows["_rank_numerator"] = pd.to_numeric(rank_rows["source_rank"], errors="coerce")
+            rank_rows["_rank_denominator"] = pd.to_numeric(rank_rows["rank_denominator"], errors="coerce")
+            rank_rows = rank_rows[
+                rank_rows["_rank_numerator"].notna()
+                & rank_rows["_rank_denominator"].notna()
+                & (rank_rows["_rank_denominator"] > 0)
+                & (rank_rows["_rank_numerator"] >= 0)
+                & (rank_rows["_rank_numerator"] <= rank_rows["_rank_denominator"])
+            ].sort_values("_date", ascending=False).head(5)
+            result.at[idx, "_workout_rank_evidence_count"] = int(len(rank_rows))
+            if not rank_rows.empty:
+                rank_percentiles = 1.0 - (
+                    rank_rows["_rank_numerator"] / rank_rows["_rank_denominator"]
+                )
+                result.at[idx, "workout_rank_percentile"] = round(
+                    _clamp(float(rank_percentiles.mean())), 4
+                )
+            elif hw["source_provider"].fillna("").astype(str).str.startswith("draftkings").any():
+                # A DK workout exists but its rank components did not survive
+                # persistence.  Keep the numerical feature unavailable and
+                # make the lineage failure explicit.
+                result.at[idx, "_workout_rank_missing_reason"] = "rank columns not persisted"
             valid60 = hw[
                 (hw["_days"] >= 0) & (hw["_days"] <= 60)
                 & pd.to_numeric(hw["time_seconds"], errors="coerce").notna()
@@ -1102,6 +1167,7 @@ def _canonical_history_overlay(feat_df: pd.DataFrame, card_id: int, conn) -> pd.
             if not valid60.empty:
                 last = valid60.iloc[-1]
                 days = int(last["_days"])
+                result.at[idx, "last_workout_date"] = last["_date"].isoformat()
                 result.at[idx, "days_since_last_workout"] = result.at[idx, "days_since_last_work"] = days
                 recency = math.exp(-days / 30.0)
                 cadence = _clamp(count30 / 3.0)
@@ -1143,15 +1209,169 @@ def _canonical_history_overlay(feat_df: pd.DataFrame, card_id: int, conn) -> pd.
 
         sources = [str(result.at[idx, "feature_source_mix"] or "seed")]
         if int(result.at[idx, "dk_history_start_count"] or 0) or int(result.at[idx, "dk_workout_count"] or 0):
-            sources.append("draftkings")
+            # A validated DK overlay replaces the neutral seed-only lineage;
+            # it does not claim that source-owned features came from the seed.
+            sources = [source for source in sources if source not in {"seed", "source_neutral"}]
+            sources.append("draftkings_markdown")
         result.at[idx, "feature_source_mix"] = ",".join(dict.fromkeys(sources))
     return result
+
+
+def _feature_lineage_json(row: pd.Series) -> str:
+    """Runtime lineage, not the static feature-catalog implementation tier.
+
+    The model continues to receive its existing feature frame unchanged.  This
+    audit makes a neutral seed/default visibly distinct from evidence actually
+    observed in the active card's canonical history and workouts.
+    """
+    def _evidence_int(value: object) -> int:
+        if value is None or (isinstance(value, float) and math.isnan(value)):
+            return 0
+        return int(value)
+
+    dk_starts = _evidence_int(row.get("dk_history_start_count"))
+    dk_workouts = _evidence_int(row.get("dk_workout_count"))
+    dk_completed_starts = _evidence_int(row.get("_dk_completed_start_count"))
+    dk_latest_start = _evidence_int(row.get("_dk_latest_start_evidence_count"))
+    dk_class_start = _evidence_int(row.get("_dk_class_start_evidence_count"))
+    workout_rank_evidence = _evidence_int(row.get("_workout_rank_evidence_count"))
+    source_mix = str(row.get("feature_source_mix") or "seed")
+    source = "draftkings_markdown" if "draftkings_markdown" in source_mix else "seeded/default"
+    evidence_features = {
+        "dk_history_start_count", "starts_last_90d", "recent_finish_percentile_w",
+        "recent_finish_evidence_count", "distance_fit", "surface_fit", "distance_fit_eb",
+        "surface_fit_eb", "distance_surface_start_count", "historical_scratch_rate",
+        "days_since_last_start", "last_race_days", "last_race_finish",
+    }
+    direct_history_features = {
+        "last_race_date", "last_finish_position", "last_beaten_lengths",
+    }
+    derived_history_features = {
+        "layoff_days", "form_cycle_idx", "career_win_pct", "career_itm_pct",
+        "class_delta_last_to_today",
+    }
+    workout_features = {
+        "dk_workout_count", "days_since_last_workout", "days_since_last_work",
+        "workout_cadence_30d", "workout_count_30d", "work_readiness_score",
+        "workout_readiness_score_v2", "readiness_coverage", "workout_data_source",
+        "workout_rank_percentile", "last_workout_date",
+    }
+    # These counts are themselves direct observations, rather than features
+    # that merely happen to be calculated from a history-derived value.
+    count_backed_features = {
+        "distance_fit_n", "surface_fit_n", "surface_distance_start_count",
+        "historical_scratch_n", "prior_publicness_n",
+    }
+    # These values are calculated from the current card's persisted entries.
+    # They require no historical-start record, so treating them as a historical
+    # PLACEHOLDER makes a valid current-card value look unsupported.
+    current_card_derived_features = {
+        "market_implied_prob", "market_implied_prob_source", "morning_line_rank",
+        "morning_line_delta", "class_level", "class_delta", "class_delta_v2",
+        "publicness_score", "public_underlay_penalty",
+    }
+    unsupported = {"speed_last", "speed_best", "speed_avg", "beyer_last", "pace_fit_score"}
+    lineage = []
+    for name, value in row.items():
+        if name in {"feature_lineage_json", "entry_id", "horse_id", "card_id", "horse_name", "post_position", "build_ts"}:
+            continue
+        if isinstance(value, float) and math.isnan(value):
+            value = None
+        if name in count_backed_features:
+            evidence_count = _evidence_int(value)
+        elif name == "prior_publicness":
+            evidence_count = _evidence_int(row.get("prior_publicness_n"))
+        elif name == "feature_source_mix":
+            evidence_count = dk_starts + dk_workouts
+        elif name in {"run_style_code", "early_speed_points", "run_style_bucket", "early_intent", "pace_fit_score", "pace_pressure", "collapse_risk", "collapse_risk_v2", "lone_speed_edge"} and row.get("run_style_source") == "twinspires":
+            evidence_count = _evidence_int(row.get("run_style_evidence_count")) if value is not None else 0
+        elif name in current_card_derived_features:
+            evidence_count = 1 if value is not None else 0
+        elif name in direct_history_features:
+            evidence_count = dk_latest_start
+        elif name == "class_delta_last_to_today":
+            evidence_count = dk_class_start
+        elif name in {"layoff_days", "form_cycle_idx", "career_win_pct", "career_itm_pct"}:
+            evidence_count = dk_completed_starts
+        elif name == "workout_rank_percentile":
+            evidence_count = workout_rank_evidence
+        else:
+            evidence_count = dk_workouts if name in workout_features else dk_starts if name in evidence_features else 0
+        status = "DERIVED" if evidence_count else "PLACEHOLDER"
+        reason = None
+        feature_source = source if evidence_count else "seeded/default"
+        if value is None:
+            status = "UNAVAILABLE" if name in unsupported else "PLACEHOLDER"
+            reason = (
+                "official speed or sectional source is unavailable"
+                if name in {"speed_last", "speed_best", "speed_avg", "beyer_last"}
+                else "pace calls/sectionals are unavailable; no run-style evidence"
+                if name == "pace_fit_score"
+                else "no runtime evidence for this feature"
+            )
+            if name == "workout_rank_percentile" and row.get("_workout_rank_missing_reason"):
+                status = "DEGRADED"
+                reason = str(row.get("_workout_rank_missing_reason"))
+        elif name == "pace_fit_score" and str(row.get("pace_state") or "") == "PACE_UNAVAILABLE":
+            status = "UNAVAILABLE"
+            reason = "pace calls/sectionals are unavailable; no run-style evidence"
+            feature_source = "canonical_db"
+        elif evidence_count and row.get("run_style_source") == "twinspires" and name in {"run_style_code", "early_speed_points", "run_style_bucket", "early_intent", "pace_fit_score", "pace_pressure", "collapse_risk", "collapse_risk_v2", "lone_speed_edge"}:
+            feature_source = "twinspires"
+            status = "SOURCE_BACKED" if name in {"run_style_code", "early_speed_points", "run_style_bucket"} else "DERIVED"
+        elif name in workout_features and dk_workouts == 0:
+            status = "PLACEHOLDER"
+            reason = "no valid timed pre-race workout evidence"
+        elif (
+            name in {"work_readiness_score", "workout_readiness_score_v2"}
+            and not bool(row.get("workout_time_normalization_available"))
+        ):
+            status = "DEGRADED"
+            reason = "source-backed workouts are available, but peer time normalization is unavailable"
+        elif evidence_count:
+            # Current-card derived values retain the provider that supplied
+            # their persisted input; they must not be promoted to a generic
+            # DraftKings source merely because they have one derivation input.
+            feature_source = (
+                source if name in current_card_derived_features else "draftkings_markdown"
+            )
+            if name == "market_implied_prob":
+                reason = (
+                    "derived from persisted morning-line input; "
+                    "not current tote/live market odds"
+                )
+            if name in {
+                "dk_history_start_count", "dk_workout_count", "days_since_last_start",
+                "days_since_last_workout", "workout_count_30d", "workout_cadence_30d",
+                "feature_source_mix",
+            } | direct_history_features | count_backed_features:
+                status = "SOURCE_BACKED"
+        elif source == "seeded/default":
+            reason = "seed/default value; no validated source-backed evidence"
+        as_of_max_date = (
+            row.get("_twinspires_as_of") if feature_source == "twinspires"
+            else row.get("last_workout_date") if name in workout_features
+            else row.get("last_race_date") if name in evidence_features
+            else None
+        )
+        lineage.append({
+            "feature_name": name, "value": value, "status": status,
+            "source_system": feature_source, "evidence_count": evidence_count,
+            # ``tier``/``source`` are aliases retained for compact consumers;
+            # the established status/source_system names remain authoritative.
+            "tier": status, "source": feature_source,
+            "as_of_max_date": as_of_max_date, "fallback_reason": reason,
+        })
+    return json.dumps(lineage, default=str, sort_keys=True)
 
 
 # ---------------------------------------------------------------------------
 # Public API
 # ---------------------------------------------------------------------------
-def build_features(card_id: Optional[int] = None) -> pd.DataFrame:
+def build_features(
+    card_id: Optional[int] = None, *, twinspires_summary: str | Path | None = None,
+    twinspires_as_of: str | None = None,
+) -> pd.DataFrame:
     """
     Build the feature store for one race card.
 
@@ -1214,7 +1434,28 @@ def build_features(card_id: Optional[int] = None) -> pd.DataFrame:
     except Exception as exc:
         print(f"[builder] canonical history overlay skipped: {exc}")
 
+    from src.services.twinspires_intake import twinspires_pace_for_card
+
+    pace_records, pace_as_of, pace_error = twinspires_pace_for_card(
+        conn, card_id, source_path=twinspires_summary, declared_as_of=twinspires_as_of,
+    )
+    if pace_error:
+        print(f"[builder] TwinSpires pace source skipped: {pace_error}")
+    for idx, feature in feat_df.iterrows():
+        record = pace_records.get(int(feature["entry_id"]))
+        if record is None:
+            continue
+        bucket = {"E": "front", "E/P": "presser", "P": "stalker", "S": "closer"}[record.run_style_code]
+        feat_df.at[idx, "run_style_bucket"] = bucket
+        feat_df.at[idx, "run_style_code"] = record.run_style_code
+        feat_df.at[idx, "early_speed_points"] = record.early_speed_points
+        feat_df.at[idx, "early_intent"] = PACE_EARLY[bucket]
+        feat_df.at[idx, "run_style_evidence_count"] = 1
+        feat_df.at[idx, "run_style_source"] = "twinspires"
+        feat_df.at[idx, "_twinspires_as_of"] = pace_as_of
+
     feat_df = _fill_race_level_features(feat_df, derby_active=derby_active)
+    feat_df["feature_lineage_json"] = feat_df.apply(_feature_lineage_json, axis=1)
 
     # Drop helper columns that are not in feature_store schema
     _drop = [c for c in feat_df.columns if c.startswith("_")]
