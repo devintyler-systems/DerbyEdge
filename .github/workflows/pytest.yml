@@ -25,5 +25,16 @@ jobs:
           python -m pip install -r requirements.txt
           python -m pip install pytest httpx
 
+      - name: Diagnose checkout state
+        run: |
+          echo "HEAD commit:"
+          git rev-parse HEAD
+          echo "Branch/ref:"
+          git branch --show-current
+          echo "scorer.py lines 38-48:"
+          sed -n '38,48p' src/models/scorer.py
+          echo "Any other scorer.py in repo:"
+          find . -name "scorer.py" -not -path "./.git/*"
+
       - name: Run test suite
         run: python -m pytest --tb=short -q
