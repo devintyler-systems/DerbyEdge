@@ -7,11 +7,15 @@ import subprocess
 import sys
 from pathlib import Path
 
+import pytest
+
 ROOT = Path(__file__).resolve().parents[1]
 DB = ROOT / "db" / "derbyedge.db"
 
 
 def test_card_73_coverage_audit_is_db_read_only_and_remains_invalid():
+    if not DB.is_file():
+        pytest.skip("requires local production db/derbyedge.db, not present in CI")
     before = hashlib.sha256(DB.read_bytes()).hexdigest()
     output_dir = ROOT / "output" / "acceptance"
     completed = subprocess.run([sys.executable, "scripts/audit_source_coverage.py", "--card-id", "73", "--source-provider", "twinspires", "--output-dir", str(output_dir)], cwd=ROOT, text=True, capture_output=True)
