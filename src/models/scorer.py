@@ -41,7 +41,6 @@ from src.models.confidence import (
 )
 from src.models.trainer import (
     ModelArtifact,
-    calibration_audit_for_display,
     TRAIN_CONFIGS,
     DERBY_TRAIN_CONFIG,
     compute_feature_importances,
@@ -677,7 +676,7 @@ def _compute_metrics(
         win_probs * np.log(np.maximum(win_probs / np.maximum(market_probs, 1e-9), 1e-9))
     ))
 
-    calibration = calibration_audit_for_display(artifact)
+    calibration = artifact.calibration_audit
     return {
         "model_type":        artifact.model_type,
         "race_type_key":     artifact.race_type_key,
@@ -1596,7 +1595,7 @@ def score_race(
                 "model_collapse_status": _collapse.status if _collapse else None,
                 "max_abs_model_ml_delta": _collapse.max_abs_delta if _collapse else None,
                 "mean_abs_model_ml_delta": _collapse.mean_abs_delta if _collapse else None,
-                "calibration_audit": calibration_audit_for_display(artifact),
+                "calibration_audit": artifact.calibration_audit,
                 "dispatcher_audit": artifact.dispatcher_audit,
                 "scored_at": score_ts,
             },
