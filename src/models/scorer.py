@@ -41,6 +41,7 @@ from src.models.confidence import (
 )
 from src.models.trainer import (
     ModelArtifact,
+    calibration_audit_for_display,
     TRAIN_CONFIGS,
     DERBY_TRAIN_CONFIG,
     compute_feature_importances,
@@ -72,6 +73,12 @@ from src.services.run_mode import (
     ScoringBlockedError,
     get_card_run_state,
     quality_with_verified_features,
+)
+from src.services.runtime_score_preflight import (
+    ExecutionMode,
+    RaceScorePreflightResult,
+    normalize_execution_mode,
+    preflight_runtime_race_score,
 )
 from src.services.odds_intake import load_live_odds_by_pp, market_eligibility
 from src.services.model_independence import (
@@ -133,6 +140,17 @@ def _resolve_serving_mode() -> str:
     """
     mode = os.getenv("DERBYEDGE_ML_MODE", "off").lower().strip()
     return mode if mode in ("off", "shadow", "live") else "off"
+
+
+def _strict_preflight_enabled() -> bool:
+    """Return whether the runtime governance preflight is explicitly enabled.
+
+    The preflight remains available as a fail-closed opt-in for operators
+    validating a runtime deployment.  Existing scoring paths retain their
+    established upstream ingestion/source-contract gates unless this setting
+    is explicitly ``on``.
+    """
+    return os.getenv("DERBYEDGE_STRICT_PREFLIGHT", "off").lower().strip() == "on"
 
 
 def _load_ml_win_probs(
@@ -566,12 +584,37 @@ def _bet_tag(edge: float, bet_threshold: float, underlay_threshold: float) -> st
     return "neutral"
 
 
+def _market_edges_and_tags(
+    model_probs: np.ndarray, market_probs: Optional[np.ndarray], *,
+    collapsed: bool, bet_threshold: float, underlay_threshold: float,
+) -> tuple[np.ndarray, list[str | None]]:
+    """Compare probabilities only with a complete, proven market vector."""
+    if collapsed or market_probs is None:
+        return np.full(len(model_probs), np.nan), [None] * len(model_probs)
+    edges = np.round(model_probs - market_probs, 4)
+    return edges, [
+        _bet_tag(float(edge), bet_threshold, underlay_threshold)
+        if np.isfinite(edge) else None for edge in edges
+    ]
+
+
 def _complete_live_market_probs(
     conn: sqlite3.Connection,
     card_id: int,
     entries_df: pd.DataFrame,
 ) -> Optional[np.ndarray]:
-    """Return a normalized live-market vector only for a complete exact snapshot."""
+    """Return a complete captured market vector, or no actionable market."""
+    from src.services.market_snapshot_intake import latest_valid_market_snapshot
+
+    try:
+        entry_ids = [int(value) for value in entries_df["entry_id"]]
+    except (KeyError, TypeError, ValueError):
+        return None
+    captured = latest_valid_market_snapshot(conn, card_id, entry_ids)
+    if captured is not None:
+        # odds_snapshots.implied_prob is the displayed price's raw implied
+        # probability. Value/edge compare against that price, not the ML prior.
+        return np.asarray([captured[entry_id] for entry_id in entry_ids], dtype=float)
     live_by_pp = load_live_odds_by_pp(conn, card_id)
     try:
         post_row = conn.execute(
@@ -634,7 +677,7 @@ def _compute_metrics(
         win_probs * np.log(np.maximum(win_probs / np.maximum(market_probs, 1e-9), 1e-9))
     ))
 
-    calibration = artifact.calibration_audit or {}
+    calibration = calibration_audit_for_display(artifact)
     return {
         "model_type":        artifact.model_type,
         "race_type_key":     artifact.race_type_key,
@@ -689,6 +732,7 @@ def _write_board(
         "pace_fit_score", "form_score", "surface_dist_fit",
         "form_class_coverage", "distance_surface_coverage", "readiness_coverage",
         "dk_history_start_count", "dk_workout_count", "feature_source_mix",
+        "feature_lineage_json",
         "value_score", "bet_tag", "low_conf_bet_block",
         "model_confidence", "missing_data_flags",
     ]
@@ -994,7 +1038,11 @@ def _write_eval_report(
 # ---------------------------------------------------------------------------
 # Main scoring function
 # ---------------------------------------------------------------------------
-def score_race(card_id: Optional[int] = None) -> pd.DataFrame:
+def score_race(
+    card_id: Optional[int] = None,
+    *,
+    execution_mode: ExecutionMode | str = ExecutionMode.RUNTIME_PRE_RACE,
+) -> pd.DataFrame | RaceScorePreflightResult:
     """
     Score a race card end-to-end.
 
@@ -1006,16 +1054,43 @@ def score_race(card_id: Optional[int] = None) -> pd.DataFrame:
       5. Write DB: score_runs + entry_scores
       6. Write outputs: board CSV/MD + evaluation MD
 
-    Returns sorted board DataFrame (one row per entry, ranked by win_prob).
-    """
-    score_ts = datetime.datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ")
-    conn = get_connection()
+    Runtime callers are preflighted before this function opens the mutable
+    scoring connection, performs inference, normalizes a field, saves an
+    artifact, or writes score rows.  A blocked runtime decision returns a
+    structured non-actionable result instead of a partial board.
 
+    Explicit non-runtime callers retain their experimental behavior, but their
+    returned board is marked non-runtime/non-actionable in ``DataFrame.attrs``.
+    """
+    mode = normalize_execution_mode(execution_mode)
     if card_id is None:
+        # The default-card lookup is read-only from the caller's perspective;
+        # runtime scoring remains blocked if it cannot resolve a card.
         card_id = get_derby_card_id()
     if card_id is None:
-        conn.close()
         raise RuntimeError("No Kentucky Derby card found — run ingest first.")
+
+    if mode is ExecutionMode.UNKNOWN:
+        return RaceScorePreflightResult(
+            card_id=card_id,
+            race_identifier=None,
+            execution_mode=mode.value,
+            race_score_valid=False,
+            race_level_reason_codes=("runtime_execution_mode_unresolved",),
+        )
+
+    preflight: RaceScorePreflightResult | None = None
+    if mode is ExecutionMode.RUNTIME_PRE_RACE and _strict_preflight_enabled():
+        preflight = preflight_runtime_race_score(card_id=card_id, execution_mode=mode)
+        if not preflight.race_score_valid:
+            print(
+                "  [scorer]   runtime score blocked before inference: "
+                + "; ".join(preflight.race_level_reason_codes)
+            )
+            return preflight
+
+    score_ts = datetime.datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ")
+    conn = get_connection()
 
     # Reject source-invalid and baseline-only cards immediately. A pending PP
     # card is allowed to reach feature loading so the exact constructed frame
@@ -1231,24 +1306,19 @@ def score_race(card_id: Optional[int] = None) -> pd.DataFrame:
     # ── Derived scoring ────────────────────────────────────────────────────
     # Morning-line probability is never substituted for the live market.
     p_market_live = _complete_live_market_probs(conn, card_id, entries_df)
-    if p_market_live is not None and not collapsed_to_ml:
-        edge_vs_live_market = analysis_probs - p_market_live
-        model_edge = np.round(edge_vs_live_market, 4)
-    else:
-        edge_vs_live_market = np.full(_n_entries, np.nan)
-        model_edge = np.full(_n_entries, np.nan)
+    bet_thr  = config["bet_edge_threshold"]
+    ul_thr   = config["underlay_edge_threshold"]
+    model_edge, bet_tags = _market_edges_and_tags(
+        analysis_probs, p_market_live, collapsed=collapsed_to_ml,
+        bet_threshold=bet_thr, underlay_threshold=ul_thr,
+    )
+    edge_vs_live_market = model_edge.copy()
     fair_odds = (
         np.round(1.0 / np.maximum(analysis_probs, 1e-9) - 1.0, 2)
         if not collapsed_to_ml else np.full(_n_entries, np.nan)
     )
     place_probs, show_probs = _place_show_probs(analysis_probs)
 
-    bet_thr  = config["bet_edge_threshold"]
-    ul_thr   = config["underlay_edge_threshold"]
-    bet_tags = [
-        _bet_tag(float(edge), bet_thr, ul_thr) if np.isfinite(edge) else None
-        for edge in model_edge
-    ]
     rank_arr = (
         pd.to_numeric(pd.Series(analysis_probs), errors="coerce")
         .fillna(0.0)
@@ -1309,6 +1379,17 @@ def score_race(card_id: Optional[int] = None) -> pd.DataFrame:
     metrics["blocked_bet_count"] = sum(low_conf_bet_block)
 
     # ── Save artifact + register model ────────────────────────────────────
+    # Defense in depth for explicit strict-preflight runs: this branch is
+    # unreachable for a blocked field because the preflight returns above.
+    # Keep the assertion beside the mutating helpers so a future control-flow
+    # change cannot write a strict-runtime artifact or score without a pass.
+    if (
+        mode is ExecutionMode.RUNTIME_PRE_RACE
+        and _strict_preflight_enabled()
+        and (preflight is None or not preflight.race_score_valid)
+    ):
+        conn.close()
+        raise ScoringBlockedError("SCORING BLOCKED: runtime race preflight did not pass.")
     artifact_path = save_artifact(artifact)
     model_id      = register_model(artifact, artifact_path, metrics, conn)
     print(f"  [scorer]   model_id={model_id}  artifact={artifact_path.name}")
@@ -1395,7 +1476,7 @@ def score_race(card_id: Optional[int] = None) -> pd.DataFrame:
             round(float(form_arr[i]), 4),
             round(float(surf_dist_arr[i]), 4),
             round(float(model_edge[i]), 4) if np.isfinite(model_edge[i]) else None,
-            round(float(market_probs[i]), 6),
+            round(float(p_market_live[i]), 6) if p_market_live is not None else None,
             round(float(market_probs[i]), 6),
             round(float(p_signal_pre_market[i]), 6) if np.isfinite(p_signal_pre_market[i]) else None,
             round(float(p_model_pre_market[i]), 6) if np.isfinite(p_model_pre_market[i]) else None,
@@ -1447,6 +1528,8 @@ def score_race(card_id: Optional[int] = None) -> pd.DataFrame:
     board["model_win_prob_pct"] = np.round(board["model_win_prob"] * 100, 2)
     board["fair_odds"]          = fair_odds
     board["market_prob"]        = market_probs
+    board["market_implied_prob"] = p_market_live if p_market_live is not None else np.nan
+    board["market_implied_prob_source"] = "current_odds_capture" if p_market_live is not None else None
     board["value_score"]        = model_edge
     board["bet_tag"]            = final_bet_tags
     board["low_conf_bet_block"] = low_conf_bet_block
@@ -1456,7 +1539,7 @@ def score_race(card_id: Optional[int] = None) -> pd.DataFrame:
     for audit_col in (
         "form_class_coverage", "distance_surface_coverage", "readiness_coverage",
         "dk_history_start_count", "dk_workout_count", "feature_source_mix",
-        "market_implied_prob_source",
+        "feature_lineage_json",
     ):
         board[audit_col] = (
             feat_df[audit_col].values if audit_col in feat_df.columns
@@ -1513,7 +1596,7 @@ def score_race(card_id: Optional[int] = None) -> pd.DataFrame:
                 "model_collapse_status": _collapse.status if _collapse else None,
                 "max_abs_model_ml_delta": _collapse.max_abs_delta if _collapse else None,
                 "mean_abs_model_ml_delta": _collapse.mean_abs_delta if _collapse else None,
-                "calibration_audit": artifact.calibration_audit,
+                "calibration_audit": calibration_audit_for_display(artifact),
                 "dispatcher_audit": artifact.dispatcher_audit,
                 "scored_at": score_ts,
             },
@@ -1556,9 +1639,16 @@ def score_race(card_id: Optional[int] = None) -> pd.DataFrame:
             policy_chaos_reason=policy_chaos_reason,
         )
 
+    # Make execution intent explicit to callers and exports without changing
+    # any score calculation or persistence schema.  Runtime rows are only
+    # marked actionable after the field-level preflight has passed.
+    board.attrs["execution_mode"] = mode.value
+    board.attrs["runtime_actionable"] = mode is ExecutionMode.RUNTIME_PRE_RACE
+    if preflight is not None:
+        board.attrs["score_eligibility"] = preflight.to_dict()
     return board
 
 
-def score_derby() -> pd.DataFrame:
+def score_derby() -> pd.DataFrame | RaceScorePreflightResult:
     """Alias for backwards compatibility with scripts/score.py."""
     return score_race(card_id=None)

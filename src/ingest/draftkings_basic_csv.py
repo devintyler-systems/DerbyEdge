@@ -42,6 +42,8 @@ class DraftKingsBasicCSVRow:
     """One Basic-tab runner row, keyed by its source program number (``#``)."""
     program_number: str
     weight: int | None
+    current_odds: str | None = None
+    horse_name: str | None = None
 
 
 @dataclasses.dataclass(frozen=True)
@@ -127,7 +129,11 @@ def parse_draftkings_basic_csv(
                 raise DraftKingsBasicCSVError(
                     f"DK Basic-tab CSV row {row_number} has invalid WEIGHT: {raw_weight!r}"
                 )
-        rows.append(DraftKingsBasicCSVRow(program_number=raw_program, weight=weight))
+        rows.append(DraftKingsBasicCSVRow(
+            program_number=raw_program, weight=weight,
+            current_odds=(raw_row.get("ODDS") or "").strip() or None,
+            horse_name=(raw_row.get("RUNNER") or "").strip() or None,
+        ))
 
     return DraftKingsBasicCSV(
         source_path=resolved_path,

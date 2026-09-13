@@ -264,6 +264,9 @@ CREATE TABLE IF NOT EXISTS odds_snapshots (
                      ) STORED,
     source           TEXT    NOT NULL DEFAULT 'morning_line'
                      CHECK(source IN ('morning_line','tote','book','model')),
+    source_provider  TEXT,
+    source_artifact_sha256 TEXT,
+    program_number   TEXT,
     created_at       TEXT    NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
 );
 

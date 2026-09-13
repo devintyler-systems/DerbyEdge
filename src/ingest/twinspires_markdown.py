@@ -40,6 +40,7 @@ class TwinSpiresRecord:
     scratched: bool = False
     run_style_code: str | None = None
     early_speed_points: int | None = None
+    current_odds: str | None = None
 
 
 @dataclasses.dataclass(frozen=True)
@@ -120,6 +121,7 @@ def _record_from_chunk(program: str, lines: list[str]) -> TwinSpiresRecord | Non
         raw_values=raw_values, raw_text="\n".join(lines), scratched=False,
         run_style_code=_STYLE.fullmatch(lines[style_at]).group(1).upper(),
         early_speed_points=int(_STYLE.fullmatch(lines[style_at]).group(2)),
+        current_odds=lines[0],
     )
 
 
