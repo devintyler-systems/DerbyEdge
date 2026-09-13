@@ -54,6 +54,12 @@ from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from src.ingest.draftkings_basic_csv import (
+    DraftKingsBasicCSV,
+    normalize_program_number,
+    parse_draftkings_basic_csv,
+)
+
 
 # ---------------------------------------------------------------------------
 # Contract label constants
@@ -155,7 +161,47 @@ class AcquisitionRuleResult:
         return dataclasses.asdict(self)
 
 
-def evaluate_acquisition_rule(card: Any) -> AcquisitionRuleResult:
+def merge_draftkings_basic_weights(
+    card: Any,
+    basic_tab_csv: DraftKingsBasicCSV | str | bytes | Path,
+) -> int:
+    """Fill only absent entry weights from an explicit DK Basic-tab CSV source.
+
+    Matching is exact on DraftKings program number (the ``#`` column).  This
+    deliberately does not reconcile by runner name or modify any field other
+    than an absent ``entry.weight``.  A partial or non-matching Basic export
+    simply leaves the remaining contract gaps in place for evaluation.
+    """
+    overlay = (
+        basic_tab_csv
+        if isinstance(basic_tab_csv, DraftKingsBasicCSV)
+        else parse_draftkings_basic_csv(basic_tab_csv)
+    )
+    weights = overlay.weights_by_program_number
+    merged = 0
+    for entry in card.entries:
+        if getattr(entry, "is_scratched", False) or getattr(entry, "weight", None) is not None:
+            continue
+        program_key = normalize_program_number(getattr(entry, "program_number", None))
+        weight = weights.get(program_key) if program_key else None
+        if weight is not None:
+            entry.weight = weight
+            merged += 1
+    return merged
+
+
+def _active_runners_missing_weight(card: Any) -> bool:
+    return any(
+        not getattr(entry, "is_scratched", False) and getattr(entry, "weight", None) is None
+        for entry in card.entries
+    )
+
+
+def evaluate_acquisition_rule(
+    card: Any,
+    *,
+    basic_tab_csv: DraftKingsBasicCSV | str | bytes | Path | None = None,
+) -> AcquisitionRuleResult:
     """Evaluate the acquisition eligibility rule against a parsed card.
 
     Deterministic: produces identical output for identical card content across
@@ -166,7 +212,14 @@ def evaluate_acquisition_rule(card: Any) -> AcquisitionRuleResult:
     card:
         A ``DraftKingsMarkdownCard`` instance (imported at call site to avoid
         circular dependencies).
+    basic_tab_csv:
+        An explicit same-race DraftKings Basic-tab CSV export (or an already
+        parsed :class:`DraftKingsBasicCSV`).  It is consulted only if active
+        runners are missing assigned weight, and may populate only that field.
     """
+    if basic_tab_csv is not None and _active_runners_missing_weight(card):
+        merge_draftkings_basic_weights(card, basic_tab_csv)
+
     race = card.race
     missing_race: list[str] = _race_missing(race)
 

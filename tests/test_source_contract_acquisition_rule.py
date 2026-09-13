@@ -63,6 +63,18 @@ def sar_manifest(sar_card):
     )
 
 
+def _basic_tab_csv_for(card, *, matching: bool = True) -> str:
+    """Build the documented DK Basic CSV schema for an in-memory fixture."""
+    header = "#,ODDS,ML,RUNNER,WEIGHT,JOCKEY,TRAINER,SIRE,DAM,RUN STYLE,DAYS OFF"
+    rows = [header]
+    for index, entry in enumerate(card.entries, start=80):
+        program = entry.program_number if matching else str(index)
+        rows.append(
+            f"{program},5/2,3/1,Runner,122,Jockey,Trainer,Sire,Dam,Stalker,10"
+        )
+    return "\n".join(rows)
+
+
 # ---------------------------------------------------------------------------
 # SAR acquisition rule — must pass
 # ---------------------------------------------------------------------------
@@ -129,6 +141,60 @@ class TestDMRSourceContractIncomplete:
                 "requirement but score_candidate_eligible is True — the weight requirement "
                 "has been silently relaxed. This is not permitted."
             )
+
+
+class TestDKBasicWeightOverlay:
+    def test_matching_basic_tab_flips_dmr_to_complete(self, dmr_card):
+        from src.ingest.dk_source_contract import (
+            SOURCE_CONTRACT_COMPLETE,
+            evaluate_acquisition_rule,
+        )
+        from src.ingest.draftkings_basic_csv import parse_draftkings_basic_csv
+
+        patched = copy.deepcopy(dmr_card)
+        before = [(entry.program_number, entry.horse_name, entry.jockey, entry.trainer) for entry in patched.entries]
+        result = evaluate_acquisition_rule(
+            patched,
+            basic_tab_csv=parse_draftkings_basic_csv(_basic_tab_csv_for(patched)),
+        )
+        after = [(entry.program_number, entry.horse_name, entry.jockey, entry.trainer) for entry in patched.entries]
+
+        assert result.contract_label == SOURCE_CONTRACT_COMPLETE
+        assert result.score_candidate_eligible is True
+        assert result.runners_missing_assigned_weight == 0
+        assert before == after, "Basic overlay may modify weights only"
+        assert all(entry.weight == 122 for entry in patched.entries if not entry.is_scratched)
+
+    def test_sar_r6_is_unchanged_when_basic_overlay_is_supplied(self, sar_card):
+        from src.ingest.dk_source_contract import evaluate_acquisition_rule
+
+        patched = copy.deepcopy(sar_card)
+        original_weights = [entry.weight for entry in patched.entries]
+        result = evaluate_acquisition_rule(
+            patched,
+            basic_tab_csv=_basic_tab_csv_for(patched),
+        )
+
+        assert result.to_dict() == evaluate_acquisition_rule(sar_card).to_dict()
+        assert [entry.weight for entry in patched.entries] == original_weights
+
+    def test_nonmatching_basic_tab_keeps_missing_weight_blocker(self, dmr_card):
+        from src.ingest.dk_source_contract import (
+            ACQUISITION_REQUIREMENT_WEIGHT,
+            SOURCE_CONTRACT_INCOMPLETE,
+            evaluate_acquisition_rule,
+        )
+
+        patched = copy.deepcopy(dmr_card)
+        result = evaluate_acquisition_rule(
+            patched,
+            basic_tab_csv=_basic_tab_csv_for(patched, matching=False),
+        )
+
+        assert result.contract_label == SOURCE_CONTRACT_INCOMPLETE
+        assert result.score_candidate_eligible is False
+        assert result.runners_missing_assigned_weight == result.active_runner_count
+        assert result.acquisition_requirements == [ACQUISITION_REQUIREMENT_WEIGHT]
 
 
 # ---------------------------------------------------------------------------
