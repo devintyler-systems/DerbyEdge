@@ -24,14 +24,17 @@ _ROW = {
 }
 
 
-def test_xlsx_preserves_distinct_live_odds_and_morning_line(tmp_path):
+def test_xlsx_preserves_distinct_live_odds_and_morning_line(tmp_path, caplog):
     path = tmp_path / "basic.xlsx"
     pd.DataFrame([{**_ROW, "ODDS": "8/5"}]).to_excel(path, index=False)
 
+    caplog.set_level("INFO", logger="derbyedge.ingest.source_guard")
     parsed = parse_draftkings_basic_csv(path)
 
     assert parsed.rows[0].current_odds == "8/5"
     assert parsed.rows[0].current_odds != _ROW["ML"]
+    assert "INGEST_SOURCE_STAMP" in caplog.text
+    assert "INGEST_SOURCE_OUTSIDE_FIXTURES" in caplog.text
 
 
 def test_xlsx_without_odds_is_rejected_and_never_backfilled_from_ml(tmp_path):

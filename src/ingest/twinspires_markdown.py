@@ -12,6 +12,8 @@ import re
 from datetime import datetime, timezone
 from pathlib import Path
 
+from src.utils.source_file_guard import stamp_source, warn_if_outside_fixtures
+
 
 PARSER_VERSION = "twinspires_markdown_speed_power_style/1.1.0"
 _STYLE = re.compile(r"^(E/P|E|P|S|NA)(\d+)$", re.I)
@@ -133,6 +135,8 @@ def parse_twinspires_markdown(
         raw_bytes, source_path = path, source_filename or "<in-memory>"
     else:
         source = Path(path)
+        stamp_source(source)
+        warn_if_outside_fixtures(source)
         raw_bytes, source_path = source.read_bytes(), str(source)
         source_filename = source_filename or source.name
     raw = raw_bytes.decode("utf-8", errors="replace")

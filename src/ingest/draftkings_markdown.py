@@ -15,6 +15,7 @@ from pathlib import Path
 from typing import Any
 
 from src.utils.distance_parser import parse_furlongs
+from src.utils.source_file_guard import stamp_source, warn_if_outside_fixtures
 
 
 PARSER_VERSION = "1.1.0"
@@ -252,11 +253,15 @@ def _parse_filename_date(source_path: str) -> date | None:
 
 def _read_source(source: str | Path, source_path: str | None) -> tuple[str, str, bytes]:
     if isinstance(source, Path):
+        stamp_source(source)
+        warn_if_outside_fixtures(source)
         raw_bytes = source.read_bytes()
         return raw_bytes.decode("utf-8"), str(source), raw_bytes
     if source_path is None and "\n" not in source:
         candidate = Path(source)
         if candidate.is_file():
+            stamp_source(candidate)
+            warn_if_outside_fixtures(candidate)
             raw_bytes = candidate.read_bytes()
             return raw_bytes.decode("utf-8"), str(candidate), raw_bytes
     return source, source_path or "<in-memory-markdown>", source.encode("utf-8")
@@ -896,6 +901,8 @@ def reconcile_draftkings_excel(
         source_path = source_filename or "<in-memory-excel>"
     else:
         workbook_path = Path(path)
+        stamp_source(workbook_path)
+        warn_if_outside_fixtures(workbook_path)
         raw = workbook_path.read_bytes()
         source_path = str(workbook_path)
     warnings: list[str] = []

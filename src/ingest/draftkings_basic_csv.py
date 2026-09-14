@@ -15,6 +15,8 @@ from pathlib import Path
 import re
 from typing import Iterable
 
+from src.utils.source_file_guard import stamp_source, warn_if_outside_fixtures
+
 
 BASIC_TAB_COLUMNS: tuple[str, ...] = (
     "#", "ODDS", "ML", "RUNNER", "WEIGHT", "JOCKEY", "TRAINER", "SIRE",
@@ -65,6 +67,8 @@ class DraftKingsBasicCSV:
 
 def _read_source(source: str | bytes | Path, source_path: str | None) -> tuple[str, str, bytes]:
     if isinstance(source, Path):
+        stamp_source(source)
+        warn_if_outside_fixtures(source)
         raw_bytes = source.read_bytes()
         return raw_bytes.decode("utf-8-sig"), str(source), raw_bytes
     if isinstance(source, bytes):
@@ -72,6 +76,8 @@ def _read_source(source: str | bytes | Path, source_path: str | None) -> tuple[s
     if source_path is None and "\n" not in source:
         candidate = Path(source)
         if candidate.is_file():
+            stamp_source(candidate)
+            warn_if_outside_fixtures(candidate)
             raw_bytes = candidate.read_bytes()
             return raw_bytes.decode("utf-8-sig"), str(candidate), raw_bytes
     return source, source_path or "<in-memory-dk-basic-csv>", source.encode("utf-8")
@@ -92,6 +98,8 @@ def parse_draftkings_basic_csv(
     """
     xlsx_path = Path(source) if isinstance(source, (str, Path)) and str(source).lower().endswith(".xlsx") else None
     if xlsx_path is not None and xlsx_path.is_file():
+        stamp_source(xlsx_path)
+        warn_if_outside_fixtures(xlsx_path)
         import pandas as pd
 
         frame = pd.read_excel(xlsx_path, dtype=str, keep_default_na=False)
