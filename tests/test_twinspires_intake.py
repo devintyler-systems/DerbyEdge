@@ -31,9 +31,11 @@ def _conn() -> sqlite3.Connection:
     return conn
 
 
-def test_parser_extracts_expected_fields_and_preserves_nulls():
+def test_parser_extracts_expected_fields_and_preserves_nulls(caplog):
+    caplog.set_level("INFO", logger="derbyedge.ingest.source_guard")
     card = parse_twinspires_markdown(TS)
     assert card.parser_version == PARSER_VERSION
+    assert "INGEST_SOURCE_STAMP" in caplog.text
     assert len(card.records) == 10
     mykonos = next(row for row in card.records if row.horse_name == "Mykonos")
     assert (mykonos.run_style, mykonos.avg_speed, mykonos.back_speed, mykonos.last_speed) == ("E/P3", 75.0, 79.0, 64.0)

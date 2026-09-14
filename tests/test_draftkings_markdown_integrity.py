@@ -27,11 +27,13 @@ EXCEL_FIXTURE = ROOT / "draftkings_racedata_pdfs" / "fixtures" / "SAR_DK_Horse_R
 AS_OF = datetime(2026, 9, 4, 12, tzinfo=timezone.utc)
 
 
-def test_fixture_extracts_race_entries_pps_and_workouts():
+def test_fixture_extracts_race_entries_pps_and_workouts(caplog):
+    caplog.set_level("INFO", logger="derbyedge.ingest.source_guard")
     card = parse_draftkings_markdown(FIXTURE, as_of=AS_OF)
     result = validate_draftkings_markdown_card(card)
 
     assert card.race.track == "Saratoga"
+    assert "INGEST_SOURCE_STAMP" in caplog.text
     assert card.race.race_number == 6
     assert card.race.race_date.isoformat() == "2026-09-04"
     assert card.race.surface == "dirt"
