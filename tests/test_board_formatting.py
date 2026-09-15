@@ -5,6 +5,7 @@ import pandas as pd
 
 from src.app.board_formatting import (
     _edge_str,
+    market_probability_display,
     morning_line_str,
     pace_fit_str,
     prepare_probability_display_columns,
@@ -69,3 +70,14 @@ def test_pace_fit_formatter_handles_unavailable_pace():
     assert pace_fit_str(None) == "—"
     assert pace_fit_str(np.nan) == "—"
     assert pace_fit_str(0.72) == "0.720"
+
+
+def test_market_probability_display_preserves_precedence_and_blocks_missing_tag():
+    assert market_probability_display(0.22, 0.31) == ("22.0%", "Live Mkt %", True)
+    assert market_probability_display(None, 0.31) == ("31.0%", "ML-Implied %", True)
+
+    display, label, allow_bet_tag = market_probability_display(None, None)
+
+    assert display == "MISSING"
+    assert label == "ML-Implied %"
+    assert not allow_bet_tag
