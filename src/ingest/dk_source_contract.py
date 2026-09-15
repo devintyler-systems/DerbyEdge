@@ -180,7 +180,7 @@ def merge_draftkings_basic_weights(
     weights = overlay.weights_by_program_number
     merged = 0
     for entry in card.entries:
-        if getattr(entry, "is_scratched", False) or getattr(entry, "weight", None) is not None:
+        if getattr(entry, "weight", None) is not None:
             continue
         program_key = normalize_program_number(getattr(entry, "program_number", None))
         weight = weights.get(program_key) if program_key else None

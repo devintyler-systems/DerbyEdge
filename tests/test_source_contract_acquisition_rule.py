@@ -54,6 +54,13 @@ def sar_card():
 
 
 @pytest.fixture(scope="module")
+def mnr_card():
+    from src.ingest.draftkings_markdown import parse_draftkings_markdown
+    path = _find_fixture("MNR_DK_Horse_R4_9-14-26.md")
+    return parse_draftkings_markdown(path, as_of=datetime(2026, 9, 14, 23, 52, 50, tzinfo=timezone.utc))
+
+
+@pytest.fixture(scope="module")
 def sar_manifest(sar_card):
     from src.ingest.dk_source_contract import build_manifest_from_card
     return build_manifest_from_card(
@@ -195,6 +202,58 @@ class TestDKBasicWeightOverlay:
         assert result.score_candidate_eligible is False
         assert result.runners_missing_assigned_weight == result.active_runner_count
         assert result.acquisition_requirements == [ACQUISITION_REQUIREMENT_WEIGHT]
+
+    def test_mnr_basic_overlay_populates_scratched_runner_weights_and_validates(self, mnr_card):
+        """Issue #18: Basic-tab weights apply to scratches without relaxing active gates."""
+        from src.ingest.dk_source_contract import SOURCE_CONTRACT_COMPLETE, evaluate_acquisition_rule
+        from src.ingest.draftkings_basic_csv import parse_draftkings_basic_csv
+        from src.ingest.draftkings_markdown import validate_draftkings_markdown_card
+
+        patched = copy.deepcopy(mnr_card)
+        overlay = parse_draftkings_basic_csv(_find_fixture("MNR_DK_Horse_R4_9-14-26.xlsx"))
+        expected_weights = overlay.weights_by_program_number
+
+        assert len(patched.entries) == 8
+        assert {entry.program_number for entry in patched.entries if not entry.is_scratched} == {
+            "1", "2", "3", "4", "5", "7",
+        }
+        assert {entry.program_number for entry in patched.entries if entry.is_scratched} == {"6", "8"}
+        assert set(expected_weights) == {str(program) for program in range(1, 9)}
+
+        result = evaluate_acquisition_rule(patched, basic_tab_csv=overlay)
+        validation = validate_draftkings_markdown_card(patched)
+
+        assert result.contract_label == SOURCE_CONTRACT_COMPLETE
+        assert result.score_candidate_eligible is True
+        assert all(
+            entry.weight == expected_weights[entry.program_number.casefold()]
+            for entry in patched.entries
+        )
+        assert validation.passed is True
+        assert not [error for error in validation.errors if "missing required weight" in error]
+
+    def test_active_runner_without_markdown_or_basic_weight_still_fails_validation(self, dmr_card):
+        """The active-runner assigned-weight gate remains fail-closed."""
+        from src.ingest.dk_source_contract import evaluate_acquisition_rule
+        from src.ingest.draftkings_basic_csv import parse_draftkings_basic_csv
+        from src.ingest.draftkings_markdown import validate_draftkings_markdown_card
+
+        patched = copy.deepcopy(dmr_card)
+        missing_program = patched.entries[0].program_number
+        basic = _basic_tab_csv_for(patched).splitlines()
+        basic[1] = basic[1].replace(",122,", ",,")
+
+        result = evaluate_acquisition_rule(
+            patched,
+            basic_tab_csv=parse_draftkings_basic_csv("\n".join(basic)),
+        )
+        validation = validate_draftkings_markdown_card(patched)
+
+        assert result.score_candidate_eligible is False
+        assert any(
+            error == f"entry {missing_program} missing required weight"
+            for error in validation.errors
+        )
 
 
 # ---------------------------------------------------------------------------
