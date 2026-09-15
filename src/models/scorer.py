@@ -1475,7 +1475,7 @@ def score_race(
             round(float(form_arr[i]), 4),
             round(float(surf_dist_arr[i]), 4),
             round(float(model_edge[i]), 4) if np.isfinite(model_edge[i]) else None,
-            round(float(p_market_live[i]), 6) if p_market_live is not None else None,
+            round(float(market_probs[i]), 6),
             round(float(market_probs[i]), 6),
             round(float(p_signal_pre_market[i]), 6) if np.isfinite(p_signal_pre_market[i]) else None,
             round(float(p_model_pre_market[i]), 6) if np.isfinite(p_model_pre_market[i]) else None,

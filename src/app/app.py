@@ -140,6 +140,7 @@ from src.app.board_state import (
 )
 from src.app.board_formatting import (
     _edge_str,
+    market_probability_display,
     morning_line_str,
     prepare_probability_display_columns,
 )
@@ -2035,9 +2036,13 @@ with tab2:
         _fb_stat_row = _fb_horse_stats.iloc[0] if not _fb_horse_stats.empty else None
 
         # ── Horse card ─────────────────────────────────────────────────────────
+        _live_mkt = horse.get("live_market_prob") if has_live_odds else None
+        _mkt_display, _mkt_label, _market_available = market_probability_display(
+            _live_mkt, horse.get("market_implied_prob")
+        )
         col_tag = (
             TAG_BADGE.get(horse["bet_tag"], horse["bet_tag"])
-            if _ui_contract.show_bet_tags else ""
+            if _ui_contract.show_bet_tags and _market_available else ""
         )
         col_conf = CONF_BADGE.get(_conf_label(horse["confidence_flag"]), "")
 
@@ -2050,9 +2055,6 @@ with tab2:
         _detail_cols = st.columns(
             3 + int(_ui_contract.show_fair_odds) + int(_ui_contract.show_edge)
         )
-        _live_mkt = horse.get("live_market_prob") if has_live_odds else None
-        _mkt_prob = float(_live_mkt) if pd.notna(_live_mkt) else float(horse["market_implied_prob"])
-        _mkt_label = "Live Mkt %" if pd.notna(_live_mkt) else "ML-Implied %"
         _detail_offset = 0
         _detail_cols[_detail_offset].metric("Win %", f"{horse['win_probability']*100:.1f}%")
         _detail_offset += 1
@@ -2063,7 +2065,7 @@ with tab2:
             _detail_cols[_detail_offset].metric("Model Edge", _edge_str(horse["value_score"]))
             _detail_offset += 1
         _detail_cols[_detail_offset].metric("Morning Line", morning_line_str(horse["morning_line_odds"]))
-        _detail_cols[_detail_offset + 1].metric(_mkt_label, f"{_mkt_prob*100:.1f}%")
+        _detail_cols[_detail_offset + 1].metric(_mkt_label, _mkt_display)
 
         st.divider()
 

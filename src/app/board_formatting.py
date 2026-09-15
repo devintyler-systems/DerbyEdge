@@ -7,6 +7,24 @@ import math
 import pandas as pd
 
 
+def market_probability_display(
+    live_market_prob: object,
+    persisted_market_prob: object,
+) -> tuple[str, str, bool]:
+    """Select the display market without inventing or conflating a price source."""
+    for value, label in (
+        (live_market_prob, "Live Mkt %"),
+        (persisted_market_prob, "ML-Implied %"),
+    ):
+        try:
+            numeric = float(value)
+        except (TypeError, ValueError):
+            continue
+        if math.isfinite(numeric):
+            return f"{numeric * 100:.1f}%", label, True
+    return "MISSING", "ML-Implied %", False
+
+
 def _edge_str(value: object) -> str:
     """Format a usable numeric edge, otherwise render an explicit unavailable mark."""
     try:
