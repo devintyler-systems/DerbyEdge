@@ -1,0 +1,1732 @@
+Mountaineer
+RACE 4
+5:15
+PM
+$4000 CLAIMING
+Purse: $9000
+ 3YO+
+ 6 F
+Dirt: Fast
+More
+PROGRAM
+POOLS
+PPs
+RESULTS
+VIDEO
+Basic
+Advanced
+Tips
+Win
+$2
+RACE 8 | $2,096.70 Super High Five
+Glossary 
+
+
+
+#
+All
+ODDS
+Runner
+Jockey
+Trainer
+Sire / Dam
+3
+
+PP 3
+2
+M: 2
+New York New York
+Bay, Gelding, 4 yrs (KY) L
+Charle Oliveros
+14% 406 - 55 - 53 - 64
+Juan Pablo Silva
+20%400 - 80 - 66 - 60
+Echo Town
+Porto Marmay (IRE)
+New York New York
+Echo Town - Porto Marmay (IRE)
+Bay, Gelding, 4
+BREEDER
+Liberty Road Stables (KY)
+OWNER
+Tijuana Racing Stables
+Record	str	wn	pl	sh	Earnings
+Life	7	1	2	1	$31,699
+2026	4	0	1	1	$4,919
+2025	3	1	1	0	$26,780
+MNR	0	0	0	0	$0
+str	wn	pl	sh	Earnings
+Dirt	3	0	1	0	$3,194
+Turf	0	0	0	0	$0
+AW	4	1	1	1	$28,505
+OFF	0	0	0	0	$0
+Dist	1	0	0	0	$468
+ALL RACES	DIST	SURF-COND	PRG (PP)	ODDS	FIN	BL	JOCKEY	COMMENT
+REPLAY
+Sep 2, '26
+
+LOUISIANA DOWNS
+
+CLM5000
+
+6 F	DIRT-Fast	7 (5)	8-5	4	16	NievesE	Off slow, no menace
+Jul 5, '26
+
+LONE STAR PARK
+
+CLM5000
+
+6 1/2 F	DIRT-Fast	3	2	4	2.5	FrancoG	Off slw, improved insid
+Jun 9, '26
+
+LOUISIANA DOWNS
+
+CLM10000
+
+6 1/2 F	DIRT-Fast	6 (4)	3-5	2	2	CastilloI	Press3w, gamely late
+Jan 15, '26
+
+GULFSTREAM PARK
+
+CLM12500
+
+5 1/2 F	AW-Fast	3	1	3	4	VasquezMA	Stumbled, bmpd brk, ins
+Dec 5, '25
+
+GULFSTREAM PARK
+
+CLM12500
+
+5 1/2 F	AW-Fast	7 (6)	5-2	2	nk	GonzalezE	3-4wd, lug in, missed
+Mar 7, '25
+
+GULFSTREAM PARK
+
+AOC75000
+
+5 F	AW-Fast	2	10	9	16	SaezL	Svd gnd, empty
+Jan 15, '25
+
+GULFSTREAM PARK
+
+MCL50000
+
+5 F	AW-Fast	5 (4)	5-2	1	1/2	SaezL	Rail duel, clear, held
+WORKOUTS		DIST		SURF-COND		TIME		RANK
+Aug 25, '26
+
+LOUISIANA DOWNS
+
+4 F		DIRT-Fast		51.10 B		27 of 39
+Aug 10, '26
+
+LOUISIANA DOWNS
+
+4 F		DIRT-Fast		48.00 B		2 of 22
+Jun 29, '26
+
+LOUISIANA DOWNS
+
+4 F		DIRT-Fast		51.20 B		14 of 16
+Jun 1, '26
+
+LOUISIANA DOWNS
+
+4 F		DIRT-Fast		49.20 B		8 of 21
+May 19, '26
+
+LOUISIANA DOWNS
+
+4 F		DIRT-Fast		51.20 B		47 of 60
+Apr 25, '26
+
+LOUISIANA DOWNS
+
+4 F		DIRT-Wet Fast		50.10 B		5 of 17
+Mar 15, '26
+
+GULFSTREAM PARK
+
+4 F		DIRT-Fast		48.36 B		20 of 63
+Feb 1, '26
+
+GULFSTREAM PARK
+
+4 F		DIRT-Fast		48.89 B		6 of 43
+Jan 10, '26
+
+GULFSTREAM PARK
+
+3 F		DIRT-Fast		36.22 B		2 of 23
+Jan 3, '26
+
+GULFSTREAM PARK
+
+4 F		DIRT-Fast		49.31 B		23 of 87
+Nov 29, '25
+
+GULFSTREAM PARK
+
+4 F		DIRT-Fast		48.93 B		20 of 97
+Nov 22, '25
+
+GULFSTREAM PARK
+
+4 F		DIRT-Fast		49.75 B		38 of 80
+Nov 15, '25
+
+GULFSTREAM PARK
+
+4 F		DIRT-Fast		48.40 B		7 of 85
+Nov 8, '25
+
+GULFSTREAM PARK
+
+4 F		DIRT-Fast		48.62 B		16 of 69
+Nov 1, '25
+
+GULFSTREAM PARK
+
+4 F		DIRT-Fast		47.89 B		8 of 76
+Oct 25, '25
+
+GULFSTREAM PARK
+
+4 F		DIRT-Fast		47.31 B		6 of 42
+Oct 18, '25
+
+GULFSTREAM PARK
+
+4 F		DIRT-Fast		49.25 B		46 of 86
+Oct 11, '25
+
+GULFSTREAM PARK
+
+4 F		DIRT-Good		52.68 B		57 of 62
+Oct 4, '25
+
+GULFSTREAM PARK
+
+3 F		DIRT-Fast		37.50 B		25 of 36
+Sep 27, '25
+
+GULFSTREAM PARK
+
+3 F		DIRT-Fast		37.97 B		25 of 38
+Sep 20, '25
+
+GULFSTREAM PARK
+
+3 F		DIRT-Fast		37.81 B		19 of 28
+Apr 5, '25
+
+GULFSTREAM PARK
+
+4 F		DIRT-Fast		51.22 B		77 of 92
+Mar 30, '25
+
+GULFSTREAM PARK
+
+4 F		DIRT-Fast		52.13 B		28 of 29
+Feb 22, '25
+
+GULFSTREAM PARK
+
+4 F		DIRT-Fast		47.50 B		6 of 115
+Feb 15, '25
+
+GULFSTREAM PARK
+
+4 F		DIRT-Fast		47.56 B		3 of 124
+Feb 8, '25
+
+GULFSTREAM PARK
+
+4 F		DIRT-Fast		51.78 B		91 of 97
+Feb 1, '25
+
+GULFSTREAM PARK
+
+4 F		DIRT-Fast		47.93 B		14 of 104
+Jan 7, '25
+
+PAYSON PARK TRAINING CENTER
+
+4 F		DIRT-Fast		50.60 B		8 of 17
+Dec 31, '24
+
+PAYSON PARK TRAINING CENTER
+
+5 F		DIRT-Fast		1:03.00 Bg		4 of 19
+Dec 21, '24
+
+PAYSON PARK TRAINING CENTER
+
+4 F		DIRT-Fast		50.60 B		37 of 55
+Dec 14, '24
+
+PAYSON PARK TRAINING CENTER
+
+4 F		DIRT-Fast		49.40 B		10 of 56
+Dec 6, '24
+
+PAYSON PARK TRAINING CENTER
+
+4 F		DIRT-Fast		49.00 Bg		7 of 12
+Nov 30, '24
+
+PAYSON PARK TRAINING CENTER
+
+4 F		DIRT-Fast		50.20 B		27 of 44
+Nov 23, '24
+
+PAYSON PARK TRAINING CENTER
+
+4 F		DIRT-Fast		49.80 B		11 of 25
+Nov 15, '24
+
+PAYSON PARK TRAINING CENTER
+
+4 F		DIRT-Fast		49.20 B		4 of 7
+Nov 8, '24
+
+PAYSON PARK TRAINING CENTER
+
+3 F		DIRT-Fast		36.60 B		2 of 7
+Oct 24, '24
+
+WINSTAR TRAINING CENTER
+
+3 F		DIRT-Fast		36.60 B		1 of 4
+Oct 17, '24
+
+WINSTAR TRAINING CENTER
+
+3 F		DIRT-Fast		37.60 B		3 of 6
+Sep 18, '24
+
+WINSTAR TRAINING CENTER
+
+3 F		DIRT-Fast		37.60 B		4 of 5
+Sep 11, '24
+
+WINSTAR TRAINING CENTER
+
+3 F		DIRT-Fast		39.60 B		6 of 7
+SEE LESS								
+5
+
+PP 5
+3
+M: 3
+Joker Went Wild
+Bay, Gelding, 3 yrs (CA) L
+Juan Pablo Silva, Jr.
+4% 27 - 1 - 5 - 5
+Juan Pablo Silva
+20%400 - 80 - 66 - 60
+Practical Joke
+Intimate Obsession
+Joker Went Wild
+Practical Joke - Intimate Obsession
+Bay, Gelding, 3
+BREEDER
+Legacy Ranch Inc (CA)
+OWNER
+Tijuana Racing Stables
+Record	str	wn	pl	sh	Earnings
+Life	13	1	2	1	$41,617
+2026	11	1	2	0	$30,817
+2025	2	0	0	1	$10,800
+MNR	0	0	0	0	$0
+str	wn	pl	sh	Earnings
+Dirt	12	1	2	1	$41,117
+Turf	1	0	0	0	$500
+AW	0	0	0	0	$0
+OFF	0	0	0	0	$0
+Dist	4	1	0	1	$20,800
+ALL RACES	DIST	SURF-COND	PRG (PP)	ODDS	FIN	BL	JOCKEY	COMMENT
+REPLAY
+Sep 3, '26
+
+REMINGTON PARK
+
+CLM7500
+
+5 1/2 F	DIRT-Fast	7 (6)	9-2	4	12	JaraF	Sttld bk, kept to task
+Aug 14, '26
+
+DEL MAR
+
+CLM12500
+
+5 1/2 F	DIRT-Fast	7	7-2	7	11	JaramilloE	Vie6deep, chs4-3w, wknd
+Jul 23, '26
+
+DEL MAR
+
+CLM16000
+
+5 1/2 F	DIRT-Fast	1	8	6	12	JaramilloE	Chased inside, weakened
+Jul 3, '26
+
+LOS ALAMITOS RACE COURSE
+
+CLM20000
+
+5 1/2 F	DIRT-Fast	8	7-2	5	2.75	JaramilloE	Duel outsid, wknd late
+Jun 26, '26
+
+LOS ALAMITOS RACE COURSE
+
+AOC
+
+5 1/2 F	DIRT-Fast	4	43	9	10	RamirezRS	Chased inside, faded
+May 29, '26
+
+SANTA ANITA PARK
+
+CLM25000
+
+5 1/2 F	DIRT-Fast	1	4-5	2	2.75	FresuA	Chsd ins-2wd, no match
+May 17, '26
+
+SANTA ANITA PARK
+
+SOC
+
+6 F	DIRT-Fast	4	20	6	9.25	FresuA	Stlakd inside, weakened
+Apr 19, '26
+
+SANTA ANITA PARK
+
+AOC
+
+6 1/2 F	TURF-Firm	7	7	9	62	JaramilloE	3-4wd-ins, tired, eased
+Mar 27, '26
+
+SANTA ANITA PARK
+
+CLM25000
+
+5 1/2 F	DIRT-Fast	6 (4)	5-2	2	no	JaramilloE	Inside, gamely to wire
+Feb 1, '26
+
+SANTA ANITA PARK
+
+MCL20000
+
+6 F	DIRT-Fast	1	4-5	1	3/4	BelmontC	Bpd early, vie ins, held
+Jan 8, '26
+
+SANTA ANITA PARK
+
+MSW
+
+6 F	DIRT-Fast	6	7	7	8	BelmontC	Forward 2wd, weakened
+Nov 29, '25
+
+DEL MAR
+
+MSW
+
+5 1/2 F	DIRT-Fast	7	2	4	3	HerreraDA	Floated/bpd early, 3wd
+Oct 30, '25
+
+DEL MAR
+
+MSW
+
+6 F	DIRT-Fast	6 (5)	6	3	7.25	HerreraDA	Bmpd st, chsd3w, no bid
+WORKOUTS		DIST		SURF-COND		TIME		RANK
+Aug 28, '26
+
+REMINGTON PARK
+
+5 F		DIRT-Fast		1:03.65 H		21 of 21
+May 10, '26
+
+SANTA ANITA PARK
+
+5 F		DIRT-Fast		1:00.40 Hg		11 of 63
+Apr 11, '26
+
+SANTA ANITA PARK
+
+4 F		DIRT-Fast		48.20 Hg		14 of 78
+Mar 21, '26
+
+SANTA ANITA PARK
+
+4 F		DIRT-Fast		47.80 H		4 of 51
+Mar 11, '26
+
+SANTA ANITA PARK
+
+4 F		DIRT-Fast		49.80 Hg		16 of 21
+Mar 1, '26
+
+SANTA ANITA PARK
+
+4 F		AW-Fast		50.40 H		23 of 27
+Feb 22, '26
+
+SANTA ANITA PARK
+
+4 F		DIRT-Fast		49.40 H		89 of 115
+Jan 25, '26
+
+SANTA ANITA PARK
+
+4 F		DIRT-Fast		48.80 H		27 of 80
+Jan 2, '26
+
+SANTA ANITA PARK
+
+4 F		AW-Fast		48.60 H		12 of 29
+Dec 26, '25
+
+SANTA ANITA PARK
+
+3 F		AW-Fast		39.00 H		3 of 4
+Dec 18, '25
+
+SANTA ANITA PARK
+
+5 F		DIRT-Fast		1:02.40 H		19 of 37
+Dec 12, '25
+
+SANTA ANITA PARK
+
+4 F		DIRT-Fast		48.00 H		6 of 41
+Nov 23, '25
+
+SANTA ANITA PARK
+
+4 F		DIRT-Fast		48.00 H		3 of 40
+Nov 17, '25
+
+SANTA ANITA PARK
+
+5 F		AW-Fast		1:01.20 H		4 of 13
+Nov 10, '25
+
+SANTA ANITA PARK
+
+4 F		DIRT-Fast		48.20 H		22 of 41
+Oct 25, '25
+
+SANTA ANITA PARK
+
+2 F		DIRT-Fast		24.00 H		1 of 3
+Oct 19, '25
+
+SANTA ANITA PARK
+
+4 F		DIRT-Fast		47.20 Hg		3 of 89
+Oct 12, '25
+
+SANTA ANITA PARK
+
+5 F		DIRT-Fast		1:00.40 H		9 of 68
+Oct 6, '25
+
+SANTA ANITA PARK
+
+5 F		DIRT-Fast		1:01.20 H		25 of 46
+Sep 29, '25
+
+SANTA ANITA PARK
+
+4 F		DIRT-Fast		48.20 H		14 of 61
+Sep 22, '25
+
+SANTA ANITA PARK
+
+4 F		DIRT-Fast		47.80 H		11 of 94
+Sep 7, '25
+
+DEL MAR
+
+3 F		DIRT-Fast		34.80 H		1 of 28
+Aug 18, '25
+
+DEL MAR
+
+4 F		DIRT-Fast		47.40 H		4 of 50
+Aug 2, '25
+
+DEL MAR
+
+4 F		DIRT-Fast		49.00 H		59 of 105
+Jul 26, '25
+
+DEL MAR
+
+5 F		DIRT-Fast		1:02.40 H		63 of 74
+Jul 19, '25
+
+DEL MAR
+
+5 F		DIRT-Fast		1:01.80 H		56 of 68
+Jul 12, '25
+
+SANTA ANITA PARK
+
+4 F		DIRT-Fast		48.20 H		32 of 100
+Jul 4, '25
+
+SANTA ANITA PARK
+
+4 F		DIRT-Fast		48.20 H		19 of 71
+Jun 26, '25
+
+SANTA ANITA PARK
+
+4 F		DIRT-Fast		48.40 Hg		18 of 40
+Jun 16, '25
+
+SANTA ANITA PARK
+
+4 F		DIRT-Fast		49.00 H		40 of 76
+Jun 9, '25
+
+SANTA ANITA PARK
+
+4 F		DIRT-Fast		50.00 H		52 of 69
+Jun 1, '25
+
+SANTA ANITA PARK
+
+4 F		DIRT-Fast		50.00 H		77 of 96
+May 22, '25
+
+SANTA ANITA PARK
+
+3 F		DIRT-Fast		35.80 Hg		6 of 16
+May 15, '25
+
+SANTA ANITA PARK
+
+3 F		DIRT-Fast		37.00 H		9 of 18
+May 8, '25
+
+SANTA ANITA PARK
+
+3 F		DIRT-Fast		36.40 H		3 of 23
+Apr 28, '25
+
+SANTA ANITA PARK
+
+3 F		DIRT-Fast		38.20 H		29 of 36
+Apr 21, '25
+
+SANTA ANITA PARK
+
+2 F		DIRT-Fast		24.60 H		4 of 12
+SEE LESS								
+1
+
+PP 1
+7/2
+M: 7/2
+Lucho
+Bay, Colt, 3 yrs (NY) L
+Luis Alberto Batista
+15% 778 - 120 - 114 - 112
+Juan Carlos Gotera
+9%97 - 9 - 7 - 7
+Galilean
+Quite Dramatic
+Lucho
+Galilean - Quite Dramatic
+Bay, Colt, 3
+BREEDER
+Hidden Lake Farm LLC (NY)
+OWNER
+C and Y Investment Group
+Record	str	wn	pl	sh	Earnings
+Life	5	1	1	0	$11,820
+2026	4	1	1	0	$11,630
+2025	1	0	0	0	$190
+MNR	2	1	0	0	$7,340
+str	wn	pl	sh	Earnings
+Dirt	4	0	1	0	$4,860
+Turf	0	0	0	0	$0
+AW	0	0	0	0	$0
+OFF	1	1	0	0	$6,960
+Dist	1	0	0	0	$380
+ALL RACES	DIST	SURF-COND	PRG (PP)	ODDS	FIN	BL	JOCKEY	COMMENT
+REPLAY
+Sep 2, '26
+
+MOUNTAINEER CASINO RACETRACK & RESORT
+
+CLM4000
+
+5 1/2 F	DIRT-Fast	SCR	SCR	SCR	SCR	NegronL	
+Aug 16, '26
+
+MOUNTAINEER CASINO RACETRACK & RESORT
+
+CLM4000
+
+5 1/2 F	DIRT-Sloppy	SCR	SCR	SCR	SCR	LeonJA	
+Jul 20, '26
+
+MOUNTAINEER CASINO RACETRACK & RESORT
+
+CLM4000
+
+6 F	DIRT-Fast	SCR	SCR	SCR	SCR	BatistaLA	
+Jun 15, '26
+
+MOUNTAINEER CASINO RACETRACK & RESORT
+
+MCL12500
+
+5 F	DIRT-Good	3	9	1	1.25	BatistaLA	Bid clear, driving
+May 26, '26
+
+MOUNTAINEER CASINO RACETRACK & RESORT
+
+MCL3200
+
+5 F	DIRT-Fast	SCR	SCR	SCR	SCR	NegronL	
+Apr 27, '26
+
+MOUNTAINEER CASINO RACETRACK & RESORT
+
+MSW
+
+6 F	DIRT-Fast	3	23	5	23	BatistaLA	Never involved
+Apr 12, '26
+
+MOUNTAINEER CASINO RACETRACK & RESORT
+
+MSW
+
+5 1/2 F	DIRT-Fast	SCR	SCR	SCR	SCR	BatistaLA	
+Feb 11, '26
+
+TAMPA BAY DOWNS
+
+MCL16000
+
+5 1/2 F	DIRT-Fast	1	33	2	3.25	MejiasKA	Chase, svd gnd, kept on
+Jan 14, '26
+
+TAMPA BAY DOWNS
+
+MCL16000
+
+5 1/2 F	DIRT-Fast	6 (5)	37	5	12	MenesesM	Steady st, 3-2, no bid
+Dec 19, '25
+
+TAMPA BAY DOWNS
+
+MCL16000
+
+7 F	DIRT-Fast	1	22	9	25	MenesesM	Bpd/forcd in st, ins-2w
+WORKOUTS		DIST		SURF-COND		TIME		RANK
+Aug 21, '26
+
+MOUNTAINEER CASINO RACETRACK & RESORT
+
+3 F		DIRT-Fast		41.60 B		1 of 1
+Jun 8, '26
+
+MOUNTAINEER CASINO RACETRACK & RESORT
+
+3 F		DIRT-Fast		40.60 B		5 of 7
+May 29, '26
+
+MOUNTAINEER CASINO RACETRACK & RESORT
+
+4 F		DIRT-Fast		50.00 B		3 of 5
+Apr 17, '26
+
+MOUNTAINEER CASINO RACETRACK & RESORT
+
+4 F		DIRT-Fast		51.20 B		9 of 14
+Mar 9, '26
+
+NELSON JONES FARMS AND TRAINING CENTER, INC.
+
+3 F		DIRT-Good		37.10 B		1 of 1
+Feb 27, '26
+
+NELSON JONES FARMS AND TRAINING CENTER, INC.
+
+3 F		DIRT-Good		36.00 B		1 of 2
+Jan 30, '26
+
+NELSON JONES FARMS AND TRAINING CENTER, INC.
+
+4 F		DIRT-Good		48.00 Bg		1 of 3
+Jan 7, '26
+
+NELSON JONES FARMS AND TRAINING CENTER, INC.
+
+4 F		DIRT-Good		48.00 B		1 of 3
+Dec 31, '25
+
+NELSON JONES FARMS AND TRAINING CENTER, INC.
+
+4 F		DIRT-Good		49.00 B		1 of 1
+Dec 16, '25
+
+NELSON JONES FARMS AND TRAINING CENTER, INC.
+
+4 F		DIRT-Good		48.00 B		1 of 6
+Dec 11, '25
+
+NELSON JONES FARMS AND TRAINING CENTER, INC.
+
+4 F		DIRT-Fast		50.00 Bg		1 of 1
+Dec 4, '25
+
+NELSON JONES FARMS AND TRAINING CENTER, INC.
+
+3 F		DIRT-Good		38.00 B		2 of 2
+SEE LESS								
+4
+
+PP 4
+6
+M: 6
+K's Red Bull
+Chestnut, Gelding, 4 yrs (WV) L
+Luis Tapara
+14% 252 - 35 - 36 - 38
+Gabe Shafer
+15%47 - 7 - 5 - 6
+Cal Nation
+Reyoro
+K's Red Bull
+Cal Nation - Reyoro
+Chestnut, Gelding, 4
+BREEDER
+Karl Meeks (WV)
+OWNER
+Amanda Ripley
+Record	str	wn	pl	sh	Earnings
+Life	15	1	1	1	$18,650
+2026	5	0	0	0	$1,630
+2025	9	1	1	0	$15,370
+MNR	14	1	1	1	$18,505
+str	wn	pl	sh	Earnings
+Dirt	10	1	1	0	$16,010
+Turf	1	0	0	0	$145
+AW	0	0	0	0	$0
+OFF	4	0	0	1	$2,495
+Dist	4	0	0	1	$2,225
+ALL RACES	DIST	SURF-COND	PRG (PP)	ODDS	FIN	BL	JOCKEY	COMMENT
+REPLAY
+Aug 30, '26
+
+MOUNTAINEER CASINO RACETRACK & RESORT
+
+CLM7500
+
+5 1/2 F	DIRT-Fast	2	5	4	6.5	TaparaL	Flashed speed, faded
+Aug 16, '26
+
+MOUNTAINEER CASINO RACETRACK & RESORT
+
+CLM4000
+
+5 1/2 F	DIRT-Sloppy	4	41	4	3.25	TaparaL	Slow early, no factor
+Aug 4, '26
+
+MOUNTAINEER CASINO RACETRACK & RESORT
+
+CLM7500
+
+5 F	DIRT-Fast	3	35	5	11	YarangaY	Bumped at the break
+Jul 26, '26
+
+MOUNTAINEER CASINO RACETRACK & RESORT
+
+CLM15000
+
+5 F	TURF-Firm	1	40	7	21	YarangaY	Outrun
+Jul 6, '26
+
+MOUNTAINEER CASINO RACETRACK & RESORT
+
+CLM7500
+
+5 F	DIRT-Muddy	4	20	5	10	YarangaY	Dueled, gave way
+Nov 4, '25
+
+MOUNTAINEER CASINO RACETRACK & RESORT
+
+CLM12500
+
+5 1/2 F	DIRT-Fast	1	7	4	12	PaganMY	Pressed early, faded
+Oct 6, '25
+
+MOUNTAINEER CASINO RACETRACK & RESORT
+
+AOC
+
+1 M	DIRT-Fast	6 (5)	17	5	42	NegronL	Folded up from 1/2
+Sep 16, '25
+
+MOUNTAINEER CASINO RACETRACK & RESORT
+
+CLM12500
+
+6 F	DIRT-Fast	3	10	5	15	StokesJ	Evenly, tired lane
+Aug 31, '25
+
+MOUNTAINEER CASINO RACETRACK & RESORT
+
+ALW
+
+6 F	DIRT-Fast	6	11	6	22	StokesJ	Never involved
+Aug 13, '25
+
+MOUNTAINEER CASINO RACETRACK & RESORT
+
+AOC
+
+6 F	DIRT-Fast	SCR	SCR	SCR	SCR	NegronL	
+Jul 22, '25
+
+MOUNTAINEER CASINO RACETRACK & RESORT
+
+MSW
+
+5 F	DIRT-Fast	7 (6)	2	1	hd	StokesJ	Rallied up four deep
+Jul 15, '25
+
+MOUNTAINEER CASINO RACETRACK & RESORT
+
+MSW
+
+5 1/2 F	DIRT-Fast	7	8	2	3.25	StokesJ	Rallied second best
+Jul 2, '25
+
+MOUNTAINEER CASINO RACETRACK & RESORT
+
+MSW
+
+5 F	DIRT-Fast	2 (1)	11	4	5.25	StokesJ	Played no factor
+Jun 22, '25
+
+MOUNTAINEER CASINO RACETRACK & RESORT
+
+MSW
+
+6 F	DIRT-Fast	5	11	6	6.75	TaparaB	Never involved
+May 18, '25
+
+MOUNTAINEER CASINO RACETRACK & RESORT
+
+MSW
+
+5 F	DIRT-Fast	SCR	SCR	SCR	SCR	NegronL	
+Apr 21, '25
+
+MOUNTAINEER CASINO RACETRACK & RESORT
+
+MSW
+
+4 1/2 F	DIRT-Good	7 (6)	6	7	8.75	NegronL	Never involved
+Dec 2, '24
+
+MOUNTAINEER CASINO RACETRACK & RESORT
+
+MSW
+
+6 F	DIRT-Good	6 (5)	4	3	15	NegronL	Showed late interest
+WORKOUTS		DIST		SURF-COND		TIME		RANK
+Jun 28, '26
+
+MOUNTAINEER CASINO RACETRACK & RESORT
+
+3 F		DIRT-Heavy		38.20 B		2 of 2
+May 5, '26
+
+MOUNTAINEER CASINO RACETRACK & RESORT
+
+4 F		DIRT-Fast		52.00 B		19 of 21
+Apr 27, '26
+
+MOUNTAINEER CASINO RACETRACK & RESORT
+
+3 F		DIRT-Fast		38.20 B		7 of 12
+Jun 10, '25
+
+BELTERRA PARK
+
+4 F		DIRT-Fast		48.80 B		4 of 21
+Jun 2, '25
+
+BELTERRA PARK
+
+4 F		DIRT-Fast		51.11 B		18 of 21
+Apr 8, '25
+
+HORSESHOE INDIANAPOLIS
+
+4 F		DIRT-Good		49.80 Bg		60 of 93
+Mar 4, '25
+
+TURFWAY PARK
+
+4 F		AW-Fast		51.80 B		19 of 23
+Feb 18, '25
+
+TURFWAY PARK
+
+3 F		AW-Fast		38.20 B		1 of 5
+Nov 6, '24
+
+MOUNTAINEER CASINO RACETRACK & RESORT
+
+5 F		DIRT-Muddy		1:04.00 Bg		1 of 2
+Oct 28, '24
+
+MOUNTAINEER CASINO RACETRACK & RESORT
+
+4 F		DIRT-Fast		51.20 B		2 of 3
+Oct 11, '24
+
+BELTERRA PARK
+
+5 F		DIRT-Fast		1:03.00 B		2 of 3
+Oct 2, '24
+
+BELTERRA PARK
+
+3 F		DIRT-Fast		35.00 Bg		1 of 3
+Sep 20, '24
+
+BELTERRA PARK
+
+4 F		DIRT-Fast		50.25 B		6 of 10
+Sep 12, '24
+
+BELTERRA PARK
+
+3 F		DIRT-Fast		37.80 B		4 of 5
+SEE LESS								
+7
+
+PP 7
+10
+M: 10
+Southern Bullet
+Bay, Gelding, 4 yrs (KY) L
+Miguel L. Martinez
+4% 194 - 7 - 11 - 19
+Ramon Preciado
+18%56 - 10 - 8 - 6
+Copper Bullet
+Carolina South
+Southern Bullet
+Copper Bullet - Carolina South
+Bay, Gelding, 4
+BREEDER
+Greg Begley (KY)
+OWNER
+2K Racing
+Record	str	wn	pl	sh	Earnings
+Life	14	1	1	0	$34,683
+2026	6	1	0	0	$25,276
+2025	8	0	1	0	$9,407
+MNR	1	0	0	0	$450
+str	wn	pl	sh	Earnings
+Dirt	7	0	1	0	$7,113
+Turf	4	0	0	0	$4,312
+AW	3	1	0	0	$23,258
+OFF	0	0	0	0	$0
+Dist	2	0	1	0	$3,557
+ALL RACES	DIST	SURF-COND	PRG (PP)	ODDS	FIN	BL	JOCKEY	COMMENT
+REPLAY
+Aug 30, '26
+
+MOUNTAINEER CASINO RACETRACK & RESORT
+
+CLM4000
+
+1 M	DIRT-Fast	4	3-5	4	17	MartinezML	Middle move, faded
+Jun 14, '26
+
+CHURCHILL DOWNS
+
+CLM20000
+
+6 F	DIRT-Fast	6 (5)	15	6	9.25	VillarrealO	Foated out start, 4-5p
+May 25, '26
+
+CHURCHILL DOWNS
+
+CLM50000
+
+6 1/2 F	DIRT-Fast	7 (6)	81	9	16	VillarrealO	4p, 6-7p upr, no factor
+Apr 28, '26
+
+CHURCHILL DOWNS
+
+CLM20000
+
+7 F	DIRT-Fast	1	31	5	3	VillarrealO	Chsd ins, 4p1/8, stay on
+Feb 19, '26
+
+TURFWAY PARK
+
+AOC
+
+6 1/2 F	AW-Fast	11 (8)	51	6	9.75	VillarrealO	Chsd 4p, faded btw 3/16
+Jan 17, '26
+
+TURFWAY PARK
+
+MCL30000
+
+6 1/2 F	AW-Fast	6 (5)	41	1	1.25	VillarrealO	3-4pbtw, 5p3/16, up1/16
+Jan 7, '26
+
+TURFWAY PARK
+
+MCL15000
+
+6 F	AW-Fast	SCR	SCR	SCR	SCR	VillarrealO	
+Dec 3, '25
+
+TURFWAY PARK
+
+MCL30000
+
+6 1/2 F	AW-Fast	6	42	5	3.5	VillarrealO	Chased ins, no kick
+Oct 24, '25
+
+KEENELAND
+
+MCL20000
+
+7 F	DIRT-Fast	13 (10)	75	8	11	DoyleS	4-5p, 6p upr, no factor
+Sep 30, '25
+
+BELTERRA PARK
+
+MSW
+
+6 F	DIRT-Fast	4	4	2	7	FigueroaS	Passed tiring rivals
+Sep 17, '25
+
+CHURCHILL DOWNS
+
+MCL20000
+
+1 M	DIRT-Fast	7	104	8	17	SaezG	2p, no factor
+Aug 28, '25
+
+KENTUCKY DOWNS
+
+MSW
+
+1 M	TURF-Firm	1	163	9	30	DoyleS	Inside, shuffled bit
+Jul 14, '25
+
+ELLIS PARK
+
+MCL50000
+
+1 M	TURF-Firm	6 (5)	79	10	11	DoyleS	Steady btw13/16, 2w, wkn
+Jun 15, '25
+
+CHURCHILL DOWNS
+
+MSW
+
+1 M	TURF-Firm	12	75	10	23	MachadoL	4-3p, never involved
+May 8, '25
+
+CHURCHILL DOWNS
+
+MSW
+
+5 F	TURF-Firm	10	69	7	8	DoyleS	Brsh gate/step slw, ins
+WORKOUTS		DIST		SURF-COND		TIME		RANK
+Aug 18, '26
+
+MOUNTAINEER CASINO RACETRACK & RESORT
+
+5 F		DIRT-Fast		1:01.60 B		1 of 2
+May 14, '26
+
+THE THOROUGHBRED CENTER
+
+4 F		DIRT-Fast		48.80 B		1 of 17
+Apr 20, '26
+
+THE THOROUGHBRED CENTER
+
+4 F		DIRT-Fast		49.00 B		2 of 5
+Apr 12, '26
+
+THE THOROUGHBRED CENTER
+
+4 F		DIRT-Fast		49.80 B		13 of 16
+Apr 2, '26
+
+THE THOROUGHBRED CENTER
+
+3 F		DIRT-Fast		38.60 B		5 of 5
+Mar 8, '26
+
+THE THOROUGHBRED CENTER
+
+4 F		DIRT-Muddy		54.00 B		6 of 6
+Feb 14, '26
+
+THE THOROUGHBRED CENTER
+
+4 F		DIRT-Fast		52.40 B		95 of 99
+Jan 3, '26
+
+THE THOROUGHBRED CENTER
+
+4 F		DIRT-Fast		51.20 B		57 of 80
+Dec 24, '25
+
+THE THOROUGHBRED CENTER
+
+4 F		DIRT-Fast		51.20 B		51 of 60
+Nov 27, '25
+
+THE THOROUGHBRED CENTER
+
+4 F		DIRT-Fast		50.00 B		8 of 22
+Nov 13, '25
+
+THE THOROUGHBRED CENTER
+
+4 F		DIRT-Fast		52.00 B		52 of 56
+Nov 8, '25
+
+THE THOROUGHBRED CENTER
+
+3 F		DIRT-Muddy		39.00 B		5 of 5
+Sep 12, '25
+
+THE THOROUGHBRED CENTER
+
+3 F		DIRT-Fast		38.20 B		10 of 20
+Aug 22, '25
+
+THE THOROUGHBRED CENTER
+
+4 F		DIRT-Fast		49.20 B		9 of 34
+Aug 16, '25
+
+THE THOROUGHBRED CENTER
+
+4 F		DIRT-Fast		49.00 B		9 of 51
+Aug 11, '25
+
+THE THOROUGHBRED CENTER
+
+3 F		DIRT-Fast		38.20 B		2 of 4
+Jul 8, '25
+
+THE THOROUGHBRED CENTER
+
+3 F		DIRT-Fast		35.60 Bg		1 of 17
+Jun 28, '25
+
+THE THOROUGHBRED CENTER
+
+4 F		DIRT-Fast		49.00 B		4 of 44
+Jun 5, '25
+
+THE THOROUGHBRED CENTER
+
+4 F		DIRT-Fast		51.80 B		12 of 15
+May 24, '25
+
+THE THOROUGHBRED CENTER
+
+4 F		DIRT-Fast		53.00 B		40 of 40
+Apr 26, '25
+
+THE THOROUGHBRED CENTER
+
+3 F		DIRT-Muddy		36.20 B		1 of 11
+Apr 19, '25
+
+THE THOROUGHBRED CENTER
+
+4 F		DIRT-Fast		49.00 Bg		4 of 35
+Apr 11, '25
+
+THE THOROUGHBRED CENTER
+
+4 F		DIRT-Sloppy		50.60 Bg		2 of 2
+Apr 2, '25
+
+THE THOROUGHBRED CENTER
+
+3 F		DIRT-Fast		37.20 Bg		10 of 25
+Mar 24, '25
+
+THE THOROUGHBRED CENTER
+
+4 F		DIRT-Fast		50.00 B		2 of 3
+Mar 14, '25
+
+THE THOROUGHBRED CENTER
+
+3 F		DIRT-Fast		37.00 B		5 of 24
+Mar 4, '25
+
+THE THOROUGHBRED CENTER
+
+3 F		DIRT-Fast		38.40 B		11 of 29
+SEE LESS								
+2
+
+PP 2
+20
+M: 20
+Klimtster
+Bay, Gelding, 5 yrs (KY) L
+Kevin Gonzalez
+9% 597 - 53 - 77 - 65
+Juan Raul Aguirre
+0%32 - 0 - 3 - 5
+Klimt
+Kelley Marie
+Klimtster
+Klimt - Kelley Marie
+Bay, Gelding, 5
+BREEDER
+Greg Begley (KY)
+OWNER
+Juan Raul Aguirre
+Record	str	wn	pl	sh	Earnings
+Life	38	1	3	11	$37,217
+2026	11	0	0	5	$6,656
+2025	16	1	1	4	$22,476
+MNR	18	1	2	7	$23,898
+str	wn	pl	sh	Earnings
+Dirt	16	1	2	4	$20,502
+Turf	2	0	0	0	$490
+AW	1	0	0	0	$324
+OFF	18	0	1	7	$15,796
+Dist	9	0	1	4	$8,321
+ALL RACES	DIST	SURF-COND	PRG (PP)	ODDS	FIN	BL	JOCKEY	COMMENT
+REPLAY
+Sep 2, '26
+
+MOUNTAINEER CASINO RACETRACK & RESORT
+
+CLM4000
+
+1 M	DIRT-Fast	7 (6)	33	7	23	Lafrance, Jr.D	Never involved
+Aug 19, '26
+
+MOUNTAINEER CASINO RACETRACK & RESORT
+
+CLM4000
+
+6 F	DIRT-Fast	3	10	3	9.75	Lafrance, Jr.D	Evenly, outbid others
+Jul 22, '26
+
+MOUNTAINEER CASINO RACETRACK & RESORT
+
+CLM4000
+
+1 1/16 M	DIRT-Fast	7 (4)	39	4	8.75	Lafrance, Jr.D	Slow early, no factor
+Jul 14, '26
+
+MOUNTAINEER CASINO RACETRACK & RESORT
+
+STR
+
+1 M	DIRT-Fast	1	83	7	18	TaparaL	Folded up on far turn
+Jun 14, '26
+
+MOUNTAINEER CASINO RACETRACK & RESORT
+
+CLM4000
+
+1 M	DIRT-Sloppy	1	9-2	6	9.5	OliverosC	Faded on the far turn
+May 10, '26
+
+MOUNTAINEER CASINO RACETRACK & RESORT
+
+CLM4000
+
+1 M	DIRT-Good	SCR	SCR	SCR	SCR	OliverosC	
+May 3, '26
+
+MOUNTAINEER CASINO RACETRACK & RESORT
+
+CLM4000
+
+1 M	DIRT-Fast	6	7	3	10	OliverosC	Angled mid tk fin well
+Apr 19, '26
+
+MOUNTAINEER CASINO RACETRACK & RESORT
+
+CLM4000
+
+1 M	DIRT-Fast	5 (3)	7	3	4.5	OliverosC	Stalked, hung inside
+Feb 20, '26
+
+MAHONING VALLEY RACE COURSE
+
+CLM5000
+
+1 M	DIRT-Muddy	4	17	6	13	OliverosC	Saved ground, no bid
+Feb 9, '26
+
+MAHONING VALLEY RACE COURSE
+
+CLM5000
+
+1m 70 Y	DIRT-Good	6 (5)	7	4	7.75	OliverosC	5w1/4, ins1/8, empty
+Jan 22, '26
+
+MAHONING VALLEY RACE COURSE
+
+CLM5000
+
+1m 70 Y	DIRT-Muddy	2	15	3	17	OliverosC	Outlasted rest for 3rd
+Jan 7, '26
+
+MAHONING VALLEY RACE COURSE
+
+CLM5000
+
+1 M	DIRT-Sloppy	5 (4)	28	3	4.5	OliverosC	Mid-pack ins, late int
+Dec 18, '25
+
+MAHONING VALLEY RACE COURSE
+
+CLM7500
+
+1 M	DIRT-Muddy	1	17	5	7.75	OliverosC	Saved ground, miss 4th
+Nov 10, '25
+
+MOUNTAINEER CASINO RACETRACK & RESORT
+
+CLM7500
+
+1 M	DIRT-Good	7	3	3	11	NegronL	Held show
+Oct 20, '25
+
+MOUNTAINEER CASINO RACETRACK & RESORT
+
+ALW
+
+1 M	DIRT-Good	3 (2)	5	4	11	Taboada FloresL	Miid move, evenly
+Sep 23, '25
+
+MOUNTAINEER CASINO RACETRACK & RESORT
+
+CLM12500
+
+1 M	DIRT-Good	10 (5)	13	2	12	Taboada FloresL	Rallied, saved place
+Sep 9, '25
+
+MOUNTAINEER CASINO RACETRACK & RESORT
+
+MSW
+
+1 M	DIRT-Fast	1	15	1	7.5	Taboada FloresL	Inside bid, drew off
+Aug 20, '25
+
+MOUNTAINEER CASINO RACETRACK & RESORT
+
+CLM12500
+
+1m 70 Y	DIRT-Fast	2	64	5	16	Taboada FloresL	Chased, faded far turn
+Jul 16, '25
+
+MOUNTAINEER CASINO RACETRACK & RESORT
+
+MSW
+
+1 M	DIRT-Sloppy	3	24	5	25	Taboada FloresL	Played no factor
+Jul 7, '25
+
+MOUNTAINEER CASINO RACETRACK & RESORT
+
+MSW
+
+6 F	DIRT-Good	10 (9)	32	8	19	Taboada FloresL	Never involved
+May 23, '25
+
+BELTERRA PARK
+
+MCL15000
+
+6 F	DIRT-Fast	SCR	SCR	SCR	SCR	TaparaL	
+May 5, '25
+
+MOUNTAINEER CASINO RACETRACK & RESORT
+
+MSW
+
+6 F	DIRT-Good	4	36	4	6.25	Gomez, Jr.A	Improved position5wi
+Apr 12, '25
+
+MAHONING VALLEY RACE COURSE
+
+MCL10000
+
+6 F	DIRT-Good	5	5	3	5.25	Gomez, Jr.A	Best stride late4wide
+Apr 2, '25
+
+MAHONING VALLEY RACE COURSE
+
+MCL10000
+
+1 M	DIRT-Sloppy	8	32	7	9	TaparaB	No threat
+Mar 20, '25
+
+MAHONING VALLEY RACE COURSE
+
+MSW
+
+1 M	DIRT-Wet Fast	5 (4)	12	5	16	TaparaB	Trailed, no factor
+Mar 4, '25
+
+MAHONING VALLEY RACE COURSE
+
+MSW
+
+1m 70 Y	DIRT-Fast	2	32	6	17	TaparaB	No threat
+Feb 12, '25
+
+MAHONING VALLEY RACE COURSE
+
+MSW
+
+1 M	DIRT-Fast	3	50	4	12	TaparaL	Improved position late
+Jan 16, '25
+
+MAHONING VALLEY RACE COURSE
+
+MCL10000
+
+6 F	DIRT-Good	7 (6)	38	3	7.75	TaparaB	Best stride late 5wide
+Jan 6, '25
+
+MAHONING VALLEY RACE COURSE
+
+MCL5000
+
+1 M	DIRT-Good	6 (5)	14	4	4	TaparaB	Pace to lane, weakened
+Dec 23, '24
+
+MAHONING VALLEY RACE COURSE
+
+MCL5000
+
+6 F	DIRT-Frozen	9 (6)	13	6	11	DiazR	No factor
+Dec 4, '24
+
+MOUNTAINEER CASINO RACETRACK & RESORT
+
+MSW
+
+1 M	DIRT-Good	5 (4)	15	3	7.25	HernandezJH	Evenly, held position
+Oct 28, '24
+
+MAHONING VALLEY RACE COURSE
+
+MSW
+
+1 M	DIRT-Fast	3	83	6	6.5	YarangaY	Evenly
+Oct 8, '24
+
+MOUNTAINEER CASINO RACETRACK & RESORT
+
+MCL4000
+
+1 M	DIRT-Fast	6	23	2	13	YarangaY	Rallied
+Oct 2, '24
+
+MOUNTAINEER CASINO RACETRACK & RESORT
+
+MCL4000
+
+6 F	DIRT-Fast	3	40	3	8.5	YarangaY	Chased, even fin ins
+Sep 18, '24
+
+BELTERRA PARK
+
+MCL7500
+
+6 F	DIRT-Fast	6	77	8	9.75	LagunesG	Never menaced
+Sep 4, '24
+
+BELTERRA PARK
+
+MCL10000
+
+5 F	TURF-Firm	1	29	5	13	LagunesG	Broke slow no menace
+Aug 15, '24
+
+BELTERRA PARK
+
+MSW
+
+1 M	DIRT-Fast	1	139	9	41	MurgiaA	Done early
+Jul 31, '24
+
+HORSESHOE INDIANAPOLIS
+
+MCL12500
+
+1 M	TURF-Firm	3	73	10	11	CorreaYL	Stalked early3p, faded
+Jul 10, '24
+
+BELTERRA PARK
+
+MCL15000
+
+6 F	DIRT-Fast	6 (3)	6	2	10	GomezA	All out run for 2nd
+Mar 28, '24
+
+TURFWAY PARK
+
+MCL15000
+
+6 1/2 F	AW-Fast	1	22	8	20	CanutoT	Off slow, saved gorund
+WORKOUTS		DIST		SURF-COND		TIME		RANK
+Jun 9, '26
+
+MOUNTAINEER CASINO RACETRACK & RESORT
+
+4 F		DIRT-Fast		52.40 B		15 of 18
+Apr 11, '26
+
+MOUNTAINEER CASINO RACETRACK & RESORT
+
+4 F		DIRT-Fast		49.60 B		5 of 13
+Mar 31, '26
+
+MOUNTAINEER CASINO RACETRACK & RESORT
+
+4 F		DIRT-Fast		49.80 B		12 of 19
+Aug 13, '25
+
+MOUNTAINEER CASINO RACETRACK & RESORT
+
+4 F		DIRT-Fast		51.00 B		8 of 17
+Jul 4, '25
+
+MOUNTAINEER CASINO RACETRACK & RESORT
+
+3 F		DIRT-Fast		41.40 B		3 of 3
+Feb 5, '25
+
+MAHONING VALLEY RACE COURSE
+
+4 F		DIRT-Fast		50.40 B		14 of 31
+Sep 14, '24
+
+THE THOROUGHBRED CENTER
+
+3 F		DIRT-Fast		37.20 B		6 of 10
+Aug 9, '24
+
+THE THOROUGHBRED CENTER
+
+4 F		DIRT-Fast		50.80 B		8 of 12
+Jul 2, '24
+
+THE THOROUGHBRED CENTER
+
+4 F		DIRT-Fast		50.40 Bg		14 of 21
+Jun 24, '24
+
+THE THOROUGHBRED CENTER
+
+3 F		DIRT-Fast		38.00 B		5 of 5
+Mar 22, '24
+
+THE THOROUGHBRED CENTER
+
+4 F		DIRT-Fast		50.20 B		7 of 18
+Mar 16, '24
+
+THE THOROUGHBRED CENTER
+
+4 F		DIRT-Muddy		49.80 B		5 of 11
+Mar 9, '24
+
+THE THOROUGHBRED CENTER
+
+5 F		DIRT-Sloppy		1:03.40 B		1 of 1
+Mar 2, '24
+
+THE THOROUGHBRED CENTER
+
+3 F		DIRT-Fast		37.40 Bg		1 of 6
+Feb 9, '24
+
+THE THOROUGHBRED CENTER
+
+3 F		DIRT-Fast		38.20 Bg		11 of 20
+Jan 30, '24
+
+TURFWAY PARK
+
+4 F		AW-Fast		48.20 B		5 of 10
+Jan 9, '24
+
+TURFWAY PARK
+
+4 F		AW-Fast		50.80 B		8 of 11
+Dec 30, '23
+
+THE THOROUGHBRED CENTER
+
+4 F		DIRT-Fast		50.00 B		26 of 58
+Dec 23, '23
+
+THE THOROUGHBRED CENTER
+
+3 F		DIRT-Fast		38.00 B		15 of 24
+Dec 16, '23
+
+THE THOROUGHBRED CENTER
+
+3 F		DIRT-Fast		38.60 B		20 of 25
+SEE LESS								
+6
+
+PP 6
+SCR
+M: 15
+Yemrehanakristos
+Bay, Colt, 4 yrs (FL) L bOn
+Luis Negron
+22% 591 - 131 - 92 - 82
+Julie Stansbury
+10%82 - 8 - 16 - 15
+Killargue
+Baby I'm Worth It
+8
+
+PP 8
+SCR
+M: 8
+Viva Victory
+Bay, Horse, 7 yrs (KY)
+Renzo Diaz
+12% 74 - 9 - 7 - 9
+Megan Reust
+10%20 - 2 - 1 - 2
+Candy Ride (ARG)
+Viva Malala

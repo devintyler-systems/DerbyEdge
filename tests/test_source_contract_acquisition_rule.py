@@ -206,12 +206,33 @@ class TestDKBasicWeightOverlay:
     def test_mnr_basic_overlay_populates_scratched_runner_weights_and_validates(self, mnr_card):
         """Issue #18: Basic-tab weights apply to scratches without relaxing active gates."""
         from src.ingest.dk_source_contract import SOURCE_CONTRACT_COMPLETE, evaluate_acquisition_rule
-        from src.ingest.draftkings_basic_csv import parse_draftkings_basic_csv
+        from src.ingest.draftkings_basic_csv import DraftKingsBasicCSV, DraftKingsBasicCSVRow
         from src.ingest.draftkings_markdown import validate_draftkings_markdown_card
 
         patched = copy.deepcopy(mnr_card)
-        overlay = parse_draftkings_basic_csv(_find_fixture("MNR_DK_Horse_R4_9-14-26.xlsx"))
-        expected_weights = overlay.weights_by_program_number
+        basic_rows = {
+            "1": {"RUNNER": "Lucho", "WEIGHT": 120},
+            "2": {"RUNNER": "Klimtster", "WEIGHT": 124},
+            "3": {"RUNNER": "New York New York", "WEIGHT": 124},
+            "4": {"RUNNER": "K's Red Bull", "WEIGHT": 124},
+            "5": {"RUNNER": "Joker Went Wild", "WEIGHT": 125},
+            "6": {"RUNNER": "Yemrehanakristos", "WEIGHT": 124},
+            "7": {"RUNNER": "Southern Bullet", "WEIGHT": 124},
+            "8": {"RUNNER": "Viva Victory", "WEIGHT": 124},
+        }
+        overlay = DraftKingsBasicCSV(
+            source_path="<inline-mnr-r4-basic>",
+            source_sha256="0" * 64,
+            rows=tuple(
+                DraftKingsBasicCSVRow(
+                    program_number=program,
+                    horse_name=values["RUNNER"],
+                    weight=values["WEIGHT"],
+                )
+                for program, values in basic_rows.items()
+            ),
+        )
+        expected_weights = {program: values["WEIGHT"] for program, values in basic_rows.items()}
 
         assert len(patched.entries) == 8
         assert {entry.program_number for entry in patched.entries if not entry.is_scratched} == {

@@ -7,3 +7,6 @@ audit_run.txt whitespace=-blank-at-eol
 
 # Keep the generated feature catalog byte-identical across platforms.
 output/feature_catalog.csv text eol=lf
+
+draftkings_racedata_pdfs/fixtures/*.md -whitespace
+tests/fixtures/*.md -whitespace
