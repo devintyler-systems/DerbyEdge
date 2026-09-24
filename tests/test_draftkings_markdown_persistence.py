@@ -1,6 +1,7 @@
 """Canonical persistence and readiness contracts for validated DK Markdown cards."""
 from __future__ import annotations
 
+import copy
 import sqlite3
 from datetime import datetime, timezone
 from pathlib import Path
@@ -21,8 +22,8 @@ FIXTURE = ROOT / "draftkings_racedata_pdfs" / "fixtures" / "SAR_DK_Horse_R6_9-4-
 AS_OF = datetime(2026, 9, 4, 12, tzinfo=timezone.utc)
 
 
-def _conn() -> sqlite3.Connection:
-    conn = sqlite3.connect(":memory:")
+def _conn(db_path: Path | None = None) -> sqlite3.Connection:
+    conn = sqlite3.connect(db_path or ":memory:")
     conn.row_factory = sqlite3.Row
     schema = (ROOT / "db" / "schema.sql").read_text(encoding="utf-8")
     schema = "\n".join(line for line in schema.splitlines() if "journal_mode" not in line)
@@ -170,6 +171,27 @@ def test_failed_validation_cannot_be_persisted_or_become_score_ready():
     with pytest.raises(ValueError, match="validation did not pass"):
         persist_validated_draftkings_markdown(conn, card, validation, source_filename="bad.md")
     assert conn.execute("SELECT COUNT(*) FROM race_cards").fetchone()[0] == 0
+    conn.close()
+
+
+def test_missing_required_active_runner_weight_hard_fails_without_score_row(tmp_path):
+    conn = _conn(tmp_path / "missing-required-input.db")
+    card, _ = _validated_card()
+    incomplete = copy.deepcopy(card)
+    incomplete.entries[0].weight = None
+    validation = validate_draftkings_markdown_card(incomplete)
+
+    assert validation.passed is False
+    assert any("missing required weight" in error for error in validation.errors)
+    with pytest.raises(ValueError, match="validation did not pass"):
+        persist_validated_draftkings_markdown(
+            conn,
+            incomplete,
+            validation,
+            source_filename=FIXTURE.name,
+            source_path=str(FIXTURE),
+        )
+    assert conn.execute("SELECT COUNT(*) FROM entry_scores").fetchone()[0] == 0
     conn.close()
 
 

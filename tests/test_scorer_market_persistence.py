@@ -11,6 +11,7 @@ import pytest
 
 from src.ingest.run_state import RunMode
 from src.models import scorer
+from src.services.run_mode import ScoringBlockedError
 from src.services.runtime_score_preflight import ExecutionMode
 
 
@@ -192,7 +193,8 @@ def _score_and_rows(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, *, live_dec
     conn = _connect(db_path)
     rows = conn.execute(
         """SELECT market_implied_prob, p_ml_implied, p_market_live,
-                  value_score, edge_vs_live_market, bet_tag
+                  value_score, edge_vs_live_market, bet_tag,
+                  missing_data_flag, confidence_flag, low_conf_bet_block
            FROM entry_scores ORDER BY post_position"""
     ).fetchall()
     conn.close()
@@ -202,6 +204,112 @@ def _score_and_rows(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, *, live_dec
 def _expected_ml() -> np.ndarray:
     raw = np.asarray([round(1.0 / (odds + 1.0), 6) for odds in ML_ODDS])
     return raw / raw.sum()
+
+
+def test_required_row_contract_hard_fails_without_aligned_feature_row():
+    entries = pd.DataFrame(
+        [{
+            "entry_id": 11,
+            "card_id": 1,
+            "horse_name": "Contract Runner",
+            "post_position": 1,
+            "morning_line_odds": 4.0,
+        }]
+    )
+    features = pd.DataFrame([{"entry_id": 12}])
+
+    with pytest.raises(ScoringBlockedError, match="feature_store_row"):
+        scorer._required_scoring_row_flags(entries, features)
+
+
+@pytest.mark.parametrize("bad_feature_id", [11.5, float("inf")])
+def test_required_row_contract_rejects_malformed_feature_identifier(
+    bad_feature_id,
+):
+    entries = pd.DataFrame(
+        [{
+            "entry_id": 11,
+            "card_id": 1,
+            "horse_name": "Contract Runner",
+            "post_position": 1,
+            "morning_line_odds": 4.0,
+        }]
+    )
+    features = pd.DataFrame([{"entry_id": bad_feature_id}])
+
+    with pytest.raises(ScoringBlockedError, match="feature_store.entry_id"):
+        scorer._required_scoring_row_flags(entries, features)
+
+
+@pytest.mark.parametrize(
+    ("field", "bad_value", "message"),
+    [
+        ("entry_id", 11.5, "entry_id"),
+        ("post_position", float("inf"), "post_position"),
+    ],
+)
+def test_required_row_contract_rejects_malformed_entry_identifiers(
+    field,
+    bad_value,
+    message,
+):
+    row = {
+        "entry_id": 11,
+        "card_id": 1,
+        "horse_name": "Contract Runner",
+        "post_position": 1,
+        "morning_line_odds": 4.0,
+    }
+    row[field] = bad_value
+
+    with pytest.raises(ScoringBlockedError, match=message):
+        scorer._required_scoring_row_flags(
+            pd.DataFrame([row]),
+            pd.DataFrame([{"entry_id": 11}]),
+        )
+
+
+def test_score_race_missing_required_feature_row_persists_nothing(
+    monkeypatch,
+    tmp_path,
+):
+    db_path = tmp_path / "scorer-required-row.db"
+    entry_ids = _seed_six_entry_card(db_path)
+    conn = _connect(db_path)
+    conn.execute("DELETE FROM feature_store WHERE entry_id=?", (entry_ids[-1],))
+    conn.execute(
+        """INSERT INTO horse_starts
+           (entry_id, horse_id, card_id, finish_position, start_date)
+           SELECT entry_id, horse_id, card_id, 2, '2026-08-01'
+           FROM entries WHERE card_id=1"""
+    )
+    conn.commit()
+    conn.close()
+
+    monkeypatch.setattr(scorer, "get_connection", lambda: _connect(db_path))
+    monkeypatch.setattr(
+        scorer,
+        "save_artifact",
+        lambda *_args, **_kwargs: pytest.fail("artifact write reached"),
+    )
+
+    with pytest.raises(ScoringBlockedError) as exc_info:
+        scorer.score_race(card_id=1, execution_mode=ExecutionMode.BACKTEST)
+
+    assert "Feature rows cover 5 of 6 parsed entries" in str(exc_info.value)
+
+    conn = _connect(db_path)
+    persisted = {
+        table: conn.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]
+        for table in ("model_registry", "score_runs", "entry_scores")
+    }
+    conn.close()
+
+    assert persisted == {
+        "model_registry": 0,
+        "score_runs": 0,
+        "entry_scores": 0,
+    }
 
 
 def test_six_entry_no_live_card_persists_ml_baseline_without_live_alias(monkeypatch, tmp_path):
@@ -216,6 +324,9 @@ def test_six_entry_no_live_card_persists_ml_baseline_without_live_alias(monkeypa
     assert all(row["value_score"] is None for row in rows)
     assert all(row["edge_vs_live_market"] is None for row in rows)
     assert all(row["bet_tag"] is None for row in rows)
+    assert all(row["missing_data_flag"] == 0 for row in rows)
+    assert all(row["confidence_flag"] == 1 for row in rows)
+    assert all(row["low_conf_bet_block"] == 0 for row in rows)
 
 
 def test_live_card_persists_distinct_ml_baseline_and_normalized_live_market(monkeypatch, tmp_path):
@@ -233,3 +344,5 @@ def test_live_card_persists_distinct_ml_baseline_and_normalized_live_market(monk
     assert [row["value_score"] for row in rows] == pytest.approx(expected_edges, abs=1e-4)
     assert [row["edge_vs_live_market"] for row in rows] == pytest.approx(expected_edges, abs=1e-4)
     assert all(row["bet_tag"] in {"bet", "neutral", "underlay"} for row in rows)
+    assert all(row["missing_data_flag"] == 0 for row in rows)
+    assert all(row["confidence_flag"] == 1 for row in rows)

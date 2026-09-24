@@ -141,6 +141,7 @@ from src.app.board_state import (
 from src.app.board_formatting import (
     _edge_str,
     market_probability_display,
+    missing_data_flag_notice,
     morning_line_str,
     prepare_probability_display_columns,
 )
@@ -2417,24 +2418,12 @@ with tab2:
             else:
                 st.caption("No PP start blocks found in the 1/ST BET PDF.")
 
-        # Missing data flags
-        if horse["missing_data_flag"] == 1:
-            conf_lbl = _conf_label(horse["confidence_flag"])
-            is_derby_run = bool(meta.get("derby_override_active", 0)) if meta else False
-            _entry_feature_row = feat_df[feat_df["horse_name"] == horse["horse_name"]] if not feat_df.empty else pd.DataFrame()
-            _has_workout_detail = bool(
-                not _entry_feature_row.empty
-                and float(_entry_feature_row.iloc[0].get("dk_workout_count") or 0) > 0
-            )
-            _base_flag_items = ["no_race_splits", "no_connections_stats", "no_track_form", "no_post_bias"]
-            if not _has_workout_detail:
-                _base_flag_items.insert(1, "no_workout_detail")
-            base_flags = ", ".join(_base_flag_items)
-            derby_flags = ", no_jan_apr_curve, no_churchill_readiness" if is_derby_run else ""
-            single_start = ", dist_fit_single_start" if conf_lbl == "low" else ""
-            flags_str = base_flags + derby_flags + single_start
+        _legacy_missing_notice = missing_data_flag_notice(
+            horse.get("missing_data_flag")
+        )
+        if _legacy_missing_notice:
             st.markdown(
-                f'<div class="warn-banner">⚠ Missing data flags: {flags_str}</div>',
+                f'<div class="warn-banner">⚠ {_legacy_missing_notice}</div>',
                 unsafe_allow_html=True,
             )
 
@@ -5471,7 +5460,7 @@ It also ingests results so you can see, race by race:
 5. **Decide bets**
    Review:
    - Top Pick vs Favorites vs actual odds.
-   - Whether the model is confident (quality tier, missing data flags).
+   - Whether the model is confident (quality tier and confidence reasons).
    - Kelly-suggested stakes.
    You can follow the suggestions, scale them down, or pass the race.
 

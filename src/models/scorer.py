@@ -121,6 +121,98 @@ def _finite_or_none(value) -> float | None:
         return None
     return numeric if np.isfinite(numeric) else None
 
+
+def _positive_integral_identifier(value: object) -> int | None:
+    """Return a canonical positive integer only after exact shape validation."""
+    if isinstance(value, (bool, np.bool_)):
+        return None
+    try:
+        numeric = float(value)
+    except (TypeError, ValueError):
+        return None
+    if not np.isfinite(numeric) or not numeric.is_integer() or numeric <= 0:
+        return None
+    return int(numeric)
+
+
+def _required_scoring_row_flags(
+    entries_df: pd.DataFrame,
+    feat_df: pd.DataFrame,
+) -> dict[int, int]:
+    """Validate the minimum persisted scoring-row contract.
+
+    Source-specific acquisition requirements remain owned by their intake
+    validators. At the scorer boundary, every active entry must retain its
+    canonical identity, post, morning line, and aligned feature-store row.
+    Incomplete rows hard-fail before inference or persistence, so every row
+    returned here is complete and receives ``missing_data_flag = 0``.
+    """
+    required_columns = (
+        "entry_id",
+        "card_id",
+        "horse_name",
+        "post_position",
+        "morning_line_odds",
+    )
+    missing_columns = [
+        name for name in required_columns if name not in entries_df.columns
+    ]
+    if "entry_id" not in feat_df.columns:
+        missing_columns.append("feature_store.entry_id")
+    if missing_columns:
+        raise ScoringBlockedError(
+            "SCORING BLOCKED: required scoring columns are unavailable: "
+            + ", ".join(missing_columns)
+        )
+
+    blockers: list[str] = []
+    feature_entry_ids: set[int] = set()
+    for value in feat_df["entry_id"]:
+        feature_entry_id = _positive_integral_identifier(value)
+        if feature_entry_id is None:
+            blockers.append(
+                f"feature_store.entry_id={value!r} is not a positive integer"
+            )
+        else:
+            feature_entry_ids.add(feature_entry_id)
+
+    complete: dict[int, int] = {}
+    for _, row in entries_df.iterrows():
+        entry_id = _positive_integral_identifier(row["entry_id"])
+        if entry_id is None:
+            blockers.append(
+                f"entry_id={row['entry_id']!r} is not a positive integer"
+            )
+            continue
+        missing: list[str] = []
+        if _positive_integral_identifier(row["card_id"]) is None:
+            missing.append("card_id")
+        if pd.isna(row["horse_name"]) or not str(row["horse_name"]).strip():
+            missing.append("horse_name")
+        if _positive_integral_identifier(row["post_position"]) is None:
+            missing.append("post_position")
+        morning_line = pd.to_numeric(
+            pd.Series([row["morning_line_odds"]]), errors="coerce"
+        ).iloc[0]
+        if (
+            pd.isna(morning_line)
+            or not np.isfinite(morning_line)
+            or float(morning_line) <= 0
+        ):
+            missing.append("morning_line_odds")
+        if entry_id not in feature_entry_ids:
+            missing.append("feature_store_row")
+        if missing:
+            blockers.append(f"entry_id={entry_id}: {', '.join(missing)}")
+        else:
+            complete[entry_id] = 0
+
+    if blockers:
+        raise ScoringBlockedError(
+            "SCORING BLOCKED: required row-level input missing: " + "; ".join(blockers)
+        )
+    return complete
+
 try:
     from training.win_model_loader import (
         load_best_model as _load_best_model,
@@ -1123,12 +1215,19 @@ def score_race(
         conn.close()
         raise RuntimeError(f"No features for card_id={card_id} — run build_features first.")
 
+    try:
+        required_row_flags = _required_scoring_row_flags(entries_df, feat_df)
+    except Exception:
+        conn.close()
+        raise
+
     # Filter feat_df to live (non-scratched) entries only.
     # v_entries_live already excludes scratches; we must align feat_df so
     # positional array indexing (win_probs[i], feat_df.iloc[i]) stays in sync.
-    _live_eids = set(entries_df["entry_id"].astype(int))
+    _live_eids = set(required_row_flags)
+    _feature_eids = feat_df["entry_id"].map(_positive_integral_identifier)
     feat_df = (
-        feat_df[feat_df["entry_id"].astype(int).isin(_live_eids)]
+        feat_df[_feature_eids.isin(_live_eids)]
         .reset_index(drop=True)
     )
     if feat_df.empty:
@@ -1483,7 +1582,8 @@ def score_race(
             round(float(blended_probs[i]), 6),
             round(float(edge_vs_live_market[i]), 6) if np.isfinite(edge_vs_live_market[i]) else None,
             final_bet_tags[i],
-            conf_flag, 1, int(low_conf_bet_block[i]), int(rank_arr[i]),
+            conf_flag, required_row_flags[eid],
+            int(low_conf_bet_block[i]), int(rank_arr[i]),
             erow.get("trainer", ""), erow.get("jockey", ""),
             round(float(chaos_scores[i]), 6) if chaos_applied else None,
             round(float(chaos_boosts[i]), 6) if chaos_applied else None,

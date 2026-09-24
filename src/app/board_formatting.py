@@ -7,6 +7,23 @@ import math
 import pandas as pd
 
 
+LEGACY_MISSING_DATA_FLAG_NOTICE = (
+    "Legacy completeness flag: this value is not evidence that a specific "
+    "required or optional input was missing. Review the run's source audit."
+)
+
+
+def missing_data_flag_notice(value: object) -> str | None:
+    """Render the historical flag without inventing a missing-input reason."""
+    try:
+        numeric = float(value)
+    except (TypeError, ValueError):
+        return None
+    if math.isfinite(numeric) and numeric == 1.0:
+        return LEGACY_MISSING_DATA_FLAG_NOTICE
+    return None
+
+
 def market_probability_display(
     live_market_prob: object,
     persisted_market_prob: object,
