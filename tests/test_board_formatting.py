@@ -6,6 +6,7 @@ import pandas as pd
 from src.app.board_formatting import (
     _edge_str,
     market_probability_display,
+    missing_data_flag_notice,
     morning_line_str,
     pace_fit_str,
     prepare_probability_display_columns,
@@ -81,3 +82,14 @@ def test_market_probability_display_preserves_precedence_and_blocks_missing_tag(
     assert display == "MISSING"
     assert label == "ML-Implied %"
     assert not allow_bet_tag
+
+
+def test_legacy_missing_data_flag_does_not_claim_specific_missing_inputs():
+    notice = missing_data_flag_notice(1)
+
+    assert notice is not None
+    assert "not evidence" in notice
+    assert "required or optional input" in notice
+    assert "Missing data flags" not in notice
+    assert missing_data_flag_notice(0) is None
+    assert missing_data_flag_notice(None) is None
