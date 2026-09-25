@@ -247,7 +247,9 @@ def apply_live_odds_overlay(
                     np.where(edge < underlay_edge_threshold, "underlay", "neutral"))
     if "confidence_flag" in out:
         low_confidence = pd.to_numeric(out["confidence_flag"], errors="coerce").fillna(0) == 0
-        tags = np.where(low_confidence.to_numpy(), "neutral", tags)
+        low_conf_bet_block = low_confidence.to_numpy() & (tags == "bet")
+        tags = np.where(low_conf_bet_block, "neutral", tags)
+        out["low_conf_bet_block"] = low_conf_bet_block.astype(int)
     out["bet_tag"] = tags
     timestamp = max(timestamps) if timestamps else None
     source = ", ".join(sorted(sources)) if sources else None

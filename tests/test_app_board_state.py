@@ -78,6 +78,7 @@ def test_selected_run_pin_keeps_manual_choice_but_rejects_another_cards_run():
 
 def test_no_live_odds_keeps_persisted_value_and_tag_without_zero_fabrication():
     persisted = _board()
+    persisted["low_conf_bet_block"] = [1, 0]
 
     result = apply_live_odds_overlay(
         persisted, {}, bet_edge_threshold=0.025, underlay_edge_threshold=-0.015
@@ -87,6 +88,7 @@ def test_no_live_odds_keeps_persisted_value_and_tag_without_zero_fabrication():
     assert result.message == LIVE_ODDS_UNAVAILABLE
     assert result.board["value_score"].tolist() == persisted["value_score"].tolist()
     assert result.board["bet_tag"].tolist() == persisted["bet_tag"].tolist()
+    assert result.board["low_conf_bet_block"].tolist() == [1, 0]
     assert result.board["value_score"].ne(0).any()
     assert result.board["live_market_prob"].isna().all()
 
@@ -109,6 +111,7 @@ def test_complete_live_odds_recomputes_market_edge_and_tag_but_not_model_probabi
     assert result.board["market_implied_prob"].round(6).tolist() == [0.4, 0.6]
     assert result.board["value_score"].round(6).tolist() == [0.2, -0.2]
     assert result.board["bet_tag"].tolist() == ["bet", "underlay"]
+    assert result.board.loc[0, "low_conf_bet_block"] == 0
     assert result.board["score_run_value_score"].tolist() == [0.15, -0.15]
 
 
@@ -147,6 +150,29 @@ def test_live_overlay_preserves_low_confidence_bet_blocking():
     assert result.available
     assert result.board.loc[0, "value_score"] > 0.025
     assert result.board.loc[0, "bet_tag"] == "neutral"
+    assert result.board.loc[0, "low_conf_bet_block"] == 1
+
+
+def test_live_overlay_preserves_low_confidence_underlay():
+    persisted = _board()
+    persisted.loc[1, "confidence_flag"] = 0
+    persisted["low_conf_bet_block"] = 0
+    live = {
+        1: {"entry_id": 101, "decimal_odds": 2.0},
+        2: {"entry_id": 102, "decimal_odds": 2.0},
+    }
+
+    result = apply_live_odds_overlay(
+        persisted, live, bet_edge_threshold=0.025, underlay_edge_threshold=-0.015
+    )
+
+    assert result.available
+    bravo = result.board.loc[1]
+    assert round(bravo["live_market_prob"], 6) == 0.50
+    assert round(bravo["value_score"], 6) == -0.10
+    assert bravo["bet_tag"] == "underlay"
+    assert bravo["score_run_bet_tag"] == "underlay"
+    assert bravo["low_conf_bet_block"] == 0
 
 
 def test_live_snapshot_loader_returns_entry_id_for_exact_overlay_mapping():
