@@ -22,6 +22,7 @@ from pathlib import Path
 import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
+CANONICAL_FIXTURE_DIR = ROOT / "draftkings_racedata_pdfs" / "fixtures"
 
 POST_TS   = "2026-09-04T21:30:00+00:00"
 AS_OF_TS  = "2026-09-04T18:00:00+00:00"
@@ -34,9 +35,18 @@ DMR_AS_OF = "2026-09-07T18:00:00+00:00"
 # ---------------------------------------------------------------------------
 
 def _find_fixture(name: str) -> Path:
-    matches = list(ROOT.rglob(name))
-    assert matches, f"Required fixture not found anywhere under repo root: {name}"
-    return matches[0]
+    """Resolve a fixture strictly within the canonical tracked fixture directory.
+
+    Must not fall back to a repo-wide search: generated/output paths can contain
+    same-named files (e.g. output/acceptance/dk-backfill-run-test/) that would
+    otherwise be picked up nondeterministically.
+    """
+    path = CANONICAL_FIXTURE_DIR / name
+    assert path.is_file(), (
+        f"Required canonical fixture not found: {path} "
+        f"(looked only in {CANONICAL_FIXTURE_DIR}, no fallback search performed)"
+    )
+    return path
 
 
 @pytest.fixture(scope="module")
@@ -80,6 +90,56 @@ def _basic_tab_csv_for(card, *, matching: bool = True) -> str:
             f"{program},5/2,3/1,Runner,122,Jockey,Trainer,Sire,Dam,Stalker,10"
         )
     return "\n".join(rows)
+
+
+# ---------------------------------------------------------------------------
+# Deterministic fixture selection (issue #26)
+# ---------------------------------------------------------------------------
+
+class TestDeterministicFixtureSelection:
+    def test_find_fixture_ignores_generated_output_collision(self, tmp_path, monkeypatch):
+        """A same-named file under a generated output/acceptance directory must
+        never shadow the canonical tracked fixture."""
+        import tests.test_source_contract_acquisition_rule as mod
+
+        fixture_name = "COLLISION_FIXTURE_9-1-26.md"
+
+        canonical_dir = tmp_path / "draftkings_racedata_pdfs" / "fixtures"
+        canonical_dir.mkdir(parents=True)
+        canonical_path = canonical_dir / fixture_name
+        canonical_path.write_text("canonical content", encoding="utf-8")
+
+        colliding_dir = tmp_path / "output" / "acceptance" / "dk-backfill-run-test"
+        colliding_dir.mkdir(parents=True)
+        colliding_path = colliding_dir / fixture_name
+        colliding_path.write_text("generated collision content", encoding="utf-8")
+
+        monkeypatch.setattr(mod, "ROOT", tmp_path)
+        monkeypatch.setattr(mod, "CANONICAL_FIXTURE_DIR", canonical_dir)
+
+        resolved = mod._find_fixture(fixture_name)
+
+        assert resolved == canonical_path
+        assert resolved.read_text(encoding="utf-8") == "canonical content"
+
+    def test_find_fixture_fails_clearly_when_canonical_file_absent(self, tmp_path, monkeypatch):
+        """Must not silently fall back to a same-named file elsewhere in the repo."""
+        import tests.test_source_contract_acquisition_rule as mod
+
+        fixture_name = "DOES_NOT_EXIST_CANONICALLY_9-1-26.md"
+
+        canonical_dir = tmp_path / "draftkings_racedata_pdfs" / "fixtures"
+        canonical_dir.mkdir(parents=True)
+
+        elsewhere_dir = tmp_path / "output" / "acceptance" / "dk-backfill-run-test"
+        elsewhere_dir.mkdir(parents=True)
+        (elsewhere_dir / fixture_name).write_text("should not be selected", encoding="utf-8")
+
+        monkeypatch.setattr(mod, "ROOT", tmp_path)
+        monkeypatch.setattr(mod, "CANONICAL_FIXTURE_DIR", canonical_dir)
+
+        with pytest.raises(AssertionError, match="Required canonical fixture not found"):
+            mod._find_fixture(fixture_name)
 
 
 # ---------------------------------------------------------------------------
