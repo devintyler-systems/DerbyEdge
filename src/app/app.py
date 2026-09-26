@@ -140,10 +140,12 @@ from src.app.board_state import (
 )
 from src.app.board_formatting import (
     _edge_str,
+    confidence_select_fragment,
     market_probability_display,
     missing_data_flag_notice,
     morning_line_str,
     prepare_probability_display_columns,
+    resolve_confidence_badge_key,
 )
 
 # ── Page config ────────────────────────────────────────────────────────────────
@@ -201,9 +203,10 @@ TAG_BADGE = {
     "neutral": '<span class="status-badge badge-neutral">—</span>',
 }
 CONF_BADGE = {
-    "high":   '<span class="status-badge badge-bet">HIGH</span>',
-    "medium": '<span class="status-badge badge-med">MED</span>',
-    "low":    '<span class="status-badge badge-low">LOW!</span>',
+    "high":      '<span class="status-badge badge-bet">HIGH</span>',
+    "medium":    '<span class="status-badge badge-med">MED</span>',
+    "low":       '<span class="status-badge badge-low">LOW!</span>',
+    "ambiguous": '<span class="status-badge badge-med">MED/HIGH</span>',
 }
 TAG_ICON  = {"bet": "🟢 BET", "underlay": "🔴 UL",  "neutral": "—"}
 CONF_ICON = {"HIGH": "🟢 HIGH", "MEDIUM": "🔵 MED",  "LOW": "🟡 LOW",
@@ -242,19 +245,7 @@ def load_board(
         # After ensure_entry_scores_columns the columns will always exist, but this
         # guard protects against any code path that reaches here without the ensure call.
         _es_cols = entry_scores_cols(conn)
-        if "confidence_score" in _es_cols:
-            _conf_fragment = (
-                "es.confidence_score,\n"
-                "                   es.confidence_bucket,\n"
-                "                   es.confidence_reasons,"
-            )
-        else:
-            _conf_fragment = (
-                "NULL AS confidence_score,\n"
-                "                   CASE WHEN es.confidence_flag = 0 THEN 'LOW'"
-                " ELSE 'MEDIUM' END AS confidence_bucket,\n"
-                "                   NULL AS confidence_reasons,"
-            )
+        _conf_fragment = confidence_select_fragment("confidence_score" in _es_cols)
 
         df = pd.read_sql(
             f"""
@@ -681,11 +672,6 @@ def _no_data(msg: str = "No score data found.") -> None:
         "python scripts/score.py",
         language="bash",
     )
-
-
-def _conf_label(flag: int) -> str:
-    """Legacy helper — maps binary flag to text; prefer confidence_bucket when available."""
-    return "medium" if flag == 1 else "low"
 
 
 def _safe_num(val, ndigits: int = 4):
@@ -2045,7 +2031,14 @@ with tab2:
             TAG_BADGE.get(horse["bet_tag"], horse["bet_tag"])
             if _ui_contract.show_bet_tags and _market_available else ""
         )
-        col_conf = CONF_BADGE.get(_conf_label(horse["confidence_flag"]), "")
+        col_conf = CONF_BADGE.get(
+            resolve_confidence_badge_key(
+                horse.get("confidence_bucket"),
+                horse.get("confidence_bucket_is_persisted"),
+                horse["confidence_flag"],
+            ),
+            "",
+        )
 
         st.markdown(
             f"## #{int(horse['post_position'])} {horse['horse_name']}  "

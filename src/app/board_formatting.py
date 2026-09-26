@@ -62,6 +62,73 @@ def morning_line_str(value: object) -> str:
     return f"{numeric:.0f}-1" if math.isfinite(numeric) else "—"
 
 
+def confidence_select_fragment(confidence_score_column_present: bool) -> str:
+    """Build load_board's confidence SELECT fragment for either entry_scores schema.
+
+    When the modern ``confidence_score`` column exists, project the genuinely
+    persisted, scored three-way ``confidence_bucket`` as-is. Otherwise
+    (pre-migration legacy schema) synthesize a bucket from the binary
+    ``confidence_flag`` alone — this can only ever prove LOW or "not LOW", never
+    a real MEDIUM or HIGH. Either branch projects an explicit
+    ``confidence_bucket_is_persisted`` indicator (1 / 0) so downstream display
+    code never has to guess provenance from whether some other column is null.
+    """
+    if confidence_score_column_present:
+        return (
+            "es.confidence_score,\n"
+            "                   es.confidence_bucket,\n"
+            "                   es.confidence_reasons,\n"
+            "                   1 AS confidence_bucket_is_persisted,"
+        )
+    return (
+        "NULL AS confidence_score,\n"
+        "                   CASE WHEN es.confidence_flag = 0 THEN 'LOW'"
+        " ELSE 'MEDIUM' END AS confidence_bucket,\n"
+        "                   NULL AS confidence_reasons,\n"
+        "                   0 AS confidence_bucket_is_persisted,"
+    )
+
+
+def resolve_confidence_badge_key(
+    confidence_bucket: object,
+    confidence_bucket_is_persisted: object,
+    confidence_flag: object,
+) -> str:
+    """Resolve the horse-detail confidence badge key without overclaiming.
+
+    ``confidence_bucket_is_persisted`` is an explicit indicator projected by
+    the query itself — 1 when ``confidence_bucket`` came straight from a
+    genuinely scored, persisted three-way value (LOW/MEDIUM/HIGH), 0 when the
+    legacy-schema query instead synthesized it via
+    ``CASE WHEN confidence_flag = 0 THEN 'LOW' ELSE 'MEDIUM' END``. It is not
+    guessed from whether some other column happens to be null.
+
+    A synthesized bucket is trustworthy for LOW (the flag says so exactly)
+    but a synthesized MEDIUM only means "not LOW" — it could really be HIGH —
+    so that case renders an explicit ambiguous label instead of asserting
+    either level. A row claiming to be persisted but missing a valid bucket
+    value must not fabricate HIGH or MEDIUM either; it falls back to the
+    same flag-based rule as a legacy row.
+    """
+    bucket = (
+        str(confidence_bucket).strip().upper()
+        if confidence_bucket not in (None, "")
+        else None
+    )
+
+    if bool(confidence_bucket_is_persisted) and bucket in ("LOW", "MEDIUM", "HIGH"):
+        return bucket.lower()
+
+    try:
+        flag = int(confidence_flag)
+    except (TypeError, ValueError):
+        flag = None
+
+    if flag == 0:
+        return "low"
+    return "ambiguous"
+
+
 def pace_fit_str(value: object) -> str:
     """Render pace fit only when it is genuinely runner-specific evidence."""
     try:
