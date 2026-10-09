@@ -15,7 +15,7 @@ Python 3.11, SQLite (`db/derbyedge.db`, gitignored; schema `db/schema.sql`), Str
 - `src/models/` scorer, trainer, policy, confidence; `src/features/` feature builder; `src/derbyedge/` tracks, odds math
 - `training/` CLIs: `python -m training.status | walk_forward | paper_trading | daily_cycle`; `scripts/` ingest and migration tools
 - Docs: `docs/race_bundle_format.md`, `chart_parser.md`, `walk_forward.md`, `paper_trading.md`, `play_day_checklist.md`
-- The user launches the app from the desktop **DerbyEdge** shortcut (Windows, `C:\Projects\derbyedge-engine`).
+- The user launches the app from the desktop **DerbyEdge** shortcut, which runs `start_derbyedge.bat` (Windows, `C:\Projects\derbyedge-engine`).
 
 ## Working agreement
 - Develop on the branch the session names; draft PR; never push elsewhere. Commit messages explain why.
