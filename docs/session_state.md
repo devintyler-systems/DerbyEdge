@@ -1,6 +1,5 @@
 # Session state (update at the end of every outcome; keep under 40 lines)
 Working rules, including the mandatory UPDATE YOUR LOCAL FILES block: `docs/working_rules.md`.
-
 _Last updated: 2026-10-09 (night), branch `claude/relaxed-noether-0kqijv`, PR devintyler-systems/DerbyEdge#32 (draft). Full suite 1247 passed locally; CI not yet seen on the new commits._
 
 ## Done and on the branch (not yet merged to main)
