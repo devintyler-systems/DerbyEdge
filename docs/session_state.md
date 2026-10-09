@@ -12,7 +12,7 @@ paper trading, daily cycle, `training.status`, engine-version stamp, play-day ch
 57 older races lack a post time (`AS_OF_UNPROVEN`). Existing runs are `legacy`, never pooled with new ones.
 
 ## First real race (BEL R5 10-9-26) - what it showed
-- Launcher works (the desktop shortcut must point at `start_derbyedge.bat`, not `START_DERBYEDGE.md`). Bundle import PASSED after the
+- Launcher works (user launches via the desktop **DerbyEdge** shortcut). Bundle import PASSED after the
   TwinSpires "expert Nth pick" tag fix (`twinspires_markdown.py`; fixture `tests/fixtures/BEL_Full_Race_Data_R5_10-9-26.md`).
 - **The engine produced no independent forecast.** Win % is NULL/nan, sum win prob 0, model `seed_only_baseline` (0 labeled starters),
   run mode `MARKET_ANCHORED_NOT_ACTIONABLE`: the collapse-to-morning-line guard (`scorer.py` ~1394, stores NULL win_probability) fired.
@@ -30,7 +30,7 @@ paper trading, daily cycle, `training.status`, engine-version stamp, play-day ch
 
 ## Open
 - Not verified: Streamlit upload / scoring buttons and `start_derbyedge.bat` have not run end to end on a real race.
-- BEL R5 re-imported (card 75): bundle PASS; snapshot correctly rejected (race over). Confirm the block stored: `SELECT card_id, captured_at FROM twinspires_race_stats;` (UI now shows RACE STATS status). Then merge PR #32.
+- RACE STATS capture CONFIRMED on the user's machine (card 75, post-race TEST row: not evidence). Next: a live race uploaded before post for a valid row, then merge PR #32.
 - Pasting caution: DK and TwinSpires tabs auto-advance to the next race; the first R5 attempt had R6's tabs.
 - Commit `CLAUDE.md` (`!CLAUDE.md` in `.gitignore`) so cloud sessions can read the working agreement.
 - Optional: backfill post times for the 57 legacy races (dry run first); keep as a labelled baseline.
