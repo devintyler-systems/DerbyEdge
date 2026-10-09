@@ -5,7 +5,7 @@ _Last updated: 2026-10-09 (night), branch `claude/relaxed-noether-0kqijv`, PR de
 ## Done and on the branch (not yet merged to main)
 Morning-line fix + repair, Belmont at the Big A -> BAQ, Equibase chart parser, chart store/join/populate, walk-forward evaluation,
 paper trading, daily cycle, `training.status`, engine-version stamp, play-day checklist, `start_derbyedge.bat`, this file.
-**`CLAUDE.md` is NOT in git** (`.gitignore` rule `C*`): it exists only on the user's machine.
+`CLAUDE.md` now tracked (`!CLAUDE.md` in `.gitignore`); the user's old local copy was stale and is replaced by the tracked one.
 
 ## User's machine
 `C:\Projects\derbyedge-engine`, on the PR branch. Morning-line repair applied to cards 73 and 74. `status` showed 1 graded race:
@@ -32,7 +32,6 @@ paper trading, daily cycle, `training.status`, engine-version stamp, play-day ch
 - Not verified: Streamlit upload / scoring buttons and `start_derbyedge.bat` have not run end to end on a real race.
 - RACE STATS capture CONFIRMED on the user's machine (card 75, post-race TEST row: not evidence). Next: a live race uploaded before post for a valid row, then merge PR #32.
 - Pasting caution: DK and TwinSpires tabs auto-advance to the next race; the first R5 attempt had R6's tabs.
-- Commit `CLAUDE.md` (`!CLAUDE.md` in `.gitignore`) so cloud sessions can read the working agreement.
 - Optional: backfill post times for the 57 legacy races (dry run first); keep as a labelled baseline.
 - Not built, by decision: real-bet log (30 graded races), multi-user product. Not handled: dead heats, cancelled / moved-off-turf races.
 ## Next move
