@@ -36,4 +36,4 @@ Streamlit upload and scoring buttons, and `start_derbyedge.bat`, have not been r
 
 ## Next move
 Fix `training.status` (my defect): count only races whose graded/scored run has real win probabilities, and report how many collapsed to the
-morning line. Then parse and store the RACE STATS block raw (not used in scoring yet).
+morning line. Then parse and store the RACE STATS block raw (not used in scoring yet); sample in `tests/fixtures/TS_RaceStats_BEL_R5_10-9-26.md`.
