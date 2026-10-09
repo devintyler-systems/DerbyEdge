@@ -10,3 +10,4 @@ output/feature_catalog.csv text eol=lf
 
 draftkings_racedata_pdfs/fixtures/*.md -whitespace
 tests/fixtures/*.md -whitespace
+*.bat text eol=crlf
