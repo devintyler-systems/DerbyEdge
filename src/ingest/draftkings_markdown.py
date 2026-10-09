@@ -14,6 +14,7 @@ from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from src.derbyedge.tracks import is_race_venue, resolve_track
 from src.utils.distance_parser import parse_furlongs
 from src.utils.source_file_guard import stamp_source, warn_if_outside_fixtures
 
@@ -21,7 +22,7 @@ from src.utils.source_file_guard import stamp_source, warn_if_outside_fixtures
 PARSER_VERSION = "1.1.0"
 DATE_RE = re.compile(r"(?P<value>[A-Z][a-z]{2}\s+\d{1,2},\s*'\d{2})")
 ENTRY_RE = re.compile(
-    r"(?m)^(?P<program>\d{1,2}[A-Za-z]?)\s*\n"
+    r"(?m)^(?P<program>(?:AE|MTO)?\d{1,2}[A-Za-z]?)\s*\n"
     r"(?P<odds>[^\n]+)\n(?P<morning_line>[^\n]+)\n"
     r"(?P<horse>[^\n]+)\n(?P<medication>L?\d{2,3}[^\n]*)\n"
     r"(?P<jockey>[^\n]+)\n(?P<trainer>[^\n]+)\s*$"
@@ -32,7 +33,7 @@ FILENAME_DATE_RE = re.compile(r"_R\d+_(\d{1,2}-\d{1,2}-(?:\d{2}|\d{4}))", re.I)
 # the program number on its own line just above.  This layout does not use the
 # compact ``ENTRY_RE`` header at all.
 PP_ANCHOR_RE = re.compile(r"(?m)^PP\s+(?P<pp>\d+)\s*$")
-_PROGRAM_LINE_RE = re.compile(r"^(?P<program>\d{1,2}[A-Za-z]?)$")
+_PROGRAM_LINE_RE = re.compile(r"^(?P<program>(?:AE|MTO)?\d{1,2}[A-Za-z]?)$")
 _DMR_IDENTITY_RE = re.compile(
     r"^(?P<color>.+?),\s*"
     r"(?P<sex>Colt|Filly|Gelding|Horse|Mare|Ridgling|Rig|Rigling|Colt/Gelding)\.?,?\s*"
@@ -122,6 +123,13 @@ class Entry:
     has_workouts_section: bool = False
     runner_parse_warnings: list[str] = dataclasses.field(default_factory=list)
     block_source_span: tuple[int, int] | None = None
+    # STARTER | SCRATCHED | AE (also-eligible) | MTO (main-track-only).  Only a
+    # STARTER is an active runner; the others are retained but never counted.
+    entry_status: str = "STARTER"
+
+    @property
+    def is_active(self) -> bool:
+        return self.entry_status == "STARTER" and not self.is_scratched
 
 
 @dataclasses.dataclass
@@ -200,6 +208,8 @@ class ValidationResult:
     errors: list[str]
     warnings: list[str]
     passed: bool
+    scratched_runner_count: int = 0
+    total_program_entries: int = 0
 
     def to_dict(self) -> dict[str, Any]:
         return dataclasses.asdict(self)
@@ -409,6 +419,47 @@ def _record_splits(
     return splits
 
 
+
+def _program_status(program: str | None, scratched: bool) -> str:
+    if scratched:
+        return "SCRATCHED"
+    label = (program or "").upper()
+    if label.startswith("AE"):
+        return "AE"
+    if label.startswith("MTO"):
+        return "MTO"
+    return "STARTER"
+
+
+def _leading_post(program: str | None) -> int | None:
+    match = re.match(r"\d+", program or "")
+    return int(match.group()) if match else None
+
+
+def _assign_post_positions(entries: list["Entry"], warnings: list[str]) -> None:
+    """Make post positions unique per card without dropping a runner.
+
+    Coupled entries (1 / 1A) share a leading program digit, and AE / MTO labels
+    have none, so a program-derived post can collide.  A collision is resolved
+    to the next free post and reported rather than letting one runner overwrite
+    its mate downstream.
+    """
+    taken: set[int] = set()
+    for entry in entries:
+        post = entry.post_position
+        if post is None or post in taken:
+            post_new = max(taken, default=0) + 1
+            while post_new in taken:
+                post_new += 1
+            warnings.append(
+                f"runner {entry.horse_name!r} (program {entry.program_number}): post position "
+                f"{post if post is not None else 'unavailable'} not unique; assigned {post_new}"
+            )
+            entry.runner_parse_warnings.append("post position inferred from entry order")
+            entry.post_position = post_new
+        taken.add(entry.post_position)
+
+
 def _parse_entry_block(match: re.Match[str], block: str, race_year: int | None = None) -> Entry:
     program = _clean(match.group("program"))
     medication = _clean(match.group("medication"))
@@ -416,7 +467,7 @@ def _parse_entry_block(match: re.Match[str], block: str, race_year: int | None =
     return Entry(
         program_number=program,
         horse_name=_clean(match.group("horse")),
-        post_position=int(re.match(r"\d+", program).group()) if program and re.match(r"\d+", program) else None,
+        post_position=_leading_post(program),
         weight=int(weight_match.group(1)) if weight_match else None,
         jockey=_clean(match.group("jockey")), trainer=_clean(match.group("trainer")),
         morning_line=_clean(match.group("morning_line")), medication_weight_equipment=medication,
@@ -578,6 +629,7 @@ def _split_pp_runner_blocks(raw: str) -> list[tuple[str | None, int, int, int]]:
 
 def _parse_pp_runner_block(
     block: str, program: str | None, race_year: int | None, track_code: str | None,
+    pp_number: int | None = None,
 ) -> tuple[Entry, list[str]]:
     """Parse the Del-Mar-style runner top-matter (identity only, tolerant)."""
     warnings: list[str] = []
@@ -652,9 +704,9 @@ def _parse_pp_runner_block(
         age=age, sex=sex, color=color, sire=_clean(sire), dam=_clean(dam),
         breeder=breeder, raw_profile="\n".join(values[:12]) or None,
     )
-    post_position = None
-    if program and re.match(r"\d+", program):
-        post_position = int(re.match(r"\d+", program).group())
+    # The ``PP n`` anchor is the source's own post position; the program number
+    # is only a fallback (they differ for coupled entries, AE and MTO).
+    post_position = pp_number if pp_number is not None else _leading_post(program)
 
     entry = Entry(
         program_number=_clean(program),
@@ -694,7 +746,8 @@ def parse_draftkings_markdown(
         raise ValueError("as_of must be timezone-aware")
     race = _metadata(raw, resolved_path)
     race_year = race.race_date.year if race.race_date else None
-    track_code = (race.track or "").strip()[:4].upper() or None
+    # The record table labels the target track by its Equibase code ("CT", "SAR").
+    track_code = resolve_track(track_name=race.track or "").get("track_code") or (race.track or "").strip()[:4].upper() or None
 
     entries: list[Entry] = []
     pps: list[PastPerformance] = []
@@ -757,7 +810,9 @@ def parse_draftkings_markdown(
         # ---- Del-Mar-style PP {n} layout -------------------------------------
         for program, _pp_number, block_start, block_end in pp_blocks:
             block = raw[block_start:block_end]
-            entry, block_warnings = _parse_pp_runner_block(block, program, race_year, track_code)
+            entry, block_warnings = _parse_pp_runner_block(
+                block, program, race_year, track_code, pp_number=_pp_number,
+            )
             entry.block_source_span = (block_start, block_end)
             entry.runner_parse_warnings.extend(block_warnings)
             _attach_history(
@@ -765,6 +820,7 @@ def parse_draftkings_markdown(
                 see_less_found="SEE LESS" in block, truncation_is_fatal=False,
             )
             warnings.extend(f"runner {entry.horse_name!r}: {w}" for w in block_warnings)
+            entry.entry_status = _program_status(entry.program_number, entry.is_scratched)
             entries.append(entry)
     else:
         # ---- Compact ENTRY_RE layout ---------------------------------------
@@ -799,12 +855,14 @@ def parse_draftkings_markdown(
             entry = _parse_entry_block(match, block, race_year)
             entry.block_source_span = (match.start(), block_end)
             entry.is_scratched = scratched
+            entry.entry_status = _program_status(entry.program_number, scratched)
             _attach_history(
                 entry, block,
                 see_less_found=see_less_found, truncation_is_fatal=not scratched,
             )
             entries.append(entry)
 
+    _assign_post_positions(entries, warnings)
     expected_match = re.search(r"\b(\d+)\s+(?:runners|starters)\b", raw, re.I)
     return DraftKingsMarkdownCard(
         source_path=resolved_path, source_sha256=hashlib.sha256(raw_bytes).hexdigest(),
@@ -825,6 +883,19 @@ def validate_draftkings_markdown_card(card: DraftKingsMarkdownCard) -> Validatio
     for label, value in (("track", race.track), ("race number", race.race_number), ("race date/as_of date", race.race_date), ("surface", race.surface), ("distance", race.distance)):
         if value is None or value == "":
             errors.append(f"race identity missing required {label}")
+    if race.track:
+        resolved = resolve_track(track_name=race.track)
+        if not resolved["track_code"]:
+            why = "is ambiguous in" if resolved["resolution_source"] == "ambiguous" else "is not in"
+            errors.append(
+                f"race track {race.track!r} {why} the track registry (data/reference/); "
+                "add its Equibase code to equibase_track_abbreviations.csv or track_aliases.csv"
+            )
+        elif not is_race_venue(resolved["track_code"]):
+            errors.append(
+                f"race track {race.track!r} resolves to {resolved['track_code']} ({resolved['kind']}), "
+                "which is not a race venue"
+            )
     if not card.entries:
         errors.append("no entries parsed")
     program_seen: set[str] = set()
@@ -838,10 +909,15 @@ def validate_draftkings_markdown_card(card: DraftKingsMarkdownCard) -> Validatio
             errors.append(f"duplicate horse-name entry identity: {entry.horse_name}")
         program_seen.add(program)
         horse_seen.add(horse)
-        for label, value in (("horse name", entry.horse_name), ("jockey", entry.jockey), ("trainer", entry.trainer), ("weight", entry.weight)):
+        # A scratched / also-eligible / MTO runner is retained for identity but
+        # is not a starter, so only its name is mandatory.
+        required = [("horse name", entry.horse_name)]
+        if entry.is_active:
+            required += [("jockey", entry.jockey), ("trainer", entry.trainer), ("weight", entry.weight)]
+        for label, value in required:
             if value is None or value == "":
                 errors.append(f"entry {entry.program_number or '?'} missing required {label}")
-        if entry.horse_profile.sire is None or entry.horse_profile.dam is None:
+        if entry.is_active and (entry.horse_profile.sire is None or entry.horse_profile.dam is None):
             warnings.append(f"entry {entry.program_number or '?'} has optional pedigree fields unavailable")
     for row in card.past_performances:
         missing = [label for label, value in (("date", row.start_date), ("race track", row.track), ("distance", row.distance), ("surface-condition", row.surface_condition), ("finish position", row.finish_position), ("class", row.race_class)) if value is None or value == ""]
@@ -868,7 +944,9 @@ def validate_draftkings_markdown_card(card: DraftKingsMarkdownCard) -> Validatio
         source_path=card.source_path, source_format=card.source_format, source_sha256=card.source_sha256,
         parser_version=card.parser_version, validation_timestamp=datetime.now(timezone.utc).isoformat(),
         race_identifier=identifier, expected_runner_count=card.expected_runner_count,
-        parsed_unique_runner_count=len({(entry.program_number, entry.horse_name) for entry in card.entries}),
+        parsed_unique_runner_count=len({(e.program_number, e.horse_name) for e in card.entries if e.is_active}),
+        scratched_runner_count=sum(1 for e in card.entries if not e.is_active),
+        total_program_entries=len(card.entries),
         past_performance_row_count=len(card.past_performances), workout_row_count=len(card.workouts),
         errors=list(dict.fromkeys(errors)), warnings=list(dict.fromkeys(warnings)), passed=not errors,
     )

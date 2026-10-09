@@ -22,6 +22,7 @@ from src.ingest.draftkings_markdown import (
     parse_draftkings_markdown,
     validate_draftkings_markdown_card,
 )
+from src.ingest.race_time import post_time_to_utc
 from src.services.race_card_builder import find_race_card, parse_morning_line
 from src.utils.distance_parser import parse_furlongs
 
@@ -337,6 +338,8 @@ def persist_validated_draftkings_markdown(
     *,
     source_filename: str,
     source_path: str | None = None,
+    scheduled_post_utc: str | None = None,
+    captured_at: datetime | None = None,
 ) -> MarkdownPersistenceResult:
     """Persist a PASS card to canonical tables and append immutable provenance.
 
@@ -367,16 +370,30 @@ def persist_validated_draftkings_markdown(
 
     race = card.race
     track_resolution = resolve_track(track_name=race.track or "")
-    track_code = track_resolution.get("track_code") or (race.track or "UNK")[:6].upper()
+    track_code = track_resolution.get("track_code")
+    if not track_code:
+        # Never invent a code from the leading letters of the header: a wrong
+        # track silently splits one race's history and market data across cards.
+        raise ValueError(f"Validated card has unrecognized track {race.track!r}; add it to the track registry.")
     race_date = race.race_date.isoformat() if race.race_date else None
     if not race_date or race.race_number is None:
         raise ValueError("Validated card lacks canonical race identity.")
     existing_card_id = find_race_card(conn, track_code, race_date, int(race.race_number))
     materially_different = (
-        _materially_differs_from_existing_card(conn, int(existing_card_id), card.entries)
+        _materially_differs_from_existing_card(
+            conn, int(existing_card_id), [e for e in card.entries if e.is_active]
+        )
         if existing_card_id is not None else False
     )
     track_id = _track_id(conn, track_code, race.track or track_code)
+    active_count = sum(1 for e in card.entries if e.is_active)
+    if scheduled_post_utc is None:
+        # Never store the bare clock string: the pre-post gates parse this
+        # column as an ISO-8601 instant, and a local "7:02 PM" can only fail them.
+        scheduled_post_utc, _post_source = post_time_to_utc(
+            race.race_date, race.scheduled_post_time or race.post_time_display,
+            track_code, captured_at=captured_at,
+        )
     distance_yards = int(round((race.normalized_distance_furlongs or 0.0) * 220))
     if distance_yards <= 0:
         raise ValueError("Validated card has no usable canonical distance.")
@@ -387,8 +404,8 @@ def persist_validated_draftkings_markdown(
                 age_restriction, conditions, field_size, scheduled_post_time_utc)
                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (track_id, race_date, int(race.race_number), race.purse, distance_yards, _surface(race.surface),
-             race.class_code, race.age_restriction, race.surface_condition, len(card.entries),
-             race.scheduled_post_time),
+             race.class_code, race.age_restriction, race.surface_condition, active_count,
+             scheduled_post_utc),
         )
         card_id = int(conn.execute("SELECT last_insert_rowid()").fetchone()[0])
     else:
@@ -400,7 +417,7 @@ def persist_validated_draftkings_markdown(
                field_size=?, scheduled_post_time_utc=COALESCE(?, scheduled_post_time_utc)
                WHERE card_id=?""",
             (track_id, race.purse, distance_yards, _surface(race.surface), race.class_code,
-             race.age_restriction, race.surface_condition, len(card.entries), race.scheduled_post_time, card_id),
+             race.age_restriction, race.surface_condition, active_count, scheduled_post_utc, card_id),
         )
 
     for entry in card.entries:
@@ -412,14 +429,25 @@ def persist_validated_draftkings_markdown(
         dirt = entry.record_splits.get("dirt")
         distance = entry.record_splits.get("distance")
         ml = parse_morning_line(entry.morning_line)
+        scratch_flag = 0 if entry.is_active else 1
         if not ml or ml <= 0:
-            raise ValueError(f"Validated card has unusable morning line for {entry.horse_name!r}")
+            if scratch_flag == 0:
+                raise ValueError(f"Validated card has unusable morning line for {entry.horse_name!r}")
+            ml = 1.0  # non-starter: column is NOT NULL; the row is excluded by scratch_flag=1
+        # Identity is the program number (1 and 1A are different runners that
+        # may share a leading digit), then the horse; post position is only a
+        # last resort for legacy rows that never stored a program number.
         current = conn.execute(
-            "SELECT entry_id FROM entries WHERE card_id=? AND horse_id=?", (card_id, horse_id)
+            "SELECT entry_id FROM entries WHERE card_id=? AND program_number=?", (card_id, entry.program_number)
         ).fetchone()
         if current is None:
             current = conn.execute(
-                "SELECT entry_id FROM entries WHERE card_id=? AND post_position=?", (card_id, entry.post_position)
+                "SELECT entry_id FROM entries WHERE card_id=? AND horse_id=?", (card_id, horse_id)
+            ).fetchone()
+        if current is None:
+            current = conn.execute(
+                "SELECT entry_id FROM entries WHERE card_id=? AND program_number IS NULL AND post_position=?",
+                (card_id, entry.post_position),
             ).fetchone()
         if current is None:
             conn.execute(
@@ -430,7 +458,7 @@ def persist_validated_draftkings_markdown(
                     dirt_starts, dirt_wins, dist_starts, dist_wins)
                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 (card_id, horse_id, trainer_id, jockey_id, owner_id, entry.post_position, entry.weight,
-                 float(ml), 0, entry.program_number, entry.medication_weight_equipment,
+                 float(ml), scratch_flag, entry.program_number, entry.medication_weight_equipment,
                  life.starts if life else None, life.wins if life else None, life.places if life else None,
                  life.shows if life else None, life.earnings if life else None,
                  dirt.starts if dirt else None, dirt.wins if dirt else None,
@@ -439,7 +467,7 @@ def persist_validated_draftkings_markdown(
         else:
             conn.execute(
                 """UPDATE entries SET horse_id=?, trainer_id=?, jockey_id=?, owner_id=?, post_position=?, weight=?,
-                   morning_line_odds=?, scratch_flag=0, program_number=?, medication_weight_equipment=?,
+                   morning_line_odds=?, scratch_flag=?, program_number=?, medication_weight_equipment=?,
                    career_starts=COALESCE(?, career_starts), career_wins=COALESCE(?, career_wins),
                    career_places=COALESCE(?, career_places), career_shows=COALESCE(?, career_shows),
                    career_earnings=COALESCE(?, career_earnings), dirt_starts=COALESCE(?, dirt_starts),
@@ -447,7 +475,7 @@ def persist_validated_draftkings_markdown(
                    dist_wins=COALESCE(?, dist_wins)
                    WHERE entry_id=?""",
                 (horse_id, trainer_id, jockey_id, owner_id, entry.post_position, entry.weight, float(ml),
-                 entry.program_number, entry.medication_weight_equipment,
+                 scratch_flag, entry.program_number, entry.medication_weight_equipment,
                  life.starts if life else None, life.wins if life else None, life.places if life else None,
                  life.shows if life else None, life.earnings if life else None,
                  dirt.starts if dirt else None, dirt.wins if dirt else None,

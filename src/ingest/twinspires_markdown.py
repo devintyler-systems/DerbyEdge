@@ -43,6 +43,7 @@ class TwinSpiresRecord:
     run_style_code: str | None = None
     early_speed_points: int | None = None
     current_odds: str | None = None
+    morning_line: str | None = None
 
 
 @dataclasses.dataclass(frozen=True)
@@ -56,6 +57,7 @@ class TwinSpiresMarkdownCard:
     records: tuple[TwinSpiresRecord, ...]
     parser_errors: tuple[str, ...]
     parser_warnings: tuple[str, ...]
+    scratched: tuple[TwinSpiresRecord, ...] = ()
 
 
 def _number(value: str | None) -> float | None:
@@ -93,11 +95,23 @@ def _as_of(raw: str, declared_as_of: str | None) -> tuple[str | None, str]:
     return normalized.astimezone(timezone.utc).isoformat(), "PROVEN"
 
 
+def _ml_cell(value: str) -> str | None:
+    match = re.match(r"^M:\s*(.+)$", value.strip(), re.I)
+    return match.group(1).strip() if match else None
+
+
 def _record_from_chunk(program: str, lines: list[str]) -> TwinSpiresRecord | None:
     if not lines:
         return None
     if any(line.upper() == "SCR" for line in lines[:2]):
-        return TwinSpiresRecord(program, "", None, None, None, None, None, None, None, None, {}, "\n".join(lines), True)
+        # Row layout: SCR, "M: x", PL, runner, ...  Name/ML are kept so a scratch
+        # can be cross-checked against the other sources.
+        return TwinSpiresRecord(
+            program_number=program, horse_name=lines[3] if len(lines) > 3 else "", run_style=None,
+            avg_speed=None, back_speed=None, last_speed=None, class_rating=None, power_rating=None,
+            jockey_win_pct=None, trainer_win_pct=None, raw_values={}, raw_text="\n".join(lines),
+            scratched=True, morning_line=_ml_cell(lines[1]) if len(lines) > 1 else None,
+        )
     style_at = next((idx for idx, value in enumerate(lines) if _STYLE.match(value)), None)
     if style_at is None or style_at < 2 or len(lines) < style_at + 9:
         return None
@@ -124,6 +138,7 @@ def _record_from_chunk(program: str, lines: list[str]) -> TwinSpiresRecord | Non
         run_style_code=_STYLE.fullmatch(lines[style_at]).group(1).upper(),
         early_speed_points=int(_STYLE.fullmatch(lines[style_at]).group(2)),
         current_odds=lines[0],
+        morning_line=_ml_cell(lines[1]) if len(lines) > 1 else None,
     )
 
 
@@ -152,12 +167,15 @@ def parse_twinspires_markdown(
     if header not in (_HEADER, ("ALL",) + _HEADER):
         errors.append("TwinSpires summary header does not match the expected column schema")
     records: list[TwinSpiresRecord] = []
+    scratched_records: list[TwinSpiresRecord] = []
     for offset, start in enumerate(starts):
         end = starts[offset + 1] if offset + 1 < len(starts) else len(lines)
         record = _record_from_chunk(lines[start], lines[start + 1:end])
         if record is None:
             errors.append(f"program {lines[start]} malformed: required style/value cells unavailable")
-        elif not record.scratched:
+        elif record.scratched:
+            scratched_records.append(record)
+        else:
             records.append(record)
     if not starts:
         errors.append("no TwinSpires runner rows found")
@@ -173,4 +191,5 @@ def parse_twinspires_markdown(
         source_sha256=hashlib.sha256(raw_bytes).hexdigest(), parser_version=PARSER_VERSION,
         declared_as_of=as_of, as_of_status=as_of_status, records=tuple(records),
         parser_errors=tuple(errors), parser_warnings=tuple(warnings),
+        scratched=tuple(scratched_records),
     )

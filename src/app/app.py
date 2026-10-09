@@ -65,6 +65,7 @@ from src.app.race_import import (
     markdown_import_summary,
     primary_uploader_config,
 )
+from src.services.race_bundle_intake import persist_race_bundle_extras
 from src.services.draftkings_markdown_intake import (
     MarkdownCardScoreReadiness,
     ScoreReadinessBlocker,
@@ -2865,7 +2866,25 @@ with tab5:
                         _p5_dispatch.validation,
                         source_filename=_pdf5_file.name,
                         source_path=str(_stored_path.resolve()),
+                        scheduled_post_utc=(
+                            _p5_dispatch.bundle.post_utc if _p5_dispatch.bundle else None
+                        ),
+                        captured_at=(
+                            _p5_dispatch.bundle.captured_at if _p5_dispatch.bundle else None
+                        ),
                     )
+                    if _p5_dispatch.bundle is not None:
+                        _p5_extras = persist_race_bundle_extras(
+                            _conn5, _p5_dispatch.bundle, _p5_persist.card_id,
+                        )
+                        st.info(
+                            f"Race bundle: TwinSpires {_p5_extras.twinspires_status} · "
+                            f"market snapshot {_p5_extras.market_snapshot_status}"
+                        )
+                        for _p5_bundle_warning in (
+                            list(_p5_extras.warnings) + list(_p5_dispatch.validation.warnings)
+                        ):
+                            st.caption(f"• {_p5_bundle_warning}")
                     # The following preview/export path must use canonical rows,
                     # never the transient uploaded payload.
                     _pr5 = canonical_markdown_card_ui_payload(_conn5, _p5_persist.card_id)

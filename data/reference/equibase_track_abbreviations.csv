@@ -1,0 +1,343 @@
+code,name,kind
+ABC,Abracadabra Farm,FARM
+ADS,Adena Springs Farm,FARM
+AEF,Another Episode Farm,FARM
+AHT,Atlanta Hall TC,TRAINING
+AJX,Ajax Downs,RACETRACK
+AKI,Akindale TC,TRAINING
+ALB,Albuquerque,RACETRACK
+ANF,Anthony Downs,RACETRACK
+AP,Arlington Park,RACETRACK
+AQU,Aqueduct,RACETRACK
+ARP,Arapahoe Park,RACETRACK
+ASD,Assiniboia Downs,RACETRACK
+ASF,All Seven Farm,FARM
+ASH,Ashwell Stables,FARM
+ATH,Atlanta,RACETRACK
+ATL,Atlantic City,RACETRACK
+ATO,Atokad Downs,RACETRACK
+BCF,Brown County Fair,FAIR
+BEL,Belmont Park,RACETRACK
+BEU,Beulah Park,RACETRACK
+BLT,Bradford Lane TC,TRAINING
+BLV,Belvoir TC,TRAINING
+BNT,Benton TC,TRAINING
+BOI,Les Bois Park,RACETRACK
+BON,Bonita Farm,FARM
+BRD,Blue Ribbon Downs,RACETRACK
+BRN,Harney County Fair,FAIR
+BRS,Burns Racing Stable,FARM
+BTC,Braeburn,RACETRACK
+CAM,Camden,RACETRACK
+CAS,Cassia County Fair,FAIR
+CBQ,Chabboquesset TC,TRAINING
+CBT,Canyon Breeze TC,TRAINING
+CBV,Cabin View Farm,FARM
+CBY,Canterbury Park,RACETRACK
+CD,Churchill Downs,RACETRACK
+CDH,Cardinal Hill,RACETRACK
+CDT,Churchill Training,TRAINING
+CHM,Champagne Farm,FARM
+CIM,Cimarron Farm,FARM
+CLS,Columbus,RACETRACK
+CM,Classic Mile,RACETRACK
+CMB,Cumberland CF,FAIR
+CMF,Calumet Farm TC,TRAINING
+CMR,Camarero,RACETRACK
+CNL,Colonial Downs,RACETRACK
+CNR,Canyon Road TC,TRAINING
+CNS,Colts Neck Stables,FARM
+CRC,Calder Race Course,RACETRACK
+CRU,Crupi's New Castle Farm,FARM
+CSB,Castlebrook TC,TRAINING
+CT,Charles Town,RACETRACK
+CTS,Clouston TC,TRAINING
+CTT,Cain's Thoro'bred TC,TRAINING
+CWS,Crown's Way South,RACETRACK
+DAY,Dayton,RACETRACK
+DDF,Double Diamond Farm,FARM
+DDR,Diamond D Ranch,FARM
+DDT,Derby Days TC,TRAINING
+DED,Delta Downs,RACETRACK
+DEL,Delaware Park,RACETRACK
+DG,Cochise County Fair,FAIR
+DLF,Dragons Lyre Farms,FARM
+DMR,Del Mar,RACETRACK
+DON,Donida TC,TRAINING
+DPF,Diamond P Farm,FARM
+DTD,Dare to Dream Farm,FARM
+DTR,Delta TC,TRAINING
+DUN,Greenelee County Fair,FAIR
+DXD,Dixie Downs,RACETRACK
+ECL,Eclipse Farm,FARM
+ECR,Elk Creek Ranch,FARM
+ECT,East Carolina TC,TRAINING
+EDT,Empress Downs TC,TRAINING
+EIS,Eisaman TC,TRAINING
+ELK,Elko County Fair,FAIR
+ELL,Elloree TC,TRAINING
+ELP,Ellis Park,RACETRACK
+ELY,Ely,RACETRACK
+EMD,Emerald Downs,RACETRACK
+EME,Emerald Pastures TC,TRAINING
+EMT,Emmett,RACETRACK
+EPF,Eagle Point Farm,FARM
+EPR,El Primero TC,TRAINING
+ETC,Eclipse TC,TRAINING
+EUR,Eureka,RACETRACK
+EVD,Evangeline Downs,RACETRACK
+EVR,Evergreen TC,TRAINING
+EVT,Evangeline TC,TRAINING
+EWT,Eddie Woods TC,TRAINING
+FAR,N. Dakota Horse Park,RACETRACK
+FBF,Fox Brown Farm,FARM
+FCL,Faircloth TC,TRAINING
+FE,Fort Erie,RACETRACK
+FER,Ferndale,RACETRACK
+FFM,Folk Farm,FARM
+FG,Fair Grounds,RACETRACK
+FL,Finger Lakes,RACETRACK
+FLG,Flagstaff,RACETRACK
+FMT,Fair Meadows,RACETRACK
+FNO,Fresno,RACETRACK
+FOL,Folsom TC,TRAINING
+FON,Fonner Park,RACETRACK
+FP,Fairmount Park,RACETRACK
+FPF,Fort Plains Farm,FARM
+FPL,Fair Play Park,RACETRACK
+FPX,Fairplex Park,RACETRACK
+FRF,Franks Farms,FARM
+FRN,Frontera TC,TRAINING
+FRO,Frost TC,TRAINING
+FRR,Four Roses TC,TRAINING
+FTP,Fort Pierre,RACETRACK
+FXP,Fox Point Farm,FARM
+GCF,Gila County Fair,FAIR
+GF,Great Falls,RACETRACK
+GG,Golden Gate Fields,RACETRACK
+GIL,Gillespie CF,FAIR
+GLD,Great Lakes Downs,RACETRACK
+GLF,Great Lakes Fair,FAIR
+GLP,The Gallops TC,TRAINING
+GLW,Glenwood TC,TRAINING
+GNN,Gunn Farm,FARM
+GP,Gulfstream Park,RACETRACK
+GPF,Genuine Pleasure Farm,FARM
+GPR,Grande Prairie,RACETRACK
+GRP,Grants Pass,RACETRACK
+GRS,Garrison Farm,FARM
+GTC,Greentree TC,TRAINING
+GTW,Gateway Downs,RACETRACK
+HAW,Hawthorne,RACETRACK
+HBH,Hunter Brook H'se Farm,FARM
+HCF,Humboldt County Fair,FAIR
+HDT,H D TC,TRAINING
+HER,Heritage Farm TC,TRAINING
+HHC,Hurricane Hall TC,TRAINING
+HMP,Horseman's Park,RACETRACK
+HOL,Hollywood Park,RACETRACK
+HOO,Hoosier Park,RACETRACK
+HOU,Sam Houston Race Park,RACETRACK
+HPO,Horsemen's Park,RACETRACK
+HPT,Highpoint Farm TC,TRAINING
+HRF,Hawkinridge Farm,FARM
+HST,Hastings,RACETRACK
+HTF,Hickory Tree Farm TC,TRAINING
+HTG,Heritage Park,RACETRACK
+HUF,Hunter Farm TC,TRAINING
+HYT,Hyatt Farm and TC,TRAINING
+IAF,Irish Acres Farm,FARM
+IND,Indiana Downs,RACETRACK
+ITC,Infields TC,TRAINING
+JDF,Joe Dan Farm,FARM
+JDM,JDM TC,TRAINING
+JHF,Jordan's Horse Farm,FARM
+JOU,Journeys End TC,TRAINING
+JRM,Jerome County Fair,FAIR
+JUB,Jubilee Farm,FARM
+JVR,J V Ranch,FARM
+KAM,Kamloops,RACETRACK
+KD,Kentucky Downs,RACETRACK
+KEE,Keeneland,RACETRACK
+KIN,Kin Park,RACETRACK
+KNF,Kinsman Farm,FARM
+LA,Los Alamitos,RACETRACK
+LAD,Louisiana Downs,RACETRACK
+LBG,Lethbridge,RACETRACK
+LBT,Laurel Brown Racetrack,RACETRACK
+LGF,Legacy Farm,FARM
+LIT,Little Brook TC,TRAINING
+LMB,Lambholm South TC,TRAINING
+LNN,Lincoln State Fair,FAIR
+LOF,Lone Oak Farm,FARM
+LRL,Laurel Park,RACETRACK
+LS,Lone Star Park,RACETRACK
+LVT,Lake View TC,TRAINING
+MAL,Malvern,RACETRACK
+MAN,Manor Downs,RACETRACK
+MAR,Marlboro,RACETRACK
+MBF,Mckathan Bros. Farm,FARM
+MBK,Meadowbrook,RACETRACK
+MC,Miles City,RACETRACK
+MCU,Mccutchen TC,TRAINING
+MD,Marquis Downs,RACETRACK
+MDA,Melville,RACETRACK
+MED,Meadowlands,RACETRACK
+MER,Mercury Equine Center,TRAINING
+MFT,Mckathan Farm TC,TRAINING
+MIH,Miami H'semen's TC,TRAINING
+MIL,Millarville,RACETRACK
+MME,Marlyn Meadows,RACETRACK
+MNR,Mountaineer Park,RACETRACK
+MOF,Mohave County Fair,FAIR
+MOG,Moment Of Glory TC,TRAINING
+MPM,Mt. Pleasant Meadows,RACETRACK
+MRT,Martinsville Fairgr'nds,FAIR
+MRY,Merryland Farm,FARM
+MST,Mid South Training,TRAINING
+MTH,Monmouth Park,RACETRACK
+MTT,Middletown Training,TRAINING
+MWF,Mayo West Farm,FARM
+NAD,Nad Al Sheba,RACETRACK
+NBS,Niall Brennan Stables,FARM
+NET,New Episode TC,TRAINING
+NHF,New Haven Farm,FARM
+NJF,Nelson Jones Farms,FARM
+NP,Northlands Park,RACETRACK
+NPR,Napier's TC,TRAINING
+NTC,Nobles TC,TRAINING
+NWF,New Farm TC,TRAINING
+OEC,Oakridge Equine C'nter,TRAINING
+OHC,Ocala Horse Farm,FARM
+OJO,Ocala Jockey Club TC,TRAINING
+OKL,Oakleaf TC,TRAINING
+OLY,Olympic Hill TC,TRAINING
+ONE,Oneida County Fair,FAIR
+OP,Oaklawn Park,RACETRACK
+ORT,Orting TC,TRAINING
+OSA,Oak Tree @ Santa Anita,RACETRACK
+OTC,Ocala TC,TRAINING
+OTF,Ocala Th'ghbred Farms,FARM
+OVR,Overbrook TC,TRAINING
+OWT,Ocala West Training,TRAINING
+OXF,Oxford TC,TRAINING
+PAY,Payson Park TC,TRAINING
+PBD,Palm Beach Downs,RACETRACK
+PDA,Padua TC,TRAINING
+PEG,Pegasus Th'ghbred TC,TRAINING
+PEN,Penn National,RACETRACK
+PER,Perfenick Farm,FARM
+PHA,Philadelphia Park,RACETRACK
+PID,Presque Isle Downs,RACETRACK
+PIM,Pimlico,RACETRACK
+PJT,Paul Jones TC,TRAINING
+PLN,Pleasanton,RACETRACK
+PM,Portland Meadows,RACETRACK
+PMM,Palm Meadows TC,TRAINING
+PNL,Pinnacle,RACETRACK
+PNS,Peninsula Farm,FARM
+POD,Pocatello Downs,RACETRACK
+PPX,Pleasant Pasture Farm,FARM
+PRM,Prairie Meadows,RACETRACK
+PRV,Prineville Turf Club,RACETRACK
+PTT,Palmetto Th'ghbred TC,TRAINING
+QWF,Quiet Woman Farm TC,TRAINING
+QWS,Quiet Woman Farm Sth,FARM
+RCE,Racing Edge TC,TRAINING
+RD,River Downs,RACETRACK
+RDE,Red Earth TC,TRAINING
+RDM,Red Mile,RACETRACK
+REB,Reber Ranch Training,TRAINING
+RET,Retama Park,RACETRACK
+RIG,Rigbie Farm,FARM
+RIL,Rillito,RACETRACK
+RIS,Rising Sun Farm,FARM
+RKV,Rocky Valley,RACETRACK
+RMF,R M Farms,FARM
+RMT,Ross Meadows,RACETRACK
+ROF,Red Oak Farm,FARM
+RP,Remington Park,RACETRACK
+RSD,Riverside Downs,RACETRACK
+RUI,Ruidoso Downs,RACETRACK
+RUP,Minidoka County Fair,FAIR
+SA,Santa Anita Park,RACETRACK
+SAB,Sabine Farm,FARM
+SAC,Sacramento,RACETRACK
+SAF,Graham County Fair,FAIR
+SAM,Sam-Son Farm,FARM
+SAR,Saratoga,RACETRACK
+SBF,"Shadybrook Farm, Inc.",FARM
+SCN,Scanlon TC,TRAINING
+SCT,Sanders Creek TC,TRAINING
+SDY,Sandy Downs,RACETRACK
+SER,Serendipity Farm,FARM
+SFC,South Florida Trotting,RACETRACK
+SFT,Sunnyside Farm TC,TRAINING
+SGC,Starting Gate TC,TRAINING
+SHF,Silverton Hill Farm,FARM
+SJ,Apache County Fair,FAIR
+SKY,Skylight TC,TRAINING
+SLR,San Luis Rey Downs,RACETRACK
+SND,Sunflower,RACETRACK
+SOL,Solano,RACETRACK
+SON,Santa Cruz County Fair,FAIR
+SOT,Silver Oaks TC,TRAINING
+SPC,Starting Point TC,TRAINING
+SR,Santa Rosa,RACETRACK
+SRP,Sunray Park,RACETRACK
+SST,Sunrise Stable South,FARM
+SSX,Sage And Sand TC,TRAINING
+STB,Stonebridge Farm,FARM
+STF,Starsfell Farm,FARM
+STK,Stockton,RACETRACK
+STO,Stony Oak TC,TRAINING
+STP,Stampede Park,RACETRACK
+STU,Stutts Stable,FARM
+STW,Stonewall Farm,FARM
+SUD,Sun Downs,RACETRACK
+SUF,Suffolk Downs,RACETRACK
+SUN,Sunland Park,RACETRACK
+SUT,Sutherland Farm,FARM
+SWH,Sweetwater,RACETRACK
+SWT,Sandy Woods TC,TRAINING
+SYC,Sycamore TC,TRAINING
+SYL,Sylmar Farm,FARM
+TAM,Tampa Bay Downs,RACETRACK
+TAP,Tapeta Farm,FARM
+TDN,Thistledown,RACETRACK
+TIL,Tillamook County Fair,FAIR
+TIM,Timonium,RACETRACK
+TP,Turfway Park,RACETRACK
+TRT,Thunder Ranch TC,TRAINING
+TSF,Trackside Farm,FARM
+TST,True South TC,TRAINING
+TTC,The Th'ghbred Center,TRAINING
+TUP,Turf Paradise,RACETRACK
+UN,E. Oregon Livestock Show,RACETRACK
+VAL,Valhalla Farms,FARM
+VAN,Vanatta Track and TC,TRAINING
+VHT,Victory Haven TC,TRAINING
+VIN,Vinery Stable,FARM
+VQF,Victory Quest Farm,FARM
+WAC,Washington CF,FAIR
+WDB,Woodbrook Farm,FARM
+WDS,Woodlands Park,RACETRACK
+WFR,Wild Falcon Ranch,FARM
+WH,Windy Hills T.C.,TRAINING
+WHL,Wheeler Training Station,TRAINING
+WLN,Walnut Hall,FARM
+WM,Williston Mile,RACETRACK
+WND,Winding Oaks Farm,FARM
+WO,Woodbine,RACETRACK
+WOD,Woodside Ranch,FARM
+WRC,W R TC,TRAINING
+WRD,Will Rogers Downs,RACETRACK
+WRT,Windy Ridge TC,TRAINING
+WSF,Wesfield Farm,FARM
+WST,Westampton Farms,FARM
+WTC,Webster TC,TRAINING
+WTS,Waitsburg Race Track,RACETRACK
+WW,Walla Walla,RACETRACK
+WYO,Wyoming Downs,RACETRACK
+YAV,Yavapai Downs,RACETRACK
+ZIA,Zia Park,RACETRACK

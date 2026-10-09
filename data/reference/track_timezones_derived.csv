@@ -1,0 +1,152 @@
+code,timezone,basis
+AKS,America/Chicago,split state NE; listing offset 2
+ALB,America/Denver,state NM and listing offset 1 agree
+AP,America/Chicago,state IL and listing offset 2 agree
+AQU,America/New_York,state NY and listing offset 3 agree
+ATL,America/New_York,state NJ and listing offset 3 agree
+AZD,America/Phoenix,state AZ and listing offset 1 agree
+BAQ,America/New_York,state NY and listing offset 3 agree
+BEL,America/New_York,state NY and listing offset 3 agree
+BEU,America/New_York,state OH and listing offset 3 agree
+BF,America/New_York,state MA and listing offset 3 agree
+BGD,America/Chicago,split state KY; listing offset 2
+BHP,America/Los_Angeles,state CA and listing offset 0 agree
+BKF,America/Denver,split state ID; listing offset 1
+BLU,America/New_York,state VA and listing offset 3 agree
+BM,America/Los_Angeles,state CA and listing offset 0 agree
+BMF,America/Los_Angeles,state CA and listing offset 0 agree
+BRD,America/Chicago,state OK and listing offset 2 agree
+BSR,America/Los_Angeles,state CA and listing offset 0 agree
+BTP,America/New_York,state OH and listing offset 3 agree
+CAS,America/Denver,split state ID; listing offset 1
+CBY,America/Chicago,state MN and listing offset 2 agree
+CD,America/New_York,split state KY; listing offset 3
+CHE,America/New_York,state PA and listing offset 3 agree
+CLS,America/Chicago,split state NE; listing offset 2
+CMR,America/Puerto_Rico,state PR and listing offset 3 agree
+CNL,America/New_York,state VA and listing offset 3 agree
+CPW,America/Chicago,split state ND; listing offset 2
+CRC,America/New_York,split state FL; listing offset 3
+CT,America/New_York,state WV and listing offset 3 agree
+DAY,America/Los_Angeles,state WA and listing offset 0 agree
+DED,America/Chicago,state LA and listing offset 2 agree
+DEL,America/New_York,state DE and listing offset 3 agree
+DET,America/New_York,split state MI; listing offset 3
+DG,America/Phoenix,state AZ and listing offset 1 agree
+DMF,America/Los_Angeles,state CA and listing offset 0 agree
+DMR,America/Los_Angeles,state CA and listing offset 0 agree
+DUE,America/New_York,split state KY; listing offset 3
+DUN,America/Phoenix,state AZ and listing offset 1 agree
+DXD,America/Denver,split state ID; listing offset 1
+ED,America/Denver,state WY and listing offset 1 agree
+EDR,America/Denver,state WY and listing offset 1 agree
+ELC,America/Puerto_Rico,state PR and listing offset 3 agree
+ELP,America/Chicago,split state KY; listing offset 2
+EMD,America/Los_Angeles,state WA and listing offset 0 agree
+EVD,America/Chicago,state LA and listing offset 2 agree
+FAI,America/New_York,state MD and listing offset 3 agree
+FAN,America/Chicago,state IL and listing offset 2 agree
+FER,America/Los_Angeles,state CA and listing offset 0 agree
+FG,America/Chicago,state LA and listing offset 2 agree
+FL,America/New_York,state NY and listing offset 3 agree
+FLG,America/Phoenix,state AZ and listing offset 1 agree
+FMT,America/Chicago,state OK and listing offset 2 agree
+FNO,America/Los_Angeles,state CA and listing offset 0 agree
+FON,America/Chicago,split state NE; listing offset 2
+FP,America/Chicago,state IL and listing offset 2 agree
+FPX,America/Los_Angeles,state CA and listing offset 0 agree
+GG,America/Los_Angeles,state CA and listing offset 0 agree
+GLD,America/New_York,split state MI; listing offset 3
+GP,America/New_York,split state FL; listing offset 3
+GPW,America/New_York,split state FL; listing offset 3
+GRP,America/Los_Angeles,split state OR; listing offset 0
+GS,America/New_York,state NJ and listing offset 3 agree
+HAP,America/Los_Angeles,state WA and listing offset 0 agree
+HAW,America/Chicago,state IL and listing offset 2 agree
+HCN,America/Chicago,split state NE; listing offset 2
+HIA,America/New_York,split state FL; listing offset 3
+HOL,America/Los_Angeles,state CA and listing offset 0 agree
+HOO,America/Chicago,split state IN; listing offset 2
+HOU,America/Chicago,split state TX; listing offset 2
+HP,America/New_York,split state MI; listing offset 3
+HPO,America/Chicago,split state NE; listing offset 2
+IND,America/Chicago,split state IN; listing offset 2
+JRM,America/Denver,split state ID; listing offset 1
+KD,America/New_York,split state KY; listing offset 3
+KEE,America/New_York,split state KY; listing offset 3
+LA,America/Los_Angeles,state CA and listing offset 0 agree
+LAD,America/Chicago,state LA and listing offset 2 agree
+LBT,America/Denver,state UT and listing offset 1 agree
+LEG,America/Chicago,split state NE; listing offset 2
+LGA,America/Los_Angeles,state WA and listing offset 0 agree
+LMR,America/Chicago,split state NE; listing offset 2
+LNN,America/Chicago,split state NE; listing offset 2
+LRC,America/Los_Angeles,state CA and listing offset 0 agree
+LRL,America/New_York,state MD and listing offset 3 agree
+LS,America/Chicago,split state TX; listing offset 2
+MAN,America/Chicago,split state TX; listing offset 2
+MED,America/New_York,state NJ and listing offset 3 agree
+MNR,America/New_York,state WV and listing offset 3 agree
+MTH,America/New_York,state NJ and listing offset 3 agree
+MVR,America/New_York,state OH and listing offset 3 agree
+ODH,America/New_York,state VA and listing offset 3 agree
+ONE,America/Denver,split state ID; listing offset 1
+OP,America/Chicago,state AR and listing offset 2 agree
+OSA,America/Los_Angeles,state CA and listing offset 0 agree
+OTH,America/Los_Angeles,state CA and listing offset 0 agree
+OTP,America/Los_Angeles,state CA and listing offset 0 agree
+PEN,America/New_York,state PA and listing offset 3 agree
+PHA,America/New_York,state PA and listing offset 3 agree
+PID,America/New_York,state PA and listing offset 3 agree
+PIM,America/New_York,state MD and listing offset 3 agree
+PLA,America/Los_Angeles,state WA and listing offset 0 agree
+PLN,America/Los_Angeles,state CA and listing offset 0 agree
+PM,America/Los_Angeles,split state OR; listing offset 0
+PNL,America/New_York,split state MI; listing offset 3
+POD,America/Denver,split state ID; listing offset 1
+PRE,America/Phoenix,state AZ and listing offset 1 agree
+PRM,America/Chicago,state IA and listing offset 2 agree
+PRN,America/Los_Angeles,split state OR; listing offset 0
+PRV,America/Los_Angeles,split state OR; listing offset 0
+PRX,America/New_York,state PA and listing offset 3 agree
+RD,America/New_York,state OH and listing offset 3 agree
+RDM,America/New_York,split state KY; listing offset 3
+RDX,America/New_York,state OH and listing offset 3 agree
+RET,America/Chicago,split state TX; listing offset 2
+RIL,America/Phoenix,state AZ and listing offset 1 agree
+RKM,America/New_York,state MA and listing offset 3 agree
+RP,America/Chicago,state OK and listing offset 2 agree
+RUI,America/Denver,state NM and listing offset 1 agree
+RUP,America/Denver,split state ID; listing offset 1
+SA,America/Los_Angeles,state CA and listing offset 0 agree
+SAC,America/Los_Angeles,state CA and listing offset 0 agree
+SAF,America/Phoenix,state AZ and listing offset 1 agree
+SAL,America/Los_Angeles,split state OR; listing offset 0
+SAR,America/New_York,state NY and listing offset 3 agree
+SHW,America/New_York,state MD and listing offset 3 agree
+SJ,America/Phoenix,state AZ and listing offset 1 agree
+SOL,America/Los_Angeles,state CA and listing offset 0 agree
+SPL,America/Los_Angeles,state CA and listing offset 0 agree
+SPT,America/Chicago,state IL and listing offset 2 agree
+SR,America/Los_Angeles,state CA and listing offset 0 agree
+SRM,America/New_York,split state KY; listing offset 3
+STK,America/Los_Angeles,state CA and listing offset 0 agree
+SUD,America/Los_Angeles,state WA and listing offset 0 agree
+SUF,America/New_York,state MA and listing offset 3 agree
+SUN,America/Denver,state NM and listing offset 1 agree
+SWF,America/Denver,state WY and listing offset 1 agree
+TAM,America/New_York,split state FL; listing offset 3
+TDN,America/New_York,state OH and listing offset 3 agree
+TIL,America/Los_Angeles,split state OR; listing offset 0
+TIM,America/New_York,state MD and listing offset 3 agree
+TP,America/New_York,split state KY; listing offset 3
+TPP,America/Denver,state WY and listing offset 1 agree
+TUP,America/Phoenix,state AZ and listing offset 1 agree
+UN,America/Los_Angeles,split state OR; listing offset 0
+WBR,America/Denver,state UT and listing offset 1 agree
+WNT,America/New_York,state DE and listing offset 3 agree
+WRD,America/Chicago,state OK and listing offset 2 agree
+WTS,America/Los_Angeles,state WA and listing offset 0 agree
+WW,America/Los_Angeles,state WA and listing offset 0 agree
+YM,America/Los_Angeles,state WA and listing offset 0 agree
+ZIA,America/Denver,state NM and listing offset 1 agree

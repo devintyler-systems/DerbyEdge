@@ -1,0 +1,338 @@
+code,proper_case,state,tz_offset_from_pacific,name
+ABT,ABT,CAN,1,Alberta Downs
+AC,AC,MEX,0,Agua Caliente
+AIK,AIK,SC,0,Aiken
+AJX,Ajx,CAN,0,Ajax Downs
+AKS,AKS,NE,2,Ak-Sar-Ben
+ALB,Alb,NM,1,Albuquerque
+ANF,AnF,KS,0,Anthony Fair Association
+AP,AP,IL,2,Arlington
+AQU,Aqu,NY,3,Aqueduct
+ARC,ARC,,0,Arc de Triomphe
+ARP,ArP,CO,0,Arapahoe Park
+ASD,AsD,CAN,0,Assiniboia Downs
+ATH,ATH,GA,0,Atlanta
+ATL,Atl,NJ,3,Atlantic City
+ATO,Ato,NE,0,Atokad
+AVN,AVN,NY,0,Avon
+AZD,AZD,AZ,1,Arizona Downs
+BAQ,BAQ,NY,3,Belmont At The Big A
+BB,BB,,0,Best Bets (Multiple Tracks)
+BCA,BCA,,0,Breeders' Cup Special
+BCB,BCB,,0,Breeders' Cup Special
+BCC,BCC,,0,Breeders' Cup Special
+BCD,BCD,,0,Breeders' Cup Special
+BCE,BCE,,0,Breeders' Cup Special
+BCF,BCF,SD,0,Brown County Fair
+BCG,BCG,,0,Breeders' Cup Special
+BCT,BCT,,0,Breeders' Cup Special
+BCW,BCW,,0,Breeders' Cup Futures
+BEL,Bel,NY,3,Belmont Park
+BEU,Beu,OH,3,Beulah Park
+BF,BF,MA,3,Brockton Fair
+BFF,BFF,,0,Breeders Cup Future Wager
+BFS,BFS,,0,Breeders Cup Future Wager
+BGD,BGD,KY,2,Players BlueGrass Downs
+BHP,BHP,CA,0,Betfair Hollywood Park
+BIR,Bir,AL,0,Birmingham Turf Club
+BKF,Bkf,ID,1,Blackfoot
+BLU,BLU,VA,3,Blue Ridge
+BM,BM,CA,0,Bay Meadows
+BMF,Bmf,CA,0,Bay Meadows Fair
+BML,BML,IL,0,Balmoral
+BND,BND,TX,0,Bandera Downs
+BOI,Boi,ID,0,Les Bois Park
+BRD,BRD,OK,2,Blue Ribbon Downs
+BRO,BRO,NC,0,Brookhill Farm
+BSR,BSR,CA,0,Barretts Race Meet at Fairplex
+BTP,BTP,OH,3,Belterra Park
+CAM,CAM,SC,0,Camden
+CAS,Cas,ID,1,Burley
+CBY,Cby,MN,2,Canterbury Park
+CCP,CCP,,3,Cross Country Pick Four
+CD,CD,KY,3,Churchill Downs
+CEG,CEG,CAN,0,Calgary (Alberta)
+CHA,CHA,SC,0,Charlston
+CHE,CHE,PA,3,Cheshire
+CHL,CHL,NC,0,Charlotte
+CHP,CHP,WY,0,Bally's Cheyenne Park
+CLM,CLM,NC,0,Clemmons
+CLS,Cls,NE,2,Columbus
+CMR,CMR,PR,3,Camarero Race Track
+CNL,Cnl,VA,3,Colonial Downs
+CPW,Cpw,ND,2,Chippewa Downs
+CRC,Crc,FL,3,Calder Race Course
+CT,CT,WV,3,Charles Town
+CTD,CTD,CAN,1,Century Downs
+CTM,CTM,CAN,1,Century Mile
+CWF,CWF,WY,0,Central Wyoming Fair
+DAY,Day,WA,0,Dayton
+DBA,DBA,,0,NY NY Double
+DBB,DBB,,0,Cross Country Pick 5
+DBC,DBC,,0,Woodbine Crossover Pick 4
+DBD,DBD,,0,Century Crossover
+DBE,DBE,,0,Meadows-Penn Pick 4
+DED,DeD,LA,2,Delta Downs
+DEL,Del,DE,3,Delaware Park
+DEP,DEP,CAN,0,Desert Park
+DET,DET,MI,3,Detroit
+DG,Dg,AZ,1,Douglas
+DMF,DMF,CA,0,Del Mar Fair
+DMR,Dmr,CA,0,Del Mar
+DUB,DUB,UAE,0,Dubai Racing
+DUE,DUE,KY,3,Duelling Grounds
+DUN,Dun,AZ,1,Duncan
+DXD,DxD,ID,1,Dixie Downs
+ED,ED,WY,1,Energy Downs
+EDR,EDR,WY,1,Energy Downs 307 Racing
+ELC,ELC,PR,3,El Commandante
+ELK,Elk,NV,2,Elko
+ELP,ElP,KY,2,Ellis Park
+ELY,ELY,NV,1,Ely
+EMD,EmD,WA,0,Emerald Downs
+EMT,Emt,ID,0,Emmett
+EP,EP,CAN,0,Exhibition Park
+EQA,EQA,,0,Equibase Special
+EQB,EQB,,0,Equibase Special
+EQC,EQC,,0,Golden Hour Wagers
+EQD,EQD,,0,Equibase Special
+EQE,EQE,,0,Equibase Special
+EQF,EQF,,0,Equibase Special
+EQG,EQG,,0,Equibase Special
+EQH,EQH,,0,Equibase Special
+EQI,EQI,,0,Equibase Special
+EQJ,EQJ,,0,Equibase Special
+EQK,EQK,,0,Coast To Coast
+EQM,EQM,,0,Equibase Special
+EQN,EQN,,0,Equibase Special
+EQO,EQO,,0,Equibase Special
+EQP,EQP,,0,Equibase Special
+EQQ,EQQ,,0,Equibase Special
+EQR,EQR,,0,Equibase Special
+EQS,EQS,,0,Equibase Special
+EQT,EQT,,0,Equibase Special
+EQU,EQU,,0,Equibase Special
+EQV,EQV,,0,Equibase Special
+EQW,EQW,,0,Equibase Special
+EQX,EQX,,0,Equibase Special
+EQY,EQY,,0,Equibase Special
+EQZ,EQZ,,0,Equibase Special
+EUR,Eur,KS,0,Eureka Downs
+EVD,EvD,LA,2,Evangeline Downs
+EXX,EXX,,0,Exotic Key Plays
+FAI,FAI,MD,3,Fair Hill
+FAN,FAN,IL,2,FanDuel Horse Racing
+FAR,Far,ND,0,North Dakota Horse Park
+FAX,FAX,VA,0,Fairfax
+FE,FE,CAN,3,Fort Erie
+FER,Fer,CA,0,Ferndale
+FG,FG,LA,2,Fair Grounds
+FH,FH,NJ,0,Far Hills
+FL,FL,NY,3,Finger Lakes
+FLG,Flg,AZ,1,Flagstaff
+FMT,FMT,OK,2,Fair Meadows Tulsa
+FNO,Fno,CA,0,Fresno
+FON,Fon,NE,2,Fonner Park
+FOX,FOX,MA,0,Foxboro Park
+FP,FP,IL,2,Fairmount Park
+FPX,Fpx,CA,0,Fairplex Park
+FTP,FtP,SD,0,Fort Pierre
+FX,FX,VA,0,Foxfield
+GBF,GBF,MA,0,Great Barrington (Fair)
+GCF,GCF,AZ,0,Globe
+GF,GF,MT,0,Great Falls
+GG,GG,CA,0,Golden Gate Fields
+GIL,Gil,TX,0,Gillespie
+GLD,GLD,MI,3,Great Lakes Downs
+GLN,GLN,MD,0,Glyndon
+GN,GN,MD,0,Grand National
+GP,GP,FL,3,Gulfstream Park
+GPR,GPr,CAN,0,Grand Prairie
+GPW,GPW,FL,3,Gulfstream Park West
+GRD,GRD,CAN,0,Greenwood
+GRM,GRM,VA,0,Great Meadows
+GRP,GrP,OR,0,Grants Pass
+GS,GS,NJ,3,Garden State
+GTW,GTW,CO,0,Gateway Downs
+GV,GV,NY,0,Genesee Valley
+HAP,HAP,WA,0,Harbor Park
+HAW,Haw,IL,2,Hawthorne
+HCF,HCF,NV,1,Winnemuca
+HCN,HCN,NE,2,Harrahs Columbus Nebraska
+HIA,Hia,FL,3,Hialeah
+HOL,Hol,CA,0,Hollywood Park
+HOO,Hoo,IN,2,Hoosier Park
+HOU,Hou,TX,2,Sam Houston
+HP,HP,MI,3,Hazel Park
+HPO,HPO,NE,2,Horsemen's Park
+HST,Hst,CAN,0,Hastings Park
+IND,Ind,IN,2,Horseshoe Indianapolis
+JND,JND,LA,0,Jefferson Downs
+JRM,Jrm,ID,1,Jerome County Fair
+KAM,Kam,CAN,0,Kamloops
+KAR,KAR,,3,Saudi Cup
+KD,KD,KY,3,Kentucky Downs
+KDF,KDF,,3,Kentucky Derby Future
+KEE,Kee,KY,3,Keeneland
+KIN,Kin,CAN,0,Kin Park
+KSP,Ksp,MT,2,Kalispell
+LA,LA,CA,0,Los Alamitos (Quarter Horse)
+LAD,LaD,LA,2,Louisiana Downs
+LAM,LAM,NM,0,La Mesa
+LBG,Lbg,CAN,0,Lethbridge
+LBT,LBT,UT,1,Laurel Brown
+LEG,LEG,NE,2,Legacy Downs
+LEX,LEX,KY,0,Lexington
+LGA,LGA,WA,0,Longacres
+LMR,LMR,NE,2,Lake Mac Racetrack
+LNN,LnN,NE,2,Lincoln
+LRC,LRC,CA,0,Los Alamitos (Thoroughbred)
+LRL,Lrl,MD,3,Laurel
+LS,LS,TX,2,Lone Star Park
+MAF,MaF,MT,2,Marias Fair
+MAL,MAL,PA,0,Malvern
+MAN,Man,TX,2,Manor Downs
+MAR,MAR,MD,0,Marlboro
+MAS,MAS,OH,0,Mason-Dixon
+MC,MC,MT,2,Miles City
+MD,MD,CAN,0,Marquis Downs
+MDA,MDA,CAN,0,Melville
+MED,Med,NJ,3,Meadowlands
+MEP,MEP,MT,0,Metrapark
+MF,MF,MA,0,Marshfield Fair
+MGO,MGO,VA,0,Marengo Plantation
+MID,MID,VA,0,Middleburg
+MIL,Mil,CAN,2,Millarville
+MMD,MMD,CAN,2,Moosomin at Marquis Downs
+MNR,Mnr,WV,3,Mountaineer Park
+MOD,MOD,CAN,2,Moosomin Downs
+MOF,MoF,AZ,2,Kingman
+MON,MON,MD,0,Monkton
+MOR,MOR,KY,0,Morven Park
+MPM,MPM,MI,0,Mt Pleasant
+MTH,Mth,NJ,3,Monmouth Park
+MTP,MTP,VA,0,Montpelier
+MUS,MUS,MI,0,Muskegon
+MVR,MVR,OH,3,Mahoning Valley Race Course
+NMP,Nmp,MA,0,Northampton Fair
+NP,NP,CAN,1,Northlands Park
+ODH,ODH,VA,3,Old Dominion Hounds
+ONE,One,ID,1,Malad
+OP,OP,AR,2,Oaklawn Park
+OSA,OSA,CA,0,Oak Tree at Santa Anita
+OTC,OTC,FL,0,Ocala Training Center
+OTH,OTH,CA,0,Oak Tree at Hollywood Park
+OTP,OTP,CA,0,Oak Tree at Pleasanton
+OXM,OXM,KY,0,Oxmoor
+PEN,Pen,PA,3,Penn National
+PHA,Pha,PA,3,Philadelphia Park
+PIC,Pic,CAN,0,Picov Downs
+PID,Pid,PA,3,Presque Isle Downs
+PIM,Pim,MD,3,Pimlico
+PLA,Pla,WA,0,Playfair
+PLN,Pln,CA,0,Pleasanton
+PM,PM,OR,0,Portland Meadows
+PMT,PMT,GA,0,"Pine Mtn, Calloway Garden"
+PNL,Pnl,MI,3,Pinnacle Race Course
+POD,PoD,ID,1,Pocatello
+PPM,PPM,CO,0,Pikes Peak Meadows
+PRE,Pre,AZ,1,Prescott Downs
+PRM,PrM,IA,2,Prairie Meadows
+PRN,PRN,OR,0,Prineville Turf Club
+PRO,PRO,KY,0,Prospect
+PRV,Prv,OR,0,Crooked River Roundup
+PRX,PRX,PA,3,Parx Racing
+PW,PW,TN,0,Percy Warner
+RAS,RAS,,0,Royal Ascot
+RB,RB,NJ,0,Red Bank
+RD,RD,OH,3,River Downs
+RDM,RdM,KY,3,Red Mile
+RDX,RDX,OH,3,River Downs (Evening Card)
+RET,Ret,TX,2,Retama Park
+RIG,RIG,MD,0,Rigbie Farm
+RIL,Ril,AZ,1,Rillito Park
+RKM,Rkm,MA,3,Rockingham Park
+ROP,ROP,CO,0,Round Up Park
+RP,RP,OK,2,Remington Park
+RUI,Rui,NM,1,Ruidoso Downs
+RUP,Rup,ID,1,Rupert
+SA,SA,CA,0,Santa Anita
+SAC,Sac,CA,0,Sacramento
+SAF,Saf,AZ,1,Safford
+SAL,Sal,OR,0,Salem
+SAN,SAN,CAN,0,Sandown
+SAR,Sar,NY,3,Saratoga
+SDY,Sdy,ID,0,Sandy Down Idaho
+SFE,SFE,AK,2,Santa Fe
+SH,SH,VA,0,Strawberry Hill
+SHW,SHW,MD,3,Shawan Downs
+SJ,SJ,AZ,1,Saint Johns
+SJD,SJD,NM,0,San Juan Downs
+SJM,SJM,IL,0,St. James
+SND,SnD,CAN,2,Sunflower Downs
+SOL,Sol,CA,0,Solano
+SON,Son,AZ,0,Sonoita
+SOP,SOP,NC,0,Southern Pines
+SPL,SPL,CA,0,National Pick 4
+SPT,Spt,IL,2,Sportsman's Park
+SR,SR,CA,0,Santa Rosa
+SRM,SRM,KY,3,Sandy Ridge At The Red Mile
+SRP,SrP,NM,2,Sun Ray Park
+SRR,SRR,KY,0,Sandy Ridge Racing
+STK,Stk,CA,0,Stockton
+STL,STL,MO,0,St Louis
+STP,StP,CAN,1,Stampede Park
+SUD,SuD,WA,0,Sun Downs
+SUF,Suf,MA,3,Suffolk Downs
+SUN,Sun,NM,1,Sunland Park
+SWA,SWA,,0,Special Wager
+SWC,SWC,,0,Special Wager
+SWD,SWD,,0,Special Wager
+SWE,SWE,,0,Special Wager
+SWF,SWF,WY,1,Sweetwater Fair
+SWG,SWG,,0,Special Wager
+SWI,SWI,,0,Special Wager
+SWJ,SWJ,,0,Special Wager
+SWK,SWK,,0,Special Wager
+SWL,SWL,,0,Special Wager
+SWM,SWM,,0,Special Wager
+SWN,SWN,,0,Special Wager N
+SWO,SWO,,0,Special Wager O
+SWP,SWP,,0,Special Wager P
+SWQ,SWQ,,0,Special Wager Q
+SWR,SWR,,0,Special Wager R
+SWS,SWS,,0,Special Wager S
+SWU,SWU,,0,Special Wager U
+SWV,SWV,,0,Special Wager V
+SWW,SWW,,0,Special Wager W
+SWX,SWX,,0,Special Wager X
+SWY,SWY,,0,Special Wager Y
+SWZ,SWZ,,0,Special Wager Z
+TAM,Tam,FL,3,Tampa Bay Downs
+TDN,Tdn,OH,3,Thistledown
+TET,TET,ID,0,Sandy Down Idaho
+TIL,Til,OR,0,Tillamook County Fair
+TIM,Tim,MD,3,Timonium
+TP,TP,KY,3,Turfway Park
+TPP,TPP,WY,1,Thunder Plains Park
+TRM,TRM,TX,0,Trinity Meadows
+TRY,TRY,NC,0,Tryon
+TT,TT,,0,Top Ten
+TUP,TuP,AZ,1,Turf Paradise
+UN,UN,OR,0,E Oregon Livestock Show
+WBR,WBR,UT,1,Weber Downs
+WDS,Wds,KS,0,Woodlands
+WIL,WIL,PA,0,Willowdale Steeplechase
+WMF,WMF,MT,0,Western Mt Fair
+WNT,WNT,DE,3,Winterthur
+WO,WO,CAN,3,Woodbine
+WPR,WPR,NV,1,Ely
+WRD,WRD,OK,2,Will Rogers Downs
+WTS,Wts,WA,0,Waitsburg
+WW,WW,WA,0,Walla Walla
+WYO,Wyo,WY,0,Wyoming Downs
+YAV,Yav,AZ,2,Yavapai Downs
+YD,YD,WY,0,Yellowstone Downs
+YKT,Ykt,CAN,2,Yorkton Exhibition
+YM,YM,WA,0,Yakima Meadows
+ZIA,Zia,NM,1,Zia Park
