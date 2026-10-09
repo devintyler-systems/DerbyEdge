@@ -1,11 +1,12 @@
 # Session state (update at the end of every outcome; keep under 40 lines)
 
-_Last updated: 2026-10-09 (evening), branch `claude/relaxed-noether-0kqijv`, PR devintyler-systems/DerbyEdge#32 (draft, CI green at 8f0bc2c)._
+_Last updated: 2026-10-09 (night), branch `claude/relaxed-noether-0kqijv`, PR devintyler-systems/DerbyEdge#32 (draft). Full suite 1247 passed locally; CI not yet seen on the new commits._
 
 ## Done and on the branch (not yet merged to main)
 Morning-line fix + repair, Belmont at the Big A -> BAQ, Equibase chart parser, chart store/join/populate, walk-forward
 evaluation, paper trading (place / settle / report), daily cycle, `training.status`, engine-version stamp, play-day
-checklist, `start_derbyedge.bat`, this file and `CLAUDE.md`.
+checklist, `start_derbyedge.bat`, this file. **`CLAUDE.md` is NOT in git** (`.gitignore` rule `C*` skips it): it exists only on the user's machine.
+Also done: `training.status` fix (below) and RACE STATS capture (below).
 
 ## User's machine
 `C:\Projects\derbyedge-engine`, on the PR branch, 28 paper-trading tests passed locally. Morning-line repair applied to
@@ -21,19 +22,27 @@ Existing runs are `legacy`; they are not pooled with new ones.
   (`model_board` absent) or paper-traded (`MODEL_PROBABILITIES_INCOMPLETE`).
 - TwinSpires per-runner speed / class / power ARE parsed and stored as `twinspires_*` evidence (`twinspires_intake.py` ~177) but are
   deliberately NOT mapped to model features (not labelled Beyer). Candidate inputs once there is outcome data to learn weights.
-- The TwinSpires "RACE STATS" block (pars, track bias, post bias) is not captured. Capture-now-use-later: it cannot be reconstructed
-  as-of later. Track-bias samples are tiny (6 / 3 races); do not weight until pooled.
+- **RACE STATS block: now captured** (not scored). Optional bundle section starting at a line `RACE STATS`; strict parser
+  `src/ingest/twinspires_race_stats.py`; stored raw + parsed in `twinspires_race_stats` (card_id, captured_at). Malformed block
+  blocks the import with a named reason; delete the block to import without it. Format seen in ONE sample only (BEL R5). Track-bias
+  samples are tiny (6 / 3 races): do not weight until pooled. Details: `docs/race_bundle_format.md`.
+- **`training.status` fixed:** a race counts as scored/graded only if the run grading uses (last pre-post run) has real win
+  probabilities for every active runner. It now also prints "scored races that collapsed to the morning line" and the stored
+  `model_collapse_status` of the scored runs ("(none stored)" = guard fired but no status written). Graded races without
+  `model_board` are listed as `NO_MODEL_PROBABILITIES`. Scored now follows the grading run, not "any pre-post run of the version".
 
 ## Not verified
 Streamlit upload and scoring buttons, and `start_derbyedge.bat`, have not been run end to end on a real race.
 
 ## Open
-- First real race through `docs/play_day_checklist.md`, then merge PR #32.
+- Re-run the first real race with the RACE STATS block pasted into the bundle (confirms it stores on a real import). Then merge PR #32.
+- Commit `CLAUDE.md` (add `!CLAUDE.md` to `.gitignore`) so cloud sessions can read the working agreement.
 - Optional: backfill post times for the 57 legacy races (dry run first). Judgement given: keep them as a labelled baseline, do
   not count them toward the current engine's verdict.
 - Not built, by decision: real-bet log (revisit at 30 graded races), multi-user product (needs a licensed data feed first).
 - Not handled: dead-heat payoffs, cancelled / moved-off-turf races.
 
 ## Next move
-Fix `training.status` (my defect): count only races whose graded/scored run has real win probabilities, and report how many collapsed to the
-morning line. Then parse and store the RACE STATS block raw (not used in scoring yet); sample in `tests/fixtures/TS_RaceStats_BEL_R5_10-9-26.md`.
+The engine still produces no independent forecast on a real race (speed-figure features empty). Decide how to get outcome data
+into the model (backfilled charts + the `twinspires_*` evidence) before any more capture work: until then `status` will show 0
+scored races for new runs, which is the true answer.
