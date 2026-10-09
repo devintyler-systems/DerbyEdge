@@ -1,4 +1,5 @@
 # Session state (update at the end of every outcome; keep under 40 lines)
+Working rules, including the mandatory UPDATE YOUR LOCAL FILES block: `docs/working_rules.md`.
 
 _Last updated: 2026-10-09 (night), branch `claude/relaxed-noether-0kqijv`, PR devintyler-systems/DerbyEdge#32 (draft). Full suite 1247 passed locally; CI not yet seen on the new commits._
 
@@ -34,7 +35,7 @@ paper trading, daily cycle, `training.status`, engine-version stamp, play-day ch
 - Pasting caution: DK and TwinSpires tabs auto-advance to the next race; the first R5 attempt had R6's tabs.
 - Commit `CLAUDE.md` (`!CLAUDE.md` in `.gitignore`) so cloud sessions can read the working agreement.
 - Optional: backfill post times for the 57 legacy races (dry run first); keep as a labelled baseline.
-- Not built, by decision: real-bet log (revisit at 30 graded races), multi-user product (needs a licensed feed). Not handled: dead heats, cancelled / moved-off-turf races.
+- Not built, by decision: real-bet log (30 graded races), multi-user product. Not handled: dead heats, cancelled / moved-off-turf races.
 ## Next move
 The engine still gives no independent forecast on a real race (speed-figure features empty). Get outcome data into the model
 (backfilled charts + `twinspires_*` evidence) before more capture work; until then `status` correctly shows 0 scored races for new runs.
