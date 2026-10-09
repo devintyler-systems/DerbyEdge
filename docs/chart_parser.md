@@ -32,3 +32,33 @@ Dead heats (flag `DEAD_HEAT`; the payoff identity is skipped), cancelled or move
 harness charts, exotic rows with unusual wording (kept as `raw`, `parsed=False`).
 
 Gate: `python -m pytest tests/test_chart_parser.py -q` (28 races / 3 cards).
+
+# Storing charts and joining them to cards (phase 2)
+
+`src/services/chart_results_intake.py`, CLI `scripts/ingest_results_charts.py`.
+
+```powershell
+python scripts/ingest_results_charts.py --root data/raw/historical_results --check      # validate + compare, writes nothing
+python scripts/ingest_results_charts.py --root data/raw/historical_results              # store valid races, record the card join
+python scripts/ingest_results_charts.py --root data/raw/historical_results --populate   # also feed race_results for grading
+```
+
+Tables: `result_sources` (file SHA-256, parser version, raw bytes), `result_races` (one `is_current` per race key;
+a corrected chart supersedes and keeps the old one), `result_starters`, `result_scratches`, `result_payoffs`,
+`result_card_reconciliations`. Only races that pass every self-check are stored; a card with a structural fault
+(duplicate or missing race number) is rejected whole. Re-ingesting a file is a no-op.
+
+Join to the pre-race card is by track code, date, race number and **program number**:
+
+| Finding | Meaning |
+|---|---|
+| error `CARD_RUNNER_NOT_IN_CHART`, `CHART_STARTER_NOT_ON_CARD`, `CARD_SCRATCHED_BUT_RAN`, `NAME_MISMATCH` | card and chart describe different fields; the join is not trusted, nothing is populated |
+| warning `LATE_SCRATCH` | active on the pre-race card, scratched in the chart (the model scored a non-runner) |
+| warning `JOCKEY_CHANGE`, `TRAINER_CHANGE`, `WEIGHT_CHANGE`, `POST_MISMATCH` | changed after the card was captured |
+| warning `SURFACE_CHANGE`, `DISTANCE_CHANGE` | the race was moved; features built for the card's surface are for the wrong surface |
+
+`--populate` writes `race_results` only for a MATCHED race and never overwrites differing rows without `--replace`.
+`official_odds_decimal` is decimal including the stake (odds-to-one + 1); `finish_position` / `official_finish` are the
+official place (a horse placed down by the stewards keeps its official place with `is_disqualified = 1`);
+`earned_purse` is the purse for that official place. Late scratches get an `is_scratched = 1` row; the card's own
+`scratch_flag` is left alone so the pre-race snapshot is not rewritten.

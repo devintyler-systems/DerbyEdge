@@ -119,6 +119,15 @@ def test_cd_april_25_race_2_matches_the_printed_chart(cards):
     assert next(p for p in race.payoffs if p.wager_type == "Superfecta").winning_numbers == "1-5-7-4"
 
 
+def test_purse_by_place_adds_up_to_the_race_value_on_every_race_including_wrapped_lines(cards):
+    for race in _all_races(cards):
+        assert race.value_of_race and sum(race.purse_by_place.values()) == race.value_of_race, race.race_key
+    race = next(r for r in cards["eqb_CD_2026-04-25_fullcard.pdf"][1].races if r.race_number == 6)   # the line wraps here
+    assert race.value_of_race == 34510 and len(race.purse_by_place) > 8 and race.purse_by_place[1] == 17808
+    r2 = next(r for r in cards["eqb_CD_2026-04-25_fullcard.pdf"][1].races if r.race_number == 2)
+    assert r2.purse_by_place == {1: 52096, 2: 18400, 3: 9200, 4: 4600, 5: 2760, 6: 1308, 7: 1164}
+
+
 def test_horse_names_keep_their_spaces(cards):
     names = {s.horse_name for r in _all_races(cards) for s in r.starters}
     assert {"Sargent Bilko", "Uncle With Money", "Michael's Cove", "Plaza Athenee (GB)"} <= names

@@ -193,6 +193,8 @@ class ChartRace:
     distance_furlongs: float | None = None
     surface: str | None = None
     purse: int | None = None
+    value_of_race: int | None = None
+    purse_by_place: dict[int, int] = dataclasses.field(default_factory=dict)      # official place -> earnings
     weather: str | None = None
     track_condition: str | None = None
     off_time: str | None = None
@@ -407,6 +409,13 @@ def _parse_race(header: re.Match, block: list[str]) -> ChartRace:
             cond.append(head[k])
             k += 1
         race.conditions = " ".join(cond) or None
+    vi = next((i for i, ln in enumerate(head) if ln.startswith("Value of Race:")), None)
+    if vi is not None:                       # the line wraps when many places are paid
+        vtext = _section(head, vi, ("Weather:", "Off at:"))
+        m = re.match(r"^Value of Race:\s*\$([\d,]+)", vtext)
+        race.value_of_race = int(m.group(1).replace(",", "")) if m else None
+        race.purse_by_place = {int(n): int(v.replace(",", ""))
+                               for n, v in re.findall(r"(\d{1,2})(?:st|nd|rd|th)\s+\$([\d,]+)", vtext)}
     for ln in head:
         if ln.startswith("Distance:"):
             text = re.sub(r"\s*Current Track Record.*$", "", ln[len("Distance:"):]).strip()
@@ -525,6 +534,8 @@ def _self_check(race: ChartRace) -> None:
         p.append("no fractional times")
     if race.track_condition is None:
         p.append("no track condition")
+    if race.value_of_race is not None and sum(race.purse_by_place.values()) != race.value_of_race:
+        p.append(f"purse by place sums to {sum(race.purse_by_place.values())}, race value is {race.value_of_race}")
     race.problems = list(dict.fromkeys(p))
 
 
