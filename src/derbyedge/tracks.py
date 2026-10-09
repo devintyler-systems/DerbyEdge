@@ -151,6 +151,14 @@ class _Entry:
     name: str
     kind: str
     aliases: set
+    state: str = ""
+    location: str = ""
+    note: str = ""
+    sources: set = None
+
+    def __post_init__(self):
+        if self.sources is None:
+            self.sources = set()
 
 
 _ENTRIES: dict[str, _Entry] = {}
@@ -189,12 +197,8 @@ for _row in _read_reference("track_aliases.csv"):
         raise ValueError(f"track_aliases.csv maps {_row['alias']!r} to unknown code {_code!r}")
     _ENTRIES[_code].aliases.add(_row["alias"].strip())
 
-_TZ: dict[str, str] = {}
-for _row in _read_reference("track_timezones.csv"):
-    _code = _row["code"].strip().upper()
-    if _code not in _ENTRIES:
-        raise ValueError(f"track_timezones.csv has unknown code {_code!r}")
-    _TZ[_code] = _row["timezone"].strip()
+for _code, _entry in _ENTRIES.items():
+    _entry.sources.add("curated" if _code in _CODE_TO_NAME else "equibase_or_additions")
 
 # Name keys at three strictness levels.  DraftKings writes "TRAINING CENTER"
 # where Equibase writes "TC", "FARMS" for "FARM", "RACE COURSE" for "RACECOURSE".
@@ -236,16 +240,115 @@ def _name_keys(name: str) -> tuple[str, str, str]:
 
 
 _INDEX: tuple[dict[str, set], dict[str, set], dict[str, set]] = ({}, {}, {})
+
+
+_PRIMARY_INDEX: tuple[dict[str, set], dict[str, set], dict[str, set]] | None = None
+
+
+def _index_name(code: str, text: str, *, secondary: bool) -> bool:
+    """Register a name for a code.
+
+    ``secondary`` names (the track listing and the Equineline directory) are refused when a
+    primary source (curated, Equibase list, operator additions / aliases) already holds the
+    name at ANY level, so adding a source can never change what an existing name resolves to.
+    Two secondary codes sharing a name stay ambiguous rather than the first one winning."""
+    keys = _name_keys(text)
+    if secondary and _PRIMARY_INDEX is not None and any(
+        k and (_PRIMARY_INDEX[lvl].get(k, set()) - {code}) for lvl, k in enumerate(keys)
+    ):
+        return False
+    for lvl, k in enumerate(keys):
+        if k:
+            _INDEX[lvl].setdefault(k, set()).add(code)
+    return True
+
+
+# Priority 1: curated + Equibase list + operator additions + operator aliases (may be ambiguous
+# with each other on purpose, e.g. "Eclipse Farm" / "Eclipse TC" at the loosest level).
 for _entry in _ENTRIES.values():
     for _alias in {_entry.name, *_entry.aliases}:
-        for _level, _key in enumerate(_name_keys(_alias)):
-            if _key:
-                _INDEX[_level].setdefault(_key, set()).add(_entry.code)
+        _index_name(_entry.code, _alias, secondary=False)
 
+_PRIMARY_INDEX = tuple({k: set(v) for k, v in level.items()} for level in _INDEX)
+_P1_NAMES: dict[str, set] = {_c: {_e.name, *_e.aliases} for _c, _e in _ENTRIES.items()}
+_UNREGISTERED_NAMES: list[tuple[str, str, str]] = []     # (code, name, source) refused as already claimed
+
+_PSEUDO = re.compile(
+    r"\b(special|pick \d|pick four|pick five|double|crossover|wagers?|futures?|best bets|multiple tracks|coast to coast)\b",
+    re.I,
+)
+
+
+def _classify(name: str) -> str:
+    if _PSEUDO.search(name):
+        return "OTHER"
+    if re.search(r"County Fair\b|\bFair$|\(Fair\)|Fairgr|\bCF\b", name, re.I):
+        return "FAIR"
+    if re.search(r"\bTC\b|T\.C\.|Training|Equine C|Trng|\bTrain\b", name, re.I):
+        return "TRAINING"
+    if re.search(r"\b(Farm|Farms|Ranch|Stable|Stables|Stud)\b", name, re.I):
+        return "FARM"
+    return "RACETRACK"
+
+
+def _display(name: str) -> str:
+    """Title-case an all-caps source name (Equineline) without mangling apostrophes."""
+    if name != name.upper():
+        return name
+    return re.sub(r"[A-Za-z]+(?:'[A-Za-z]+)?", lambda m: m.group(0).capitalize(), name)
+
+
+_ST = {"AL": "AL", "AK": "AK", "AZ": "AZ", "AR": "AR", "CA": "CA", "CO": "CO", "CT": "CT", "DE": "DE", "FL": "FL",
+       "GA": "GA", "HI": "HI", "ID": "ID", "IL": "IL", "IN": "IN", "IA": "IA", "KS": "KS", "KY": "KY", "LA": "LA",
+       "ME": "ME", "MD": "MD", "MA": "MA", "MI": "MI", "MN": "MN", "MS": "MS", "MO": "MO", "MT": "MT", "NE": "NE",
+       "NV": "NV", "NH": "NH", "NJ": "NJ", "NM": "NM", "NY": "NY", "NC": "NC", "ND": "ND", "OH": "OH", "OK": "OK",
+       "OR": "OR", "PA": "PA", "RI": "RI", "SC": "SC", "SD": "SD", "TN": "TN", "TX": "TX", "UT": "UT", "VT": "VT",
+       "VA": "VA", "WA": "WA", "WV": "WV", "WI": "WI", "WY": "WY", "PR": "PR", "CAN": "CAN", "MEX": "MEX"}
+
+
+def _merge_source(rows: list[dict], source: str, *, name_key: str) -> None:
+    """Fold a lower-priority source in.  Existing codes only gain metadata and any extra
+    spelling nobody else owns; unseen codes become new entries."""
+    for row in rows:
+        code = row["code"].strip().upper()
+        raw_name = row[name_key].strip()
+        entry = _ENTRIES.get(code)
+        if entry is None:
+            entry = _Entry(code, _display(raw_name), _classify(raw_name), set())
+            _ENTRIES[code] = entry
+        entry.sources.add(source)
+        if not _index_name(code, raw_name, secondary=True):
+            _UNREGISTERED_NAMES.append((code, raw_name, source))
+        else:
+            entry.aliases.add(raw_name)
+        if source == "listing":
+            entry.state = entry.state or _ST.get(row["state"].strip(), row["state"].strip())
+        else:
+            entry.location = entry.location or row["location"].strip().title()
+            entry.note = entry.note or row["note"].strip()
+
+
+_merge_source(_read_reference("source_listing_tracks.csv"), "listing", name_key="name")
+_equineline_rows: dict[str, dict] = {}
+for _row in _read_reference("source_equineline_tracks.csv"):
+    _equineline_rows.setdefault(_row["code"], _row)       # LP / SND repeat; the first spelling stands
+_merge_source(sorted(_equineline_rows.values(), key=lambda r: r["code"]), "equineline", name_key="name")
+
+# Timezones: hand-maintained file wins over the ones derived from the listing.
+_TZ: dict[str, str] = {}
+for _fname in ("track_timezones_derived.csv", "track_timezones.csv"):
+    for _row in _read_reference(_fname):
+        _code = _row["code"].strip().upper()
+        if _code not in _ENTRIES:
+            raise ValueError(f"{_fname} has unknown code {_code!r}")
+        _TZ[_code] = _row["timezone"].strip()
+
+# Fuzzy matching only looks at the priority-1 spellings of racetracks and fairs, so adding a
+# lower-priority source cannot create new fuzzy hits.
 _FUZZY_KEYS: dict[str, str] = {
-    _name_keys(_a)[0]: _e.code
-    for _e in _ENTRIES.values() if _e.kind in RACE_VENUE_KINDS
-    for _a in {_e.name, *_e.aliases}
+    _name_keys(_a)[0]: _code
+    for _code, _names in _P1_NAMES.items() if _ENTRIES[_code].kind in RACE_VENUE_KINDS
+    for _a in _names
 }
 
 
@@ -254,7 +357,11 @@ def get_track(track_code: Optional[str]) -> Optional[dict]:
     entry = _ENTRIES.get((track_code or "").strip().upper())
     if entry is None:
         return None
-    return {"code": entry.code, "name": entry.name, "kind": entry.kind, "timezone": _TZ.get(entry.code)}
+    return {
+        "code": entry.code, "name": entry.name, "kind": entry.kind, "timezone": _TZ.get(entry.code),
+        "state": entry.state, "location": entry.location, "note": entry.note,
+        "sources": sorted(entry.sources),
+    }
 
 
 def is_race_venue(track_code: Optional[str]) -> bool:

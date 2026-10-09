@@ -41,7 +41,7 @@ def test_every_equibase_row_is_loaded_with_a_valid_kind():
         assert resolve_track(track_code=r["code"])["track_code"] == r["code"], r
     extra = _rows("track_additions.csv")
     assert len(extra) == 5 and not ({r["code"] for r in extra} & set(codes))
-    assert T.registry_size() == 342 + len(extra) + 1       # +1: PRX, curated, absent from the Equibase list
+    assert T.registry_size() >= 342 + len(extra) + 1       # + PRX (curated, absent from the Equibase list) + new sources
 
 
 def test_every_curated_track_has_a_timezone_and_every_zone_is_valid():
@@ -160,3 +160,73 @@ def test_target_track_record_uses_the_real_code_not_the_first_four_letters():
     card = parse_draftkings_markdown(raw, source_path="CT_Full_Race_Data_R7_10-8-26.md", as_of=AS_OF)
     assert sections_start == 0
     assert card.entries[0].record_splits["target_track"].starts == 8     # "CT 8 1 1 1 $35,228"
+
+
+# ---- the track listing and the Equineline directory ------------------------------------------
+
+def test_both_extracts_are_present_and_every_code_is_in_the_registry():
+    listing = _rows("source_listing_tracks.csv")
+    equineline = _rows("source_equineline_tracks.csv")
+    assert len(listing) == 337 and len(equineline) == 370
+    for row in listing + equineline:
+        assert T.get_track(row["code"]) is not None, row["code"]
+    assert T.registry_size() >= 600
+
+
+def test_adding_sources_did_not_change_what_any_primary_name_resolves_to():
+    """Every curated / Equibase / addition / operator-alias spelling still lands on its own code."""
+    expected = {}
+    for rec in T._TRACKS:
+        for name in (rec.name, *rec.aliases):
+            expected[name] = rec.code
+    for fname in ("equibase_track_abbreviations.csv", "track_additions.csv"):
+        for r in _rows(fname):
+            expected.setdefault(r["name"], r["code"])
+    for r in _rows("track_aliases.csv"):
+        expected[r["alias"]] = r["code"]
+    wrong = {n: (c, resolve_track(track_name=n)["track_code"]) for n, c in expected.items()
+             if resolve_track(track_name=n)["track_code"] != c}
+    assert not wrong, wrong
+
+
+def test_belmont_at_the_big_a_stays_on_bel_even_though_the_listing_has_a_separate_baq_code():
+    assert resolve_track(track_name="Belmont At The Big A")["track_code"] == "BEL"
+    assert resolve_track(track_code="BAQ")["track_code"] == "BAQ"          # the code itself is known
+    assert T.get_track("BAQ")["state"] == "NY"
+
+
+def test_historic_tracks_from_horse_histories_resolve():
+    for name, code in [("Bowie", "BOW"), ("Arlington Park", "AP"), ("Hollywood Park", "HOL"),
+                       ("Calder Race Course", "CRC"), ("Bay Meadows", "BM"), ("Agua Caliente", "AC")]:
+        assert resolve_track(track_name=name)["track_code"] == code, name
+
+
+def test_two_tracks_sharing_a_name_are_ambiguous_not_first_come():
+    assert resolve_track(track_name="Arizona Downs")["resolution_source"] == "ambiguous"
+    assert resolve_track(track_code="AD")["track_code"] == "AD" and resolve_track(track_code="AZD")["track_code"] == "AZD"
+
+
+def test_wager_and_special_pseudo_tracks_are_never_race_venues():
+    for code in ("CCP", "DBA", "BCA", "EQA"):
+        assert T.get_track(code)["kind"] == "OTHER" and not is_race_venue(code)
+    assert resolve_track(track_name="Cross Country Pick Four")["kind"] == "OTHER"
+
+
+def test_state_location_and_renaming_notes_are_kept():
+    sar = T.get_track("SAR")
+    assert sar["state"] == "NY" and "SARATOGA" in sar["location"].upper()
+    assert "Arlington Park" in T.get_track("AP")["note"]
+    assert "Kentucky Downs" in T.get_track("DUE")["note"]
+
+
+def test_derived_timezones_require_state_and_offset_to_agree():
+    derived = {r["code"]: r["timezone"] for r in _rows("track_timezones_derived.csv")}
+    assert derived["ATL"] == "America/New_York" and derived["ALB"] == "America/Denver"   # NJ / 3, NM / 1
+    assert derived["AZD"] == "America/Phoenix"                                            # AZ does not observe DST
+    # listing says offset 0 for these; the state says otherwise, so no zone is invented
+    for code in ("ARP", "BOI"):
+        assert code not in derived
+    # the hand-maintained file wins over derivation
+    assert track_timezone("CD") == "America/New_York" and track_timezone("DMR") == "America/Los_Angeles"
+    for zone in derived.values():
+        ZoneInfo(zone)
