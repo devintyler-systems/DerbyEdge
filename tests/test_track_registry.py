@@ -52,7 +52,8 @@ def test_every_curated_track_has_a_timezone_and_every_zone_is_valid():
 
 
 @pytest.mark.parametrize("text,code", [
-    ("BELMONT AT THE BIG A", "BEL"), ("Belmont at the Big A", "BEL"), ("BEL", "BEL"),
+    ("BELMONT AT THE BIG A", "BAQ"), ("Belmont at the Big A", "BAQ"), ("BAQ", "BAQ"),
+    ("BEL", "BEL"), ("Belmont Park", "BEL"), ("Belmont", "BEL"),
     ("SAR", "SAR"), ("Saratoga", "SAR"), ("SARATOGA RACE COURSE", "SAR"),
     ("CD", "CD"), ("Churchill Downs", "CD"), ("AQU", "AQU"), ("Aqueduct Racetrack", "AQU"),
     ("Santa Anita", "SA"), ("SA", "SA"), ("DMR", "DMR"), ("Del Mar", "DMR"),
@@ -189,10 +190,13 @@ def test_adding_sources_did_not_change_what_any_primary_name_resolves_to():
     assert not wrong, wrong
 
 
-def test_belmont_at_the_big_a_stays_on_bel_even_though_the_listing_has_a_separate_baq_code():
-    assert resolve_track(track_name="Belmont At The Big A")["track_code"] == "BEL"
-    assert resolve_track(track_code="BAQ")["track_code"] == "BAQ"          # the code itself is known
-    assert T.get_track("BAQ")["state"] == "NY"
+def test_belmont_at_the_big_a_and_belmont_park_are_different_tracks():
+    for name in ("Belmont At The Big A", "BELMONT AT THE BIG A", "Belmont Park at the Big A"):
+        assert resolve_track(track_name=name)["track_code"] == "BAQ", name
+    for name in ("Belmont Park", "Belmont", "BEL"):
+        assert resolve_track(track_name=name)["track_code"] == "BEL", name
+    assert T.get_track("BAQ")["state"] == "NY" and track_timezone("BAQ") == "America/New_York"
+    assert is_race_venue("BAQ") and is_race_venue("BEL")
 
 
 def test_historic_tracks_from_horse_histories_resolve():

@@ -81,17 +81,24 @@ def parse_distance_yards(s: str | None) -> int:
 
 # ── Morning line parsing ──────────────────────────────────────────────────────
 def parse_morning_line(s: str | None) -> float | None:
-    """Parse "5-2", "5/2", "3.50" to decimal odds. Returns None on failure."""
+    """Parse a morning line to "to-one" odds, the unit ``entries.morning_line_odds`` stores.
+
+    ``"9/2"`` and ``"9-2"`` -> 4.5, ``"20"`` -> 20.0 (20-1), ``"EVEN"`` -> 1.0.  Returns None
+    on failure.  The schema derives ``morning_line_prob = 1 / (morning_line_odds + 1)`` and the
+    UI prints ``{odds}-1``, so this must NOT include the returned stake (decimal odds would).
+    """
     if not s:
         return None
-    s = str(s).strip()
+    s = str(s).strip().upper()
+    if s in ("EVEN", "EVENS", "EV"):
+        return 1.0
     for pat in (r"^(\d+)-(\d+)$", r"^(\d+)/(\d+)$"):
         m = re.match(pat, s)
         if m:
             num, den = int(m.group(1)), int(m.group(2))
-            if den == 0:
+            if den == 0 or num == 0:
                 return None
-            return round(num / den + 1.0, 3)
+            return round(num / den, 6)
     try:
         v = float(s)
         return v if v >= 1.0 else None

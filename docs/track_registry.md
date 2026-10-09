@@ -50,7 +50,7 @@ Behaviour that matters for ingestion:
 
 ## Known gaps
 
-None in the repo's DK fixtures. `BAQ` (listing) and `BEL` are separate codes; `Belmont at the Big A` is mapped to `BEL` in `track_aliases.csv` per the original acceptance spec. If Equibase files tag those races `BAQ`, change that one row. Any new unregistered name fails validation with its text; add it to `track_additions.csv`.
+None in the repo's DK fixtures. `Belmont at the Big A` is `BAQ` and `Belmont Park` is `BEL`: two different tracks, kept apart so track-specific history and race keys are not merged. If a source tags the Big A races `BEL`, change the two `BAQ` rows in `track_aliases.csv`. Any new unregistered name fails validation with its text; add it to `track_additions.csv`.
 The five operator-supplied codes were not independently checked against Equibase.
 
 The source list is older than the 2026 season (it still has Hollywood Park, Arlington Park, Calder) and has no state
