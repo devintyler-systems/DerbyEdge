@@ -9,19 +9,33 @@ normalize_track_name(name: str) -> str
     Lowercase, strip punctuation, collapse spaces.
 
 resolve_track(track_name=None, track_code=None) -> dict
-    Returns {track_code, track_name_canonical, resolution_source}.
-    resolution_source: "parsed_code" | "alias_exact" | "alias_fuzzy" | "unresolved"
+    Returns {track_code, track_name_canonical, resolution_source, kind}.
+    resolution_source: "parsed_code" | "alias_exact" | "alias_normalized"
+                       | "alias_fuzzy" | "ambiguous" | "unresolved"
+    kind: RACETRACK | FAIR | FARM | TRAINING (None when unresolved)
 
 TRACK_CODES: dict[str, str]
-    Flat mapping of normalized alias fragments → track codes.
-    Imported by pdf_ingest.py for substring-scan extraction; do not remove.
+    Flat mapping of normalized alias fragments → track codes for the curated
+    tracks only.  Imported by pdf_ingest.py for substring-scan extraction; it is
+    deliberately NOT widened with the full registry (short names such as "Ely"
+    or "Peg" would create false positives when scanning PDF header text).
+
+Registry data (data/reference/)
+-------------------------------
+equibase_track_abbreviations.csv  342 Equibase codes (racetracks, fairs, farms,
+                                  training centres) from the Equibase
+                                  "North American Racetrack Abbreviations" list.
+track_aliases.csv                 extra spellings DraftKings uses -> code.
+track_timezones.csv               IANA timezone per code (post time -> UTC).
 """
 from __future__ import annotations
 
+import csv
 from dataclasses import dataclass
 from difflib import get_close_matches
 import re
 import unicodedata
+from pathlib import Path
 from typing import Optional
 
 
@@ -113,29 +127,157 @@ _TRACKS: tuple[_TrackRecord, ...] = (
     )),
 )
 
-# Internal lookups built at import time
-_CODE_TO_NAME: dict[str, str] = {}
-_ALIAS_TO_CODE: dict[str, str] = {}
+# ---------------------------------------------------------------------------
+# Curated tracks (authoritative names / aliases) + data-file registry
+# ---------------------------------------------------------------------------
+_DATA_DIR = Path(__file__).resolve().parents[2] / "data" / "reference"
+RACE_VENUE_KINDS = frozenset({"RACETRACK", "FAIR"})
 
+
+def _read_reference(name: str) -> list[dict[str, str]]:
+    path = _DATA_DIR / name
+    if not path.is_file():
+        raise FileNotFoundError(
+            f"track registry data file missing: {path} (it is part of the repository)"
+        )
+    with path.open(newline="", encoding="utf-8") as handle:
+        return list(csv.DictReader(handle))
+
+
+@dataclass
+class _Entry:
+    code: str
+    name: str
+    kind: str
+    aliases: set
+
+
+_ENTRIES: dict[str, _Entry] = {}
 for _rec in _TRACKS:
-    _CODE_TO_NAME[_rec.code] = _rec.name
+    _ENTRIES[_rec.code] = _Entry(_rec.code, _rec.name, "RACETRACK", {_rec.name, *_rec.aliases})
+
+# Curated-only flat dicts, kept exactly as before for pdf_ingest's substring scan.
+_CODE_TO_NAME: dict[str, str] = {r.code: r.name for r in _TRACKS}
+_ALIAS_TO_CODE: dict[str, str] = {}
+for _rec in _TRACKS:
     _ALIAS_TO_CODE[normalize_track_name(_rec.name)] = _rec.code
     for _alias in _rec.aliases:
         _ALIAS_TO_CODE[normalize_track_name(_alias)] = _rec.code
-
-# Flat fragment dict exported for pdf_ingest.py substring-scan functions.
-# Every normalized alias becomes a key; short aliases (e.g. "santa anita",
-# "indiana grand") act as natural substrings of PDF header text.
 TRACK_CODES: dict[str, str] = dict(_ALIAS_TO_CODE)
-
-# Uppercase variant for OCR-noise-tolerant PDF header matching.
-# Keys are normalize_track_text(alias) — uppercase, all punctuation stripped.
-# Used by _extract_track() in pdf_ingest.py as the primary (first-pass) scan.
 TRACK_CODES_UPPER: dict[str, str] = {}
 for _rec in _TRACKS:
     TRACK_CODES_UPPER[normalize_track_text(_rec.name)] = _rec.code
     for _alias in _rec.aliases:
         TRACK_CODES_UPPER[normalize_track_text(_alias)] = _rec.code
+
+for _row in _read_reference("equibase_track_abbreviations.csv"):
+    _code, _name, _kind = _row["code"].strip().upper(), _row["name"].strip(), _row["kind"].strip().upper()
+    if _code in _ENTRIES:
+        _ENTRIES[_code].aliases.add(_name)       # curated name stays canonical
+    else:
+        _ENTRIES[_code] = _Entry(_code, _name, _kind, {_name})
+for _row in _read_reference("track_aliases.csv"):
+    _code = _row["code"].strip().upper()
+    if _code not in _ENTRIES:
+        raise ValueError(f"track_aliases.csv maps {_row['alias']!r} to unknown code {_code!r}")
+    _ENTRIES[_code].aliases.add(_row["alias"].strip())
+
+_TZ: dict[str, str] = {}
+for _row in _read_reference("track_timezones.csv"):
+    _code = _row["code"].strip().upper()
+    if _code not in _ENTRIES:
+        raise ValueError(f"track_timezones.csv has unknown code {_code!r}")
+    _TZ[_code] = _row["timezone"].strip()
+
+# Name keys at three strictness levels.  DraftKings writes "TRAINING CENTER"
+# where Equibase writes "TC", "FARMS" for "FARM", "RACE COURSE" for "RACECOURSE".
+#   0  punctuation-stripped lowercase name
+#   1  Equibase abbreviation spellings expanded (TC, Th'ghbred, Bros, ...)
+#   2  generic facility words dropped (race course, training center, farm, ...)
+_L1_RULES = (
+    (re.compile(r"\bth ?ghbred\b|\bthoro ?bred\b"), "thoroughbred"),
+    (re.compile(r"\bc nter\b|\bcentre\b"), "center"),
+    (re.compile(r"\btc\b|\bt c\b"), "training center"),
+    (re.compile(r"\bbros\b"), "brothers"),
+    (re.compile(r"\bfarms\b"), "farm"),
+    (re.compile(r"\bstables\b"), "stable"),
+    (re.compile(r"\bfairgr nds\b"), "fairgrounds"),
+    (re.compile(r"\brace track\b"), "racetrack"),
+    (re.compile(r"\brace course\b"), "racecourse"),
+    (re.compile(r"\b(?:inc|llc)\b"), ""),
+)
+_L2_RULES = tuple(re.compile(p) for p in (
+    r" and training center$", r" training center$", r" training$", r" racecourse$",
+    r" racetrack$", r" races$", r" farm$", r" stable$", r"^the ",
+))
+
+
+def _tidy(text: str) -> str:
+    return re.sub(r"\s+", " ", text).strip()
+
+
+def _name_keys(name: str) -> tuple[str, str, str]:
+    k0 = normalize_track_name(name)
+    k1 = k0
+    for pattern, repl in _L1_RULES:
+        k1 = pattern.sub(repl, k1)
+    k1 = _tidy(k1)
+    k2 = k1
+    for pattern in _L2_RULES:
+        k2 = _tidy(pattern.sub("", k2))
+    return k0, k1, k2
+
+
+_INDEX: tuple[dict[str, set], dict[str, set], dict[str, set]] = ({}, {}, {})
+for _entry in _ENTRIES.values():
+    for _alias in {_entry.name, *_entry.aliases}:
+        for _level, _key in enumerate(_name_keys(_alias)):
+            if _key:
+                _INDEX[_level].setdefault(_key, set()).add(_entry.code)
+
+_FUZZY_KEYS: dict[str, str] = {
+    _name_keys(_a)[0]: _e.code
+    for _e in _ENTRIES.values() if _e.kind in RACE_VENUE_KINDS
+    for _a in {_e.name, *_e.aliases}
+}
+
+
+def get_track(track_code: Optional[str]) -> Optional[dict]:
+    """Registry entry for a canonical code: {code, name, kind, timezone}, or None."""
+    entry = _ENTRIES.get((track_code or "").strip().upper())
+    if entry is None:
+        return None
+    return {"code": entry.code, "name": entry.name, "kind": entry.kind, "timezone": _TZ.get(entry.code)}
+
+
+def is_race_venue(track_code: Optional[str]) -> bool:
+    """True when the code is a racetrack or fair (a place a race card can be run)."""
+    entry = _ENTRIES.get((track_code or "").strip().upper())
+    return entry is not None and entry.kind in RACE_VENUE_KINDS
+
+
+def track_timezone(track_code: Optional[str]) -> Optional[str]:
+    """IANA timezone for a canonical track code, or None when not registered."""
+    return _TZ.get((track_code or "").strip().upper())
+
+
+def registry_size() -> int:
+    return len(_ENTRIES)
+
+
+def _hit(code: str, source: str) -> dict:
+    entry = _ENTRIES[code]
+    return {
+        "track_code": code,
+        "track_name_canonical": entry.name,
+        "resolution_source": source,
+        "kind": entry.kind,
+    }
+
+
+_UNRESOLVED = {
+    "track_code": None, "track_name_canonical": None, "resolution_source": "unresolved", "kind": None,
+}
 
 
 def resolve_track(
@@ -144,78 +286,38 @@ def resolve_track(
 ) -> dict:
     """Resolve a parsed track name or code to a canonical registry entry.
 
-    Priority: explicit code > alias exact match > alias fuzzy match.
-
-    Returns:
-        {
-          "track_code":           str | None,
-          "track_name_canonical": str | None,
-          "resolution_source":    "parsed_code" | "alias_exact"
-                                  | "alias_fuzzy" | "unresolved",
-        }
+    Priority: explicit code > exact name > Equibase-spelling variants > bare
+    code written as a name ("BEL") > generic-word-stripped name > fuzzy name.
+    A name that matches more than one code at the same level is "ambiguous"
+    and is never guessed.
     """
     if track_code:
         code = track_code.strip().upper()
-        if code in _CODE_TO_NAME:
-            return {
-                "track_code":           code,
-                "track_name_canonical": _CODE_TO_NAME[code],
-                "resolution_source":    "parsed_code",
-            }
+        if code in _ENTRIES:
+            return _hit(code, "parsed_code")
         # Not a primary code — try it as an alias (handles legacy codes like PRA → PRM).
-        _norm_code = normalize_track_name(code)
-        _alias_code = _ALIAS_TO_CODE.get(_norm_code)
-        if _alias_code:
-            return {
-                "track_code":           _alias_code,
-                "track_name_canonical": _CODE_TO_NAME[_alias_code],
-                "resolution_source":    "alias_exact",
-            }
+        found = _INDEX[0].get(normalize_track_name(code), set())
+        if len(found) == 1:
+            return _hit(next(iter(found)), "alias_exact")
 
     if track_name:
-        norm = normalize_track_name(track_name)
-
-        code = _ALIAS_TO_CODE.get(norm)
-        if code:
-            return {
-                "track_code":           code,
-                "track_name_canonical": _CODE_TO_NAME[code],
-                "resolution_source":    "alias_exact",
-            }
-
-        matches = get_close_matches(norm, list(_ALIAS_TO_CODE.keys()), n=1, cutoff=0.85)
+        keys = _name_keys(track_name)
+        for level in (0, 1):
+            found = _INDEX[level].get(keys[level], set())
+            if len(found) == 1:
+                return _hit(next(iter(found)), "alias_exact")
+            if len(found) > 1:
+                return {**_UNRESOLVED, "resolution_source": "ambiguous"}
+        bare = track_name.strip().upper()
+        if bare in _ENTRIES:
+            return _hit(bare, "parsed_code")
+        found = _INDEX[2].get(keys[2], set())
+        if len(found) == 1:
+            return _hit(next(iter(found)), "alias_normalized")
+        if len(found) > 1:
+            return {**_UNRESOLVED, "resolution_source": "ambiguous"}
+        matches = get_close_matches(keys[0], list(_FUZZY_KEYS), n=1, cutoff=0.85)
         if matches:
-            code = _ALIAS_TO_CODE[matches[0]]
-            return {
-                "track_code":           code,
-                "track_name_canonical": _CODE_TO_NAME[code],
-                "resolution_source":    "alias_fuzzy",
-            }
+            return _hit(_FUZZY_KEYS[matches[0]], "alias_fuzzy")
 
-    return {
-        "track_code":           None,
-        "track_name_canonical": None,
-        "resolution_source":    "unresolved",
-    }
-
-
-# IANA timezone per canonical track code.  Needed to turn a track-local post
-# time ("7:02 PM") into the UTC instant the pre-post gates compare against.
-_TRACK_TZ: dict[str, str] = {
-    "CD": "America/New_York", "PIM": "America/New_York", "BEL": "America/New_York",
-    "KEE": "America/New_York", "SA": "America/Los_Angeles", "GP": "America/New_York",
-    "AQU": "America/New_York", "DMR": "America/Los_Angeles", "SAR": "America/New_York",
-    "OP": "America/Chicago", "FG": "America/Chicago", "TP": "America/New_York",
-    "WO": "America/Toronto", "GG": "America/Los_Angeles", "MTH": "America/New_York",
-    "PEN": "America/New_York", "PRX": "America/New_York", "LRL": "America/New_York",
-    "TAM": "America/New_York", "CT": "America/New_York", "RP": "America/Chicago",
-    "HAW": "America/Chicago", "CNL": "America/New_York", "SUF": "America/New_York",
-    "FL": "America/New_York", "PID": "America/New_York", "EVD": "America/Chicago",
-    "LAD": "America/Chicago", "IND": "America/Indiana/Indianapolis",
-    "PRM": "America/Chicago", "MNR": "America/New_York",
-}
-
-
-def track_timezone(track_code: Optional[str]) -> Optional[str]:
-    """IANA timezone for a canonical track code, or None when not registered."""
-    return _TRACK_TZ.get((track_code or "").strip().upper())
+    return dict(_UNRESOLVED)

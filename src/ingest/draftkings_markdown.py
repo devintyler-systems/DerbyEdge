@@ -14,6 +14,7 @@ from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from src.derbyedge.tracks import is_race_venue, resolve_track
 from src.utils.distance_parser import parse_furlongs
 from src.utils.source_file_guard import stamp_source, warn_if_outside_fixtures
 
@@ -745,7 +746,8 @@ def parse_draftkings_markdown(
         raise ValueError("as_of must be timezone-aware")
     race = _metadata(raw, resolved_path)
     race_year = race.race_date.year if race.race_date else None
-    track_code = (race.track or "").strip()[:4].upper() or None
+    # The record table labels the target track by its Equibase code ("CT", "SAR").
+    track_code = resolve_track(track_name=race.track or "").get("track_code") or (race.track or "").strip()[:4].upper() or None
 
     entries: list[Entry] = []
     pps: list[PastPerformance] = []
@@ -881,6 +883,19 @@ def validate_draftkings_markdown_card(card: DraftKingsMarkdownCard) -> Validatio
     for label, value in (("track", race.track), ("race number", race.race_number), ("race date/as_of date", race.race_date), ("surface", race.surface), ("distance", race.distance)):
         if value is None or value == "":
             errors.append(f"race identity missing required {label}")
+    if race.track:
+        resolved = resolve_track(track_name=race.track)
+        if not resolved["track_code"]:
+            why = "is ambiguous in" if resolved["resolution_source"] == "ambiguous" else "is not in"
+            errors.append(
+                f"race track {race.track!r} {why} the track registry (data/reference/); "
+                "add its Equibase code to equibase_track_abbreviations.csv or track_aliases.csv"
+            )
+        elif not is_race_venue(resolved["track_code"]):
+            errors.append(
+                f"race track {race.track!r} resolves to {resolved['track_code']} ({resolved['kind']}), "
+                "which is not a race venue"
+            )
     if not card.entries:
         errors.append("no entries parsed")
     program_seen: set[str] = set()

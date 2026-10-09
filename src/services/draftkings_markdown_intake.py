@@ -370,7 +370,11 @@ def persist_validated_draftkings_markdown(
 
     race = card.race
     track_resolution = resolve_track(track_name=race.track or "")
-    track_code = track_resolution.get("track_code") or (race.track or "UNK")[:6].upper()
+    track_code = track_resolution.get("track_code")
+    if not track_code:
+        # Never invent a code from the leading letters of the header: a wrong
+        # track silently splits one race's history and market data across cards.
+        raise ValueError(f"Validated card has unrecognized track {race.track!r}; add it to the track registry.")
     race_date = race.race_date.isoformat() if race.race_date else None
     if not race_date or race.race_number is None:
         raise ValueError("Validated card lacks canonical race identity.")
