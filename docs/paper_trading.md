@@ -45,3 +45,16 @@ number creates a separate book instead of rewriting history.
 * `implied_prob` is stored rounded to 6 decimals, so captured decimals carry ~1e-4 relative error.
 * Price is the book's, not the pool's; the tote final is the chart's. CLV compares the two, which is the point.
 * Only win bets. Dead heats are voided. Takeout and breakage are in the chart payoff, so they are already paid.
+
+## Daily cycle
+
+```
+python -m training.daily_cycle                    # charts under data/raw/historical_results
+python -m training.daily_cycle --root <folder> --no-populate
+```
+Run it after the last race of the day, with that day's `eqb_<TRK>_<date>_fullcard.pdf` files in the chart folder:
+ingest new charts (stored ones are skipped) -> join each race to its pre-race card -> feed `race_results` for MATCHED
+races (never overwrites) -> settle open paper bets -> write a report per policy to `output/paper_trading/` plus a
+`<stamp>_cycle.json` log. Every step runs even if an earlier one found a problem. Exit 1 on an unreadable or invalid
+chart, a card/chart disagreement, or a held bet; open bets still waiting for a chart are normal and exit 0.
+Placing bets (`place`) is a separate, pre-race step.

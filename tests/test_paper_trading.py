@@ -398,3 +398,58 @@ def test_deciding_needs_no_result_or_chart_tables_at_all():
         conn3.execute(f"DROP TABLE {t}")
     without = [(b.program, b.stake, b.decision_time) for b in decide_bets(conn3, POLICY).bets]
     assert with_charts == without and with_charts
+
+
+# ---- daily cycle ---------------------------------------------------------------------------------
+def _cycle_db(tmp_path):
+    """File DB with the pre-race card for race 2 but no chart yet, and a chart folder holding one card."""
+    import shutil
+    db = tmp_path / "c.db"
+    conn = _chart_db()
+    make_card(conn, 2, model=R2_PROBS, decimals=R2_DEC)
+    disk = sqlite3.connect(db)
+    conn.backup(disk)
+    disk.execute("DELETE FROM result_card_reconciliations")
+    for t in ("result_payoffs", "result_scratches", "result_starters", "result_races", "result_sources"):
+        disk.execute(f"DELETE FROM {t}")
+    disk.commit()
+    disk.row_factory = sqlite3.Row
+    charts = tmp_path / "charts"
+    charts.mkdir()
+    shutil.copy(D25, charts / D25.name)
+    return disk, charts
+
+
+def test_daily_cycle_ingests_populates_settles_reports_and_is_idempotent(tmp_path):
+    from training.daily_cycle import run_cycle
+    conn, charts = _cycle_db(tmp_path)
+    place_paper_bets(conn, POLICY)
+    first = run_cycle(conn, charts, tmp_path / "out", n_boot=200)
+    assert first["charts"]["new"] == 1 and first["charts"]["populated"] == 1
+    assert first["settled"] == {"WON": 1} and first["problems"] == []
+    assert conn.execute("SELECT COUNT(*) FROM race_results").fetchone()[0] >= 7
+    assert first["reports"][0]["settled_bets"] == 1 and first["reports"][0]["roi"] == pytest.approx(2.02 / 2)
+    assert list((tmp_path / "out").glob("*_cycle.json")) and list((tmp_path / "out").glob("*.md"))
+    second = run_cycle(conn, charts, tmp_path / "out", n_boot=200)
+    assert second["charts"]["new"] == 0 and second["charts"]["already"] == 1 and second["settled"] == {}
+
+
+def test_daily_cycle_keeps_going_past_a_corrupt_file_and_reports_it(tmp_path):
+    from training.daily_cycle import run_cycle, main
+    conn, charts = _cycle_db(tmp_path)
+    (charts / "eqb_XX_2026-04-26_fullcard.pdf").write_bytes(b"not a pdf")
+    place_paper_bets(conn, POLICY)
+    res = run_cycle(conn, charts, tmp_path / "out", n_boot=200)
+    assert any("unreadable" in p for p in res["problems"]) and res["settled"] == {"WON": 1}
+    conn.close()
+    assert main(["--db", str(tmp_path / "c.db"), "--root", str(charts), "--out", str(tmp_path / "o2"), "--boot", "100"]) == 1
+
+
+def test_daily_cycle_with_open_bets_and_no_chart_yet_is_not_a_failure(tmp_path):
+    from training.daily_cycle import main
+    conn, charts = _cycle_db(tmp_path)
+    place_paper_bets(conn, POLICY)
+    conn.close()
+    empty = tmp_path / "none"
+    empty.mkdir()
+    assert main(["--db", str(tmp_path / "c.db"), "--root", str(empty), "--out", str(tmp_path / "o"), "--boot", "100"]) == 0
