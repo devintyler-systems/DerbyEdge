@@ -23,7 +23,9 @@ VALID_KINDS = {"RACETRACK", "FAIR", "FARM", "TRAINING"}
 
 # Track strings DraftKings prints that no registry file can resolve.  Empty now that the
 # operator-supplied codes are in track_additions.csv; a new name must be added there.
-KNOWN_GAPS: set[str] = set()
+# Two private training venues seen only as WORKOUT locations in BEL_Full_Race_Data_R5_10-9-26.md; no operator-supplied
+# code yet, so they stay unregistered (workout venues do not block an import; only the race's own track does).
+KNOWN_GAPS: set[str] = {"BLACKWOOD STABLES", "SILVERLEAF HILLS TRAINING CENTER"}
 
 
 def _rows(name):

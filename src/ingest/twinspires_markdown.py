@@ -17,6 +17,8 @@ from src.utils.source_file_guard import stamp_source, warn_if_outside_fixtures
 
 PARSER_VERSION = "twinspires_markdown_speed_power_style/1.1.0"
 _STYLE = re.compile(r"^(E/P|E|P|S|NA)(\d+)$", re.I)
+# TwinSpires prints an editorial tag above some runners' names ("expert 1st pick"); it is not part of the name.
+_TAG = re.compile(r"^expert\s+\w+\s+pick$", re.I)
 _PERCENT = re.compile(r"^(?:\d+(?:\.\d+)?%|-)$")
 _HEADER = (
     "ODDS", "PL", "RUNNER", "DAYS", "OFF", "RUN", "STYLE", "AVG", "SPD",
@@ -104,10 +106,11 @@ def _record_from_chunk(program: str, lines: list[str]) -> TwinSpiresRecord | Non
     if not lines:
         return None
     if any(line.upper() == "SCR" for line in lines[:2]):
-        # Row layout: SCR, "M: x", PL, runner, ...  Name/ML are kept so a scratch
+        # Row layout: SCR, "M: x", PL, [expert tag], runner, ...  Name/ML are kept so a scratch
         # can be cross-checked against the other sources.
+        name = next((v for v in lines[2:6] if not re.fullmatch(r"\d+|-", v) and not _TAG.match(v)), "")
         return TwinSpiresRecord(
-            program_number=program, horse_name=lines[3] if len(lines) > 3 else "", run_style=None,
+            program_number=program, horse_name=name, run_style=None,
             avg_speed=None, back_speed=None, last_speed=None, class_rating=None, power_rating=None,
             jockey_win_pct=None, trainer_win_pct=None, raw_values={}, raw_text="\n".join(lines),
             scratched=True, morning_line=_ml_cell(lines[1]) if len(lines) > 1 else None,
