@@ -58,3 +58,13 @@ races (never overwrites) -> settle open paper bets -> write a report per policy 
 `<stamp>_cycle.json` log. Every step runs even if an earlier one found a problem. Exit 1 on an unreadable or invalid
 chart, a card/chart disagreement, or a held bet; open bets still waiting for a chart are normal and exit 0.
 Placing bets (`place`) is a separate, pre-race step.
+
+## Evidence status
+
+```
+python -m training.status          # read-only; --json for machine output
+```
+Shows races scored before post, races graded, settled paper bets and settled bets with closing-line value against the
+thresholds that unlock a verdict (30 races, 100 bets, 50 bets), and projects the date each is reached from your actual
+pace since the first event (idle days count). Until 14 days and 5 events exist it says "pace not established" instead
+of extrapolating from noise. Reaching a threshold only allows a verdict; it does not make the verdict good.
