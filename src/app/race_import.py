@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 from src.derbyedge.tracks import resolve_track
+from src.ingest.race_bundle import RaceBundle, is_race_bundle, parse_race_bundle
 from src.ingest.draftkings_markdown import (
     DraftKingsMarkdownCard,
     ExcelReconciliationResult,
@@ -76,6 +77,7 @@ class RaceImportDispatch:
     validation: ValidationResult | None = None
     pdf_result: dict[str, Any] | None = None
     excel_result: ExcelReconciliationResult | None = None
+    bundle: RaceBundle | None = None
 
     @property
     def feature_staging_allowed(self) -> bool:
@@ -98,6 +100,7 @@ def dispatch_primary_race_card_import(
     raw_file_bytes: bytes,
     *,
     as_of: datetime | None = None,
+    captured_at: datetime | None = None,
     source_metadata: dict[str, Any] | None = None,
     pdf_parser: Callable[..., dict[str, Any]] = parse_race_pdf,
 ) -> RaceImportDispatch:
@@ -130,6 +133,15 @@ def dispatch_primary_race_card_import(
         if not raw_text.strip():
             raise RaceImportDispatchError("Markdown/TXT upload contains no readable text.")
         effective_as_of = as_of or datetime.now(timezone.utc)
+        if is_race_bundle(raw_text):
+            bundle = parse_race_bundle(
+                raw_text, source_path=filename, as_of=effective_as_of,
+                captured_at=captured_at or datetime.now(timezone.utc),
+            )
+            return RaceImportDispatch(
+                source_kind="markdown", filename=filename, raw_sha256=raw_sha256,
+                card=bundle.card, validation=bundle.validation, bundle=bundle,
+            )
         card = parse_draftkings_markdown(raw_text, source_path=filename, as_of=effective_as_of)
         validation = validate_draftkings_markdown_card(card)
         return RaceImportDispatch(
@@ -166,7 +178,7 @@ def markdown_import_summary(dispatch: RaceImportDispatch) -> dict[str, Any]:
         raise ValueError("Markdown import summary requires a Markdown dispatch result.")
     card, race, validation = dispatch.card, dispatch.card.race, dispatch.validation
     condition = f"{race.surface or '?'}: {race.surface_condition or '?'}"
-    return {
+    summary = {
         "source_filename": dispatch.filename,
         "source_sha256": dispatch.raw_sha256,
         "parser_version": card.parser_version,
@@ -180,7 +192,12 @@ def markdown_import_summary(dispatch: RaceImportDispatch) -> dict[str, Any]:
         "past_performance_count": validation.past_performance_row_count,
         "workout_count": validation.workout_row_count,
         "as_of": card.as_of.isoformat(),
+        "scratched_runner_count": validation.scratched_runner_count,
     }
+    if dispatch.bundle is not None:
+        from src.services.race_bundle_intake import bundle_summary
+        summary["bundle"] = bundle_summary(dispatch.bundle)
+    return summary
 
 
 def markdown_dispatch_to_legacy_ui_payload(dispatch: RaceImportDispatch) -> dict[str, Any]:
@@ -206,7 +223,7 @@ def markdown_dispatch_to_legacy_ui_payload(dispatch: RaceImportDispatch) -> dict
             "morning_line": entry.morning_line,
             "medication_weight_equipment": entry.medication_weight_equipment,
             "weight": entry.weight,
-            "is_scratched": False,
+            "is_scratched": not entry.is_active,
         }
         for entry in card.entries
     ]
@@ -226,7 +243,7 @@ def markdown_dispatch_to_legacy_ui_payload(dispatch: RaceImportDispatch) -> dict
         "going": race.surface_condition,
         "race_type": race.class_code,
         "purse_usd": race.purse,
-        "field_size": len(runners),
+        "field_size": sum(1 for r in runners if not r["is_scratched"]),
         "runners": runners,
         "is_draftkings_markdown": True,
         "markdown_dispatch": dispatch,

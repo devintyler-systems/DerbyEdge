@@ -197,3 +197,25 @@ def resolve_track(
         "track_name_canonical": None,
         "resolution_source":    "unresolved",
     }
+
+
+# IANA timezone per canonical track code.  Needed to turn a track-local post
+# time ("7:02 PM") into the UTC instant the pre-post gates compare against.
+_TRACK_TZ: dict[str, str] = {
+    "CD": "America/New_York", "PIM": "America/New_York", "BEL": "America/New_York",
+    "KEE": "America/New_York", "SA": "America/Los_Angeles", "GP": "America/New_York",
+    "AQU": "America/New_York", "DMR": "America/Los_Angeles", "SAR": "America/New_York",
+    "OP": "America/Chicago", "FG": "America/Chicago", "TP": "America/New_York",
+    "WO": "America/Toronto", "GG": "America/Los_Angeles", "MTH": "America/New_York",
+    "PEN": "America/New_York", "PRX": "America/New_York", "LRL": "America/New_York",
+    "TAM": "America/New_York", "CT": "America/New_York", "RP": "America/Chicago",
+    "HAW": "America/Chicago", "CNL": "America/New_York", "SUF": "America/New_York",
+    "FL": "America/New_York", "PID": "America/New_York", "EVD": "America/Chicago",
+    "LAD": "America/Chicago", "IND": "America/Indiana/Indianapolis",
+    "PRM": "America/Chicago", "MNR": "America/New_York",
+}
+
+
+def track_timezone(track_code: Optional[str]) -> Optional[str]:
+    """IANA timezone for a canonical track code, or None when not registered."""
+    return _TRACK_TZ.get((track_code or "").strip().upper())
