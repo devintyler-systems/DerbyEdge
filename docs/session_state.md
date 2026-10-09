@@ -21,8 +21,8 @@ paper trading, daily cycle, `training.status`, engine-version stamp, play-day ch
 - TwinSpires per-runner speed / class / power ARE parsed and stored as `twinspires_*` evidence (`twinspires_intake.py` ~177) but are
   deliberately NOT mapped to model features (not labelled Beyer). Candidate inputs once there is outcome data to learn weights.
 - **RACE STATS block now captured, not scored:** optional bundle section (line `RACE STATS`), strict parser
-  `src/ingest/twinspires_race_stats.py`, stored raw + parsed in `twinspires_race_stats` (card_id, captured_at). A malformed block
-  blocks the import with a named reason. Seen in ONE sample (BEL R5); bias samples tiny (6 / 3 races): no weight until pooled.
+  `src/ingest/twinspires_race_stats.py`, stored raw + parsed in `twinspires_race_stats` (card_id, captured_at). A malformed block, or one whose
+  track / distance / surface contradicts the DK card, blocks the import with a named reason. Seen in ONE sample (BEL R5); bias samples tiny (6 / 3 races): no weight until pooled.
   See `docs/race_bundle_format.md`.
 - **`training.status` fixed:** counts a race as scored/graded only if the grading run (last pre-post) has real win probabilities
   for every active runner; also prints races that collapsed to the morning line and the stored `model_collapse_status`
@@ -30,7 +30,8 @@ paper trading, daily cycle, `training.status`, engine-version stamp, play-day ch
 
 ## Open
 - Not verified: Streamlit upload / scoring buttons and `start_derbyedge.bat` have not run end to end on a real race.
-- Re-run the first real race with the RACE STATS block in the bundle (confirms it stores on a real import), then merge PR #32.
+- BEL R5 re-imported (card 75): bundle PASS; snapshot correctly rejected (race over). Confirm the block stored: `SELECT card_id, captured_at FROM twinspires_race_stats;` (UI now shows RACE STATS status). Then merge PR #32.
+- Pasting caution: DK and TwinSpires tabs auto-advance to the next race; the first R5 attempt had R6's tabs.
 - Commit `CLAUDE.md` (`!CLAUDE.md` in `.gitignore`) so cloud sessions can read the working agreement.
 - Optional: backfill post times for the 57 legacy races (dry run first); keep as a labelled baseline.
 - Not built, by decision: real-bet log (revisit at 30 graded races), multi-user product (needs a licensed feed). Not handled: dead heats, cancelled / moved-off-turf races.

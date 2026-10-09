@@ -36,7 +36,7 @@ from src.ingest.draftkings_markdown import (
 from src.ingest.race_time import post_time_to_utc
 from src.ingest.twinspires_markdown import TwinSpiresMarkdownCard, parse_twinspires_markdown
 from src.ingest.twinspires_race_stats import HEADING as RACE_STATS_HEADING
-from src.ingest.twinspires_race_stats import RaceStats, RaceStatsError, parse_race_stats
+from src.ingest.twinspires_race_stats import RaceStats, RaceStatsError, identity_mismatches, parse_race_stats
 from src.utils.horse_norm import normalize_horse_name
 
 SECTION_KINDS = ("dk_advanced", "twinspires", "dk_basic")      # the three tabs a bundle requires
@@ -249,6 +249,11 @@ def parse_race_bundle(
         race.race_date, race.scheduled_post_time or race.post_time_display, track_code, captured_at=captured_at,
     )
     late = bool(post_utc) and captured_at >= datetime.fromisoformat(post_utc)
+    if race_stats is not None:
+        wrong = identity_mismatches(race_stats, track_code=track_code, distance=race.distance, surface=race.surface)
+        if wrong:
+            errors.append("RACE STATS block looks like a different race than the DK card (" + "; ".join(wrong) +
+                          "); paste the block for this race, or remove it")
     validation = validate_draftkings_markdown_card(card)
     validation.errors = list(dict.fromkeys(validation.errors + errors + recon.errors))
     validation.warnings = list(dict.fromkeys(validation.warnings + recon.warnings))

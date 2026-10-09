@@ -203,3 +203,34 @@ def test_the_block_changes_nothing_that_scoring_reads():
         except sqlite3.OperationalError:
             continue
         assert qa == qb, table
+
+
+# ---- the block must belong to the race it is pasted with --------------------------------------------------
+R6_HEADER = ("BEL \nMAIDEN SPECIAL WEIGHT \n| Purse: $100K \n| 2yo \n| 6 1/2 F \n| ITurf \n| PARS: | E1: 92 | E2: 92 | LP: 81 | SPD: 80\n")
+R5_HEADER = STATS.split("Race Type Stats for")[0].split("RACE STATS\n", 1)[1]
+
+
+def test_matching_block_is_accepted_and_the_check_reads_the_header():
+    from src.ingest.twinspires_race_stats import identity_mismatches
+    s = parse_race_stats(STATS)
+    assert identity_mismatches(s, track_code="BEL", distance="1 1/16 M", surface="dirt") == []
+    assert identity_mismatches(s, track_code="BEL", distance="1 1/16 M", surface="turf") == ["surface 'dirt' vs card 'turf'"]
+
+
+def test_a_block_from_another_race_blocks_the_import_and_names_the_differences():
+    wrong = STATS.replace(R5_HEADER, R6_HEADER)
+    b = _bundle(BEL_TEXT + "\n" + wrong)
+    assert not b.validation.passed
+    msg = next(e for e in b.validation.errors if e.startswith("RACE STATS block looks like a different race"))
+    assert "distance '6 1/2 F' vs card '1 1/16 M'" in msg and "surface 'turf' vs card 'dirt'" in msg and "track" not in msg
+
+
+def test_a_block_for_another_track_is_named():
+    b = _bundle(BEL_TEXT + "\n" + STATS.replace("BEL \n$16K", "SAR \n$16K", 1))
+    assert any("track 'SAR' vs card 'BEL'" in e for e in b.validation.errors)
+
+
+def test_unparseable_header_fields_are_never_a_false_mismatch():
+    from src.ingest.twinspires_race_stats import identity_mismatches
+    s = parse_race_stats(STATS)
+    assert identity_mismatches(s, track_code=None, distance="about a mile", surface="all weather") == []

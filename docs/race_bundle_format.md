@@ -38,7 +38,10 @@ It is captured now because it cannot be reconstructed as-of later. **It is store
     (`RAIL`, `1-3`, `4-7`, `8+`).
 * Strict on purpose: column labels must match the sample literally and every value must be a well-formed number.
   A present but malformed block **blocks the import** with `RACE STATS block is malformed: ...` naming the expected labels
-  or the offending text, never a silent partial read. Two blocks in one file is also an error. To import without the
+  or the offending text, never a silent partial read. Two blocks in one file is also an error.
+  The block's own header (track, distance, dirt/turf) is also checked against the DK card: a block from another race blocks the
+  import with `RACE STATS block looks like a different race ... (distance '6 1/2 F' vs card '1 1/16 M')`. Fields that do not parse on
+  both sides are skipped, never a false mismatch. To import without the
   block, delete it from the file.
 * Stored in `twinspires_race_stats` (created on first use): `card_id`, `captured_at` (when the app received the bundle),
   the block text as pasted (`raw_text`), `parsed_json`, `parser_version`, `bundle_sha256`. Re-importing an identical block

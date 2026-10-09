@@ -86,6 +86,36 @@ class RaceStats:
         return out
 
 
+_DISTANCE = re.compile(r"^(\d+(?:\s+\d+/\d+)?)\s*([MF])$", re.I)
+
+
+def _distance_key(text: str | None) -> str | None:
+    m = _DISTANCE.match((text or "").strip())
+    return f"{' '.join(m.group(1).split())} {m.group(2).upper()}" if m else None
+
+
+def _surface_family(text: str | None) -> str | None:
+    t = (text or "").strip().lower()
+    return "turf" if "turf" in t else "dirt" if t == "dirt" else None
+
+
+def identity_mismatches(stats: RaceStats, *, track_code: str | None, distance: str | None, surface: str | None) -> list[str]:
+    """Where the block's own header contradicts the DK card it was pasted with (a block from another race).
+
+    Only fields that parse on both sides are compared, so an unfamiliar format is never a false mismatch.
+    """
+    out: list[str] = []
+    if track_code and stats.track.strip().upper() != track_code.upper():
+        out.append(f"track {stats.track.strip()!r} vs card {track_code!r}")
+    block_dist = next((k for k in (_distance_key(h) for h in stats.header_lines) if k), None)
+    if block_dist and _distance_key(distance) and block_dist != _distance_key(distance):
+        out.append(f"distance {block_dist!r} vs card {_distance_key(distance)!r}")
+    block_surface = next((f for f in (_surface_family(h) for h in stats.header_lines) if f), None)
+    if block_surface and _surface_family(surface) and block_surface != _surface_family(surface):
+        out.append(f"surface {block_surface!r} vs card {_surface_family(surface)!r}")
+    return out
+
+
 class _Tokens:
     def __init__(self, tokens: list[str]) -> None:
         self.t, self.i = tokens, 0
