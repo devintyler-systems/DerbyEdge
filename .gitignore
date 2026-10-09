@@ -85,6 +85,7 @@ test-tmp/
 
 # Stray malformed files from bad path pastes (Windows path-separator artifacts)
 C*
+!CLAUDE.md
 !tests/conftest.py
 !src/**/*.py
 !tests/fixtures/*.md
