@@ -21,12 +21,9 @@ REF = ROOT / "data" / "reference"
 AS_OF = datetime(2026, 10, 9, tzinfo=timezone.utc)
 VALID_KINDS = {"RACETRACK", "FAIR", "FARM", "TRAINING"}
 
-# Track strings DraftKings prints that the Equibase list does not contain.  They
-# need a code from the operator; the engine must say so rather than guess.
-KNOWN_GAPS = {
-    "BELTERRA PARK", "MAHONING VALLEY RACE COURSE", "WINSTAR TRAINING CENTER",
-    "LYNWOOD STABLE,INC", "BOLO FARM",
-}
+# Track strings DraftKings prints that no registry file can resolve.  Empty now that the
+# operator-supplied codes are in track_additions.csv; a new name must be added there.
+KNOWN_GAPS: set[str] = set()
 
 
 def _rows(name):
@@ -42,7 +39,9 @@ def test_every_equibase_row_is_loaded_with_a_valid_kind():
     assert {r["kind"] for r in rows} <= VALID_KINDS
     for r in rows:
         assert resolve_track(track_code=r["code"])["track_code"] == r["code"], r
-    assert T.registry_size() >= 342
+    extra = _rows("track_additions.csv")
+    assert len(extra) == 5 and not ({r["code"] for r in extra} & set(codes))
+    assert T.registry_size() == 342 + len(extra) + 1       # +1: PRX, curated, absent from the Equibase list
 
 
 def test_every_curated_track_has_a_timezone_and_every_zone_is_valid():
@@ -82,16 +81,27 @@ def test_dk_long_spellings_of_training_centres_and_farms_resolve(text, code, kin
     assert (r["track_code"], r["kind"]) == (code, kind)
 
 
+@pytest.mark.parametrize("text,code,kind", [
+    ("BELTERRA PARK", "BTP", "RACETRACK"), ("MAHONING VALLEY RACE COURSE", "MVR", "RACETRACK"),
+    ("WINSTAR TRAINING CENTER", "WSR", "TRAINING"), ("LYNWOOD STABLE,INC", "LYN", "FARM"),
+    ("BOLO FARM", "BLF", "FARM"), ("BTP", "BTP", "RACETRACK"),
+])
+def test_operator_supplied_tracks_resolve(text, code, kind):
+    r = resolve_track(track_name=text)
+    assert (r["track_code"], r["kind"]) == (code, kind)
+    assert track_timezone("BTP") == track_timezone("MVR") == "America/New_York"
+
+
 def test_only_racetracks_and_fairs_are_race_venues():
-    assert is_race_venue("SAR") and is_race_venue("ZIA") and is_race_venue("BCF")
-    assert not is_race_venue("PMM") and not is_race_venue("NJF") and not is_race_venue("NOPE")
+    assert is_race_venue("SAR") and is_race_venue("ZIA") and is_race_venue("BCF") and is_race_venue("BTP")
+    assert not is_race_venue("PMM") and not is_race_venue("NJF") and not is_race_venue("WSR") and not is_race_venue("NOPE")
 
 
 def test_ambiguous_and_unknown_names_are_never_guessed():
     assert resolve_track(track_name="Eclipse") == {
         "track_code": None, "track_name_canonical": None, "resolution_source": "ambiguous", "kind": None,
     }
-    for name in ("Zzyzx Downs", "Belterra Park", "", None):
+    for name in ("Zzyzx Downs", "", None):
         assert resolve_track(track_name=name)["track_code"] is None
 
 

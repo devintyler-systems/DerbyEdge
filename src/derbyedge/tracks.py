@@ -25,6 +25,7 @@ Registry data (data/reference/)
 equibase_track_abbreviations.csv  342 Equibase codes (racetracks, fairs, farms,
                                   training centres) from the Equibase
                                   "North American Racetrack Abbreviations" list.
+track_additions.csv               facilities missing from the Equibase list (operator-supplied codes).
 track_aliases.csv                 extra spellings DraftKings uses -> code.
 track_timezones.csv               IANA timezone per code (post time -> UTC).
 """
@@ -176,6 +177,12 @@ for _row in _read_reference("equibase_track_abbreviations.csv"):
         _ENTRIES[_code].aliases.add(_name)       # curated name stays canonical
     else:
         _ENTRIES[_code] = _Entry(_code, _name, _kind, {_name})
+# Operator-supplied additions: facilities DraftKings prints that the Equibase PDF predates or omits.
+for _row in _read_reference("track_additions.csv"):
+    _code, _name, _kind = _row["code"].strip().upper(), _row["name"].strip(), _row["kind"].strip().upper()
+    if _code in _ENTRIES:
+        raise ValueError(f"track_additions.csv code {_code!r} already exists in the registry")
+    _ENTRIES[_code] = _Entry(_code, _name, _kind, {_name})
 for _row in _read_reference("track_aliases.csv"):
     _code = _row["code"].strip().upper()
     if _code not in _ENTRIES:

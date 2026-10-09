@@ -5,6 +5,7 @@ One canonical code per facility, resolved from any spelling the sources use.
 | File (`data/reference/`) | What it holds |
 |---|---|
 | `equibase_track_abbreviations.csv` | 342 codes from the Equibase "North American Racetrack Abbreviations" list, with a `kind`: `RACETRACK`, `FAIR`, `TRAINING` (TC), `FARM`. `kind` is assigned from the name (TC / Farm / County Fair) and corrected by hand where wrong. |
+| `track_additions.csv` | Facilities missing from the Equibase list, with operator-supplied codes (Belterra Park BTP, Mahoning Valley MVR, WinStar Training Center WSR, Lynwood Stable LYN, Bolo Farm BLF). |
 | `track_aliases.csv` | Extra spellings (mostly DraftKings long names, e.g. "Belmont at the Big A" -> BEL, "Hollywood Casino at Charles Town Races" -> CT). |
 | `track_timezones.csv` | IANA timezone per code; used to turn a track-local post time into UTC. A track without a row cannot produce a pre-post timestamp. |
 
@@ -22,15 +23,15 @@ Behaviour that matters for ingestion:
 
 ## Adding a track
 
-1. Find its Equibase code. Add a row to `equibase_track_abbreviations.csv` (`code,name,kind`) if it is not listed.
+1. Find its Equibase code. Add a row to `track_additions.csv` (`code,name,kind,source`); leave `equibase_track_abbreviations.csv` as the source list.
 2. Add any other spelling to `track_aliases.csv`.
 3. Add its zone to `track_timezones.csv`.
 4. Run `python -m pytest tests/test_track_registry.py`.
 
-## Known gaps (names DraftKings prints that the Equibase list lacks)
+## Known gaps
 
-`BELTERRA PARK`, `MAHONING VALLEY RACE COURSE`, `WINSTAR TRAINING CENTER`, `LYNWOOD STABLE,INC`, `BOLO FARM`.
-They are listed in `KNOWN_GAPS` in the test; add them (with their codes) and remove them from that set.
+None in the repo's DK fixtures. Any new unregistered name fails validation with its text; add it to `track_additions.csv`.
+The five operator-supplied codes were not independently checked against Equibase.
 
 The source list is older than the 2026 season (it still has Hollywood Park, Arlington Park, Calder) and has no state
 or timezone column; the timezone file covers the curated tracks plus the active ones whose zone is not in doubt.
