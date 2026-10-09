@@ -83,9 +83,6 @@ test-tmp/
 *.xlsx
 *.pdf
 
-# Stray malformed files from bad path pastes (Windows path-separator artifacts)
-C*
-!CLAUDE.md
-!tests/conftest.py
-!src/**/*.py
-!tests/fixtures/*.md
+# Stray files from bad path pastes ("C:\Projects\derbyedge-engine\src\x.py" typed as a file name on Windows).
+# Anchored to that exact shape: a bare C* also matched conftest.py and CLAUDE.md, because Windows ignores case.
+C*Projectsderbyedge*
