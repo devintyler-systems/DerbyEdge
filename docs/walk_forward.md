@@ -45,3 +45,18 @@ test races without a winner. There is no random splitting anywhere.
 real one. With a few dozen races the interval is wide and the verdict will usually be `NOT_DISTINGUISHABLE`; the model's
 own promotion gate asks for 500 completed races. `closing_tote` uses `race_results.official_odds_decimal`, which is only
 decimal-including-stake for rows written by the chart ingest; rows from older CSV uploads may be in other units.
+
+## Engine versions
+
+Every score run is stamped `score_runs.engine_version` = `code-<hash>/<model>@<version>`. The hash covers the source that
+decides the probabilities (`src/models`, `src/features`; see `src/utils/engine_version.py`), with line endings normalised,
+so docs, tests, ingest and app edits do not start a new cohort but any change to the scorer, trainer, features, policy,
+chaos or confidence code does. Runs from before the stamp have `NULL` and are reported as `legacy`.
+
+* `python -m training.walk_forward` grades **one** version per run: the newest stamped one. It never pools versions; the
+  report names the version and the counts left out. Until a stamped run exists it shows `legacy` and says so.
+* `--list-versions` shows graded races per version; `--engine-version legacy` or a listed version selects another.
+* `python -m training.status` and the paper-trading thresholds count the newest version only (paper bets by the version of
+  the run that made them).
+* Consequence by design: changing engine code starts a new cohort from zero. Batch changes, and treat each cohort's
+  numbers as the only evidence about that engine.

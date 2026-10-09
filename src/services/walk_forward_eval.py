@@ -50,6 +50,7 @@ class GradedRace:
     run_id: str
     run_timestamp: str
     post_utc: str | None
+    engine_version: str              # score_runs.engine_version of the graded run; 'legacy' = scored before the stamp existed
     as_of: str                       # PROVEN (a run before the scheduled post) | UNPROVEN (no post time on record)
     starters: list[str]              # programs, in forecast order
 
@@ -90,7 +91,7 @@ def _inverse(values: Sequence[float | None]) -> list[float] | None:
 
 def load_graded_races(
     conn: sqlite3.Connection, *, include_unproven: bool = False, since: str | None = None, until: str | None = None,
-    track: str | None = None,
+    track: str | None = None, engine_version: str | None = None,
 ) -> tuple[list[GradedRace], Counter]:
     """Return the gradable races (oldest first) and a count of why the others were excluded."""
     if conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='race_results'").fetchone() is None:
@@ -107,6 +108,8 @@ def load_graded_races(
                    rc.stakes_name, rc.race_class, t.abbrev
             FROM race_cards rc JOIN tracks t ON t.track_id=rc.track_id
             WHERE {' AND '.join(where)} ORDER BY rc.card_date, t.abbrev, rc.race_number""", params).fetchall()
+    has_stamp = "engine_version" in {r[1] for r in conn.execute("PRAGMA table_info(score_runs)")}
+    stamp_sql = "COALESCE(engine_version, 'legacy')" if has_stamp else "'legacy'"
     graded: list[GradedRace] = []
     excluded: Counter = Counter()
     for card_id, card_date, race_number, post, surface, furlongs, stakes, race_class, abbrev in cards:
@@ -126,7 +129,7 @@ def load_graded_races(
             excluded["DEAD_HEAT"] += 1
             continue
         runs = conn.execute(
-            "SELECT run_id, run_timestamp FROM score_runs WHERE card_id=? ORDER BY run_timestamp, run_id", (card_id,)).fetchall()
+            f"SELECT run_id, run_timestamp, {stamp_sql} FROM score_runs WHERE card_id=? ORDER BY run_timestamp, run_id", (card_id,)).fetchall()
         if not runs:
             excluded["NO_SCORE_RUN"] += 1
             continue
@@ -136,14 +139,17 @@ def load_graded_races(
             if not before:
                 excluded["ALL_SCORE_RUNS_AFTER_POST"] += 1
                 continue
-            run_id, run_ts = before[-1]
+            run_id, run_ts, version = before[-1]
             as_of = "PROVEN"
         else:
             if not include_unproven:
                 excluded["AS_OF_UNPROVEN_NO_POST_TIME"] += 1
                 continue
-            run_id, run_ts = runs[-1]
+            run_id, run_ts, version = runs[-1]
             as_of = "UNPROVEN"
+        if engine_version is not None and version != engine_version:
+            excluded["OTHER_ENGINE_VERSION"] += 1
+            continue
         entry_ids = [r[0] for r in results]
         scores = {r[0]: r for r in conn.execute(
             "SELECT entry_id, win_probability, p_model_pre_market FROM entry_scores WHERE run_id=?", (run_id,))}
@@ -172,7 +178,7 @@ def load_graded_races(
         graded.append(GradedRace(
             race=Race(key, date.fromisoformat(card_date), winners[0], fc), card_id=card_id, track=abbrev,
             race_number=race_number, family=family, field_bucket=bucket_field_size(len(results)), run_id=run_id,
-            run_timestamp=run_ts, post_utc=post, as_of=as_of, starters=[str(r[5]) for r in results]))
+            run_timestamp=run_ts, post_utc=post, engine_version=version, as_of=as_of, starters=[str(r[5]) for r in results]))
     return graded, excluded
 
 
@@ -226,7 +232,7 @@ def per_race_rows(graded: Sequence[GradedRace]) -> list[dict]:
     for g in sorted(graded, key=lambda g: (g.race.when, g.race.key)):
         for name, probs in g.race.forecasts.items():
             rows.append({"race": g.race.key, "date": g.race.when.isoformat(), "family": g.family,
-                         "field_size": len(g.starters), "run_id": g.run_id, "as_of": g.as_of, "forecast": name,
+                         "field_size": len(g.starters), "engine_version": g.engine_version, "run_id": g.run_id, "as_of": g.as_of, "forecast": name,
                          "winner_program": g.starters[g.race.winner_idx], "p_winner": probs[g.race.winner_idx],
                          "log_loss": race_log_loss(probs, g.race.winner_idx), "hindsight": name in HINDSIGHT})
     return rows

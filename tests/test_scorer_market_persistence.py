@@ -346,3 +346,12 @@ def test_live_card_persists_distinct_ml_baseline_and_normalized_live_market(monk
     assert all(row["bet_tag"] in {"bet", "neutral", "underlay"} for row in rows)
     assert all(row["missing_data_flag"] == 0 for row in rows)
     assert all(row["confidence_flag"] == 1 for row in rows)
+
+
+def test_every_score_run_is_stamped_with_the_engine_version(monkeypatch, tmp_path):
+    from src.utils.engine_version import code_fingerprint
+    _score_and_rows(monkeypatch, tmp_path)
+    conn = _connect(tmp_path / "scorer-market.db")
+    stamp = conn.execute("SELECT engine_version FROM score_runs").fetchone()[0]
+    conn.close()
+    assert stamp == f"code-{code_fingerprint()}/fixture@test"
