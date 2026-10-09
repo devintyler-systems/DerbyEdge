@@ -69,7 +69,9 @@ data/raw-inputs/
 data/raw_input/
 data/downloads/
 data/runs/
-samples/
+samples/*
+!samples/new_race_odds_template.csv
+!samples/results_import_template.csv
 
 # Local scratch space (schemas/, docs/, manifests/, and tests/ stay tracked)
 scratch/

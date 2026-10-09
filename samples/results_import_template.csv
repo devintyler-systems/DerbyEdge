@@ -1,0 +1,8 @@
+race_date,track_code,race_number,horse_name,finish_position,official_odds,post_position,beaten_lengths,scratched,disqualified,speed_figure,beyer_figure,final_time,earned_purse,comment
+2026-05-02,CD,10,Exemplar,1,3.40,5,0.00,0,0,108,106,2:01.82,744000,clean trip 2-wide throughout
+2026-05-02,CD,10,Rival Horse,2,7.20,3,1.75,0,0,105,103,,,
+2026-05-02,CD,10,Third Finisher,3,12.50,7,3.50,0,0,102,100,,,wide into stretch
+2026-05-02,CD,10,Fourth Place,4,4.80,2,5.25,0,0,100,98,,,
+2026-05-02,CD,10,Fifth Place,5,18.00,11,8.00,0,0,97,95,,,
+2026-05-02,CD,10,Scratched Horse,,,6,,1,0,,,,,vet scratch morning of race
+2026-05-02,CD,10,DQ Horse,3,9.50,9,3.50,0,1,99,97,,,disqualified placed 3rd
