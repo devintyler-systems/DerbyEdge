@@ -87,3 +87,4 @@ test-tmp/
 C*
 !tests/conftest.py
 !src/**/*.py
+!tests/fixtures/*.md
