@@ -8,9 +8,8 @@ paper trading, daily cycle, `training.status`, engine-version stamp, play-day ch
 **`CLAUDE.md` is NOT in git** (`.gitignore` rule `C*`): it exists only on the user's machine.
 
 ## User's machine
-`C:\Projects\derbyedge-engine`, on the PR branch, 28 paper-trading tests passed locally. Morning-line repair applied to
-cards 73 and 74. `status` showed 1 graded race: 57 older races lack a scheduled post time (`AS_OF_UNPROVEN`).
-Existing runs are `legacy`; they are not pooled with new ones.
+`C:\Projects\derbyedge-engine`, on the PR branch. Morning-line repair applied to cards 73 and 74. `status` showed 1 graded race:
+57 older races lack a post time (`AS_OF_UNPROVEN`). Existing runs are `legacy`, never pooled with new ones.
 
 ## First real race (BEL R5 10-9-26) - what it showed
 - Launcher works (the desktop shortcut must point at `start_derbyedge.bat`, not `START_DERBYEDGE.md`). Bundle import PASSED after the
@@ -29,16 +28,12 @@ Existing runs are `legacy`; they are not pooled with new ones.
   for every active runner; also prints races that collapsed to the morning line and the stored `model_collapse_status`
   ("(none stored)" = guard fired, no status written). Graded-eligible races lacking `model_board` show as `NO_MODEL_PROBABILITIES`.
 
-## Not verified
-Streamlit upload and scoring buttons, and `start_derbyedge.bat`, have not been run end to end on a real race.
-
 ## Open
+- Not verified: Streamlit upload / scoring buttons and `start_derbyedge.bat` have not run end to end on a real race.
 - Re-run the first real race with the RACE STATS block in the bundle (confirms it stores on a real import), then merge PR #32.
 - Commit `CLAUDE.md` (`!CLAUDE.md` in `.gitignore`) so cloud sessions can read the working agreement.
-- Optional: backfill post times for the 57 legacy races (dry run first); keep them as a labelled baseline, not in the verdict.
-- Not built, by decision: real-bet log (revisit at 30 graded races), multi-user product (needs a licensed data feed).
-- Not handled: dead-heat payoffs, cancelled / moved-off-turf races.
-
+- Optional: backfill post times for the 57 legacy races (dry run first); keep as a labelled baseline.
+- Not built, by decision: real-bet log (revisit at 30 graded races), multi-user product (needs a licensed feed). Not handled: dead heats, cancelled / moved-off-turf races.
 ## Next move
 The engine still gives no independent forecast on a real race (speed-figure features empty). Get outcome data into the model
 (backfilled charts + `twinspires_*` evidence) before more capture work; until then `status` correctly shows 0 scored races for new runs.
