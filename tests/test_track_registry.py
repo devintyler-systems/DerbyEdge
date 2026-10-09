@@ -119,7 +119,7 @@ def test_every_track_string_in_the_fixtures_resolves_except_the_known_gaps():
     paths = glob.glob(str(ROOT / "tests" / "fixtures" / "*.md")) + glob.glob(
         str(ROOT / "draftkings_racedata_pdfs" / "fixtures" / "*DK_Horse*.md"))
     for path in paths:
-        if "Speed" in path:
+        if "Speed" in path or Path(path).name.startswith("TS_"):       # TwinSpires exports are not DK cards
             continue
         card = parse_draftkings_markdown(Path(path).read_text(encoding="utf-8"),
                                          source_path=Path(path).name, as_of=AS_OF)
