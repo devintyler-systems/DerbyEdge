@@ -6,6 +6,10 @@ The three tabs are told apart by their header rows, in any order:
 * TwinSpires   - header contains ``STYLE``
 * DK Basic     - header contains ``MED/WT/EQP``
 
+An optional fourth block, the TwinSpires ``RACE STATS`` panel (starts at a line reading exactly ``RACE STATS``), is
+captured as-is and stored beside the race; it never feeds scoring.  The bundle passes without it, and a present but
+malformed block is a hard failure that names the problem.
+
 Track, race number and post time come from the DK Advanced header; the date from
 the upload filename (as for single-file DK uploads); the capture time is the
 moment the app received the file.  Nothing needs to be typed into the file.
@@ -31,9 +35,12 @@ from src.ingest.draftkings_markdown import (
 )
 from src.ingest.race_time import post_time_to_utc
 from src.ingest.twinspires_markdown import TwinSpiresMarkdownCard, parse_twinspires_markdown
+from src.ingest.twinspires_race_stats import HEADING as RACE_STATS_HEADING
+from src.ingest.twinspires_race_stats import RaceStats, RaceStatsError, parse_race_stats
 from src.utils.horse_norm import normalize_horse_name
 
-SECTION_KINDS = ("dk_advanced", "twinspires", "dk_basic")
+SECTION_KINDS = ("dk_advanced", "twinspires", "dk_basic")      # the three tabs a bundle requires
+OPTIONAL_KINDS = ("race_stats",)                                # captured when present, never required
 _RACE_LINE = re.compile(r"^RACE\s+\d+$", re.I)
 
 
@@ -60,6 +67,7 @@ class RaceBundle:
     post_utc: str | None
     post_source: str
     late_capture: bool
+    race_stats: RaceStats | None = None
 
 
 def _normalize_newlines(text: str) -> list[str]:
@@ -80,8 +88,11 @@ def _header_kind(lines: list[str], at: int) -> str | None:
 def locate_sections(text: str) -> tuple[dict[str, tuple[int, int]], list[str], list[str]]:
     """Return ``({kind: (first_line, end_line)}, errors, lines)`` over normalized lines."""
     lines = _normalize_newlines(text)
-    starts: dict[str, list[int]] = {k: [] for k in SECTION_KINDS}
+    starts: dict[str, list[int]] = {k: [] for k in SECTION_KINDS + OPTIONAL_KINDS}
     for i, line in enumerate(lines):
+        if line.strip() == RACE_STATS_HEADING:
+            starts["race_stats"].append(i)
+            continue
         if line.strip() != "#":
             continue
         kind = _header_kind(lines, i)
@@ -110,7 +121,7 @@ def locate_sections(text: str) -> tuple[dict[str, tuple[int, int]], list[str], l
 def is_race_bundle(text: str) -> bool:
     """True when the text holds a DK Advanced section plus at least one other tab."""
     sections, _errors, _lines = locate_sections(text)
-    return "dk_advanced" in sections and len(sections) >= 2
+    return "dk_advanced" in sections and sum(1 for k in SECTION_KINDS if k in sections) >= 2
 
 
 def _person_key(value: str | None) -> str:
@@ -219,6 +230,12 @@ def parse_race_bundle(
             basic = parse_basic_grid(body("dk_basic"))
         except BasicGridError as exc:
             errors.append(f"DK Basic: {exc}")
+    race_stats: RaceStats | None = None
+    if "race_stats" in sections:
+        try:
+            race_stats = parse_race_stats(body("race_stats"))
+        except RaceStatsError as exc:
+            errors.append(f"RACE STATS block is malformed (remove the block to import without it): {exc}")
     ts_text = body("twinspires") if "twinspires" in sections else ""
     ts = (
         parse_twinspires_markdown(
@@ -248,4 +265,5 @@ def parse_race_bundle(
         reconciliation=recon, sections=sections,
         bundle_sha256=hashlib.sha256(text.encode("utf-8")).hexdigest(),
         captured_at=captured_at, post_utc=post_utc, post_source=post_source, late_capture=late,
+        race_stats=race_stats,
     )
