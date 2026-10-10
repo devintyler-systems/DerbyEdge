@@ -140,6 +140,11 @@ from src.app.board_state import (
     source_feature_inventory,
 )
 from src.app.board_formatting import (
+    DIAGNOSTIC_NOTICE,
+    diagnostic_forecast_frame,
+    diagnostic_reason_codes,
+    is_diagnostic_only,
+    win_pct_text,
     _edge_str,
     confidence_select_fragment,
     market_probability_display,
@@ -1620,9 +1625,10 @@ with tab1:
             c3.metric("Underlays", int(n_ul), delta=None)
             c4.metric("Low confidence", int(n_low))
             c5.metric("Sum win prob", f"{sum_wp:.4f}")
+            _top_lbl, _top_pct = win_pct_text(top_horse["win_probability"], top_horse.get("diagnostic_win_probability"))
             st.caption(
                 f"Top: **{top_horse['horse_name']}** "
-                f"{top_horse['win_probability']*100:.1f}% · "
+                f"{_top_pct}{' (diagnostic)' if _top_lbl != 'Win %' else ''} · "
                 f"fair {top_horse['fair_odds']:.1f}-1 · "
                 f"edge {_edge_str(top_horse['value_score'])} · "
                 f"{TAG_ICON.get(top_horse['bet_tag'], top_horse['bet_tag'])}"
@@ -1632,9 +1638,10 @@ with tab1:
             c1.metric("Horses", len(board_df))
             c2.metric("Low confidence", int(n_low))
             c3.metric("Sum win prob", f"{sum_wp:.4f}")
+            _top_lbl, _top_pct = win_pct_text(top_horse["win_probability"], top_horse.get("diagnostic_win_probability"))
             _top_caption = (
                 f"Top forecast: **{top_horse['horse_name']}** "
-                f"{top_horse['win_probability']*100:.1f}%"
+                f"{_top_pct}{' (diagnostic, not valid for betting)' if _top_lbl != 'Win %' else ''}"
             )
             if _ui_contract.show_fair_odds:
                 _top_caption += f" · fair {top_horse['fair_odds']:.1f}-1"
@@ -1824,6 +1831,21 @@ with tab1:
             },
         )
 
+        _diag_table = diagnostic_forecast_frame(board_df)
+        if _diag_table is not None:
+            st.warning(DIAGNOSTIC_NOTICE)
+            _codes = diagnostic_reason_codes(board_df)
+            if _codes:
+                st.caption("Gate reasons: " + " · ".join(_codes))
+            st.dataframe(
+                _diag_table, use_container_width=True, hide_index=True,
+                column_config={
+                    "Diagnostic Win %": st.column_config.NumberColumn("Diagnostic Win %", format="%.1f"),
+                    "ML-Implied %": st.column_config.NumberColumn("ML-Implied %", format="%.1f"),
+                    "Diff vs ML (pts)": st.column_config.NumberColumn("Diff vs ML (pts)", format="%+.1f"),
+                },
+            )
+
         # ── Kelly debug view ──────────────────────────────────────────────────
         if has_kelly and st.checkbox("Show Kelly debug", key="kelly_debug", value=False):
             _mult = kelly_pct / _KELLY_SLIDER_MAX
@@ -1870,8 +1892,11 @@ with tab1:
             "Win Probability vs Live Market"
             if has_live_odds else "Forecast vs Morning-Line Implied Probability"
         )
-        chart_df = disp.sort_values("win_probability", ascending=True).copy()
-        chart_df["win_pct"] = chart_df["win_probability"] * 100
+        # A board whose Win % the eligibility gate blanked plots the stored DIAGNOSTIC probabilities, labelled as such.
+        _diag_chart = is_diagnostic_only(disp)
+        _win_src = "diagnostic_win_probability" if _diag_chart else "win_probability"
+        chart_df = disp.sort_values(_win_src, ascending=True).copy()
+        chart_df["win_pct"] = chart_df[_win_src] * 100
 
         if has_live_odds:
             chart_df["market_pct"] = chart_df["live_market_prob"] * 100
@@ -1890,9 +1915,9 @@ with tab1:
         )
         fig.add_trace(go.Bar(
             y=chart_df["horse_name"], x=chart_df["win_pct"],
-            name="Model Win%", orientation="h",
-            marker_color=bar_colors,
-            text=chart_df["win_pct"].apply(lambda x: f"{x:.1f}%"),
+            name="Diagnostic Win % (not valid for betting)" if _diag_chart else "Model Win%", orientation="h",
+            marker_color="#8b949e" if _diag_chart else bar_colors,
+            text=chart_df["win_pct"].apply(lambda x: f"{x:.1f}%" if pd.notna(x) else ""),
             textposition="outside",
         ))
         if chaos_on and "chaos_win_prob" in chart_df.columns:
@@ -2051,7 +2076,8 @@ with tab2:
             3 + int(_ui_contract.show_fair_odds) + int(_ui_contract.show_edge)
         )
         _detail_offset = 0
-        _detail_cols[_detail_offset].metric("Win %", f"{horse['win_probability']*100:.1f}%")
+        _win_lbl, _win_txt = win_pct_text(horse["win_probability"], horse.get("diagnostic_win_probability"))
+        _detail_cols[_detail_offset].metric(_win_lbl, _win_txt)
         _detail_offset += 1
         if _ui_contract.show_fair_odds:
             _detail_cols[_detail_offset].metric("Fair Odds", f"{horse['fair_odds']:.1f}-1")

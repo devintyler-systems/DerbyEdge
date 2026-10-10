@@ -39,6 +39,20 @@ HINDSIGHT = frozenset({"closing_tote"})
 THIN_SEGMENT_RACES = 10
 
 
+# What kind of forecast a graded run is, from score_runs.model_type (schema: xgboost | fallback | derby_override |
+# seed_only_baseline).  A seed-only baseline has no audited calibration, so the app's eligibility gate withholds its
+# Win % / odds / bets: its probabilities are graded here as evidence only.  Only an xgboost run is called trained;
+# fallback / derby_override / unknown are kept apart as OTHER rather than being passed off as trained.
+DIAGNOSTIC_SEED = "DIAGNOSTIC_SEED_BASELINE"
+TRAINED = "TRAINED_MODEL"
+OTHER = "OTHER_MODEL"
+
+
+def forecast_class(model_type: str | None) -> str:
+    kind = (model_type or "").strip().lower()
+    return DIAGNOSTIC_SEED if kind == "seed_only_baseline" else TRAINED if kind == "xgboost" else OTHER
+
+
 @dataclasses.dataclass
 class GradedRace:
     race: Race
@@ -53,6 +67,7 @@ class GradedRace:
     engine_version: str              # score_runs.engine_version of the graded run; 'legacy' = scored before the stamp existed
     as_of: str                       # PROVEN (a run before the scheduled post) | UNPROVEN (no post time on record)
     starters: list[str]              # programs, in forecast order
+    forecast_class: str = OTHER      # DIAGNOSTIC_SEED_BASELINE | TRAINED_MODEL | OTHER_MODEL (from score_runs.model_type)
 
 
 @dataclasses.dataclass
@@ -110,6 +125,7 @@ def load_graded_races(
             WHERE {' AND '.join(where)} ORDER BY rc.card_date, t.abbrev, rc.race_number""", params).fetchall()
     has_stamp = "engine_version" in {r[1] for r in conn.execute("PRAGMA table_info(score_runs)")}
     stamp_sql = "COALESCE(engine_version, 'legacy')" if has_stamp else "'legacy'"
+    type_sql = "model_type" if "model_type" in {r[1] for r in conn.execute("PRAGMA table_info(score_runs)")} else "NULL"
     graded: list[GradedRace] = []
     excluded: Counter = Counter()
     for card_id, card_date, race_number, post, surface, furlongs, stakes, race_class, abbrev in cards:
@@ -129,7 +145,8 @@ def load_graded_races(
             excluded["DEAD_HEAT"] += 1
             continue
         runs = conn.execute(
-            f"SELECT run_id, run_timestamp, {stamp_sql} FROM score_runs WHERE card_id=? ORDER BY run_timestamp, run_id", (card_id,)).fetchall()
+            f"SELECT run_id, run_timestamp, {stamp_sql}, {type_sql} FROM score_runs WHERE card_id=? ORDER BY run_timestamp, run_id",
+            (card_id,)).fetchall()
         if not runs:
             excluded["NO_SCORE_RUN"] += 1
             continue
@@ -139,13 +156,13 @@ def load_graded_races(
             if not before:
                 excluded["ALL_SCORE_RUNS_AFTER_POST"] += 1
                 continue
-            run_id, run_ts, version = before[-1]
+            run_id, run_ts, version, model_type = before[-1]
             as_of = "PROVEN"
         else:
             if not include_unproven:
                 excluded["AS_OF_UNPROVEN_NO_POST_TIME"] += 1
                 continue
-            run_id, run_ts, version = runs[-1]
+            run_id, run_ts, version, model_type = runs[-1]
             as_of = "UNPROVEN"
         if engine_version is not None and version != engine_version:
             excluded["OTHER_ENGINE_VERSION"] += 1
@@ -178,7 +195,8 @@ def load_graded_races(
         graded.append(GradedRace(
             race=Race(key, date.fromisoformat(card_date), winners[0], fc), card_id=card_id, track=abbrev,
             race_number=race_number, family=family, field_bucket=bucket_field_size(len(results)), run_id=run_id,
-            run_timestamp=run_ts, post_utc=post, engine_version=version, as_of=as_of, starters=[str(r[5]) for r in results]))
+            run_timestamp=run_ts, post_utc=post, engine_version=version, as_of=as_of, starters=[str(r[5]) for r in results],
+            forecast_class=forecast_class(model_type)))
     return graded, excluded
 
 
@@ -211,6 +229,7 @@ def evaluate(
             "date_min": min((g.race.when for g in graded), default=None),
             "date_max": max((g.race.when for g in graded), default=None),
             "n_as_of_unproven": sum(1 for g in graded if g.as_of == "UNPROVEN"),
+            "forecast_classes": dict(Counter(g.forecast_class for g in graded)),
             "excluded": dict(excluded or {}),
             "min_races_for_verdict": MIN_RACES_FOR_VERDICT,
         },
@@ -294,6 +313,10 @@ def render_markdown(result: dict) -> str:
          f"**before its scheduled post**; probabilities are renormalised over the horses that started.", ""]
     if pop["excluded"]:
         L += ["Excluded: " + ", ".join(f"{k}={v}" for k, v in sorted(pop["excluded"].items())), ""]
+    n_diag = pop.get("forecast_classes", {}).get(DIAGNOSTIC_SEED, 0)
+    if n_diag:
+        L += [f"**{n_diag} of {pop['n_graded_races']} graded race(s) are DIAGNOSTIC seed-baseline forecasts**: uncalibrated, "
+              "withheld by the app's eligibility gate for display and betting, and graded here as evidence only.", ""]
     if pop["n_as_of_unproven"]:
         L += [f"**{pop['n_as_of_unproven']} graded race(s) have no scheduled post time, so 'forecast before post' is unproven.**", ""]
     if pop["n_graded_races"] < pop["min_races_for_verdict"]:

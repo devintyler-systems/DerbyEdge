@@ -60,3 +60,10 @@ chaos or confidence code does. Runs from before the stamp have `NULL` and are re
   the run that made them).
 * Consequence by design: changing engine code starts a new cohort from zero. Batch changes, and treat each cohort's
   numbers as the only evidence about that engine.
+
+## Forecast class (diagnostic vs trained)
+Each graded race carries a forecast class taken from `score_runs.model_type` of the graded run: `DIAGNOSTIC_SEED_BASELINE`
+(`seed_only_baseline`: uncalibrated, so the app's eligibility gate withholds its Win % / odds / bets), `TRAINED_MODEL` (`xgboost`), or
+`OTHER_MODEL` (`fallback`, `derby_override`, unknown; never passed off as trained). The report says how many graded races are diagnostic;
+`python -m training.status` shows scored / graded counts per class. Diagnostic forecasts are graded as evidence only, to measure whether
+they beat the morning line before any input is added; they are never a basis for a bet.
