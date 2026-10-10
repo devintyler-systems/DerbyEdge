@@ -118,3 +118,23 @@ def test_database_without_collapse_status_column_still_reports(tmp_path):
     conn.execute("ALTER TABLE score_runs DROP COLUMN model_collapse_status")
     st = build_status(conn, today=date(2026, 3, 31))
     assert st["metrics"][0]["have"] == 1 and st["model_collapse_status"] == {"(none stored)": 1}
+
+
+def test_status_labels_seed_baseline_races_as_diagnostic_evidence():
+    from src.services.walk_forward_eval import DIAGNOSTIC_SEED, TRAINED
+    conn = new_db()
+    add_race(conn, day=2, probs=[.5, .3, .2], ml=[1, 2, 3], winner=0)                     # seed baseline, scored + graded
+    add_race(conn, day=3, probs=[.5, .3, .2], ml=[1, 2, 3], winner=0, results=False)      # trained model, scored only
+    conn.execute("UPDATE score_runs SET model_type='seed_only_baseline' WHERE card_id=(SELECT card_id FROM race_cards WHERE card_date='2026-03-02')")
+    conn.execute("UPDATE score_runs SET model_type='xgboost' WHERE card_id=(SELECT card_id FROM race_cards WHERE card_date='2026-03-03')")
+    st = build_status(conn, today=date(2026, 3, 31))
+    assert st["forecast_class"] == {"scored": {DIAGNOSTIC_SEED: 1, TRAINED: 1}, "graded": {DIAGNOSTIC_SEED: 1}}
+    text = render_text(st)
+    assert f"{DIAGNOSTIC_SEED}=1/1" in text and f"{TRAINED}=1/0" in text and "evidence only" in text
+
+
+def test_status_has_no_diagnostic_note_when_nothing_is_a_seed_baseline():
+    conn = new_db()
+    add_race(conn, day=2, probs=[.5, .3, .2], ml=[1, 2, 3], winner=0)
+    conn.execute("UPDATE score_runs SET model_type='xgboost'")
+    assert "DIAGNOSTIC_SEED_BASELINE" not in render_text(build_status(conn, today=date(2026, 3, 31)))

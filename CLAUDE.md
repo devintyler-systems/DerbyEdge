@@ -29,6 +29,7 @@ Python 3.11, SQLite (`db/derbyedge.db`, gitignored; schema `db/schema.sql`), Str
 - Only count a race as scored or graded if the run used has real model win probabilities (not a morning-line collapse).
 - As-of discipline: decisions use only data captured before post. Late captures are flagged, not used for live features.
 - Capture-now-use-later data (e.g. TwinSpires RACE STATS) is stored raw and is NOT fed to scoring until there is outcome data to validate it.
+- A forecast the app's eligibility gate blocks (uncalibrated seed baseline) is DIAGNOSTIC: graded as labelled evidence, shown only as "not valid for betting", never used for real bets, fair odds or edge.
 - Never pool score runs from different engine versions (`score_runs.engine_version`); `legacy` is a labelled baseline.
 - Verdicts stay `INSUFFICIENT_DATA` below the documented thresholds (30 graded races; 100 settled paper bets, 50 for CLV).
 
