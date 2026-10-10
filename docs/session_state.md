@@ -8,7 +8,6 @@ paper trading, daily cycle, `training.status`, engine-version stamp, play-day ch
 ## User's machine
 `C:\Projects\derbyedge-engine`, should be on `main` (the PR branch is merged). Morning-line repair applied to cards 73 and 74. `status` showed 1 graded race:
 57 older races lack a post time (`AS_OF_UNPROVEN`). Existing runs are `legacy`, never pooled with new ones.
-
 ## First real race (BEL R5 10-9-26) - what it showed
 - Launcher works (the desktop **DerbyEdge** shortcut runs `start_derbyedge.bat`). Bundle import PASSED after the
   TwinSpires "expert Nth pick" tag fix (`twinspires_markdown.py`; fixture `tests/fixtures/BEL_Full_Race_Data_R5_10-9-26.md`).
@@ -33,6 +32,7 @@ paper trading, daily cycle, `training.status`, engine-version stamp, play-day ch
 - Repo tidy done on this branch (stale root files and `artifacts/` removed, `01_downloader.py` -> `scripts/`, `.gitignore` `C*` narrowed, `samples/` templates tracked). Local-only archive of old captures: `data/raw_input/captures/`.
 - Optional: backfill post times for the 57 legacy races (dry run first); keep as a labelled baseline.
 - Not built, by decision: real-bet log (30 graded races), multi-user product. Not handled: dead heats, cancelled / moved-off-turf races.
+- CT R7 10-9 import fixed (new branch off main): Basic-grid `L122bOn` equipment suffix; `9 MTP ALLOWANCE` glued post display. Known gap: bare `ALLOWANCE` (no `$`) leaves `race_class` NULL; no scoring effect today.
 - Issue #30 (Race Board: explain LOW-confidence BET suppression): still valid, deliberately parked. Only matters once the engine emits model probabilities AND live odds exist; revisit then.
 ## Next move
 The engine still gives no independent forecast on a real race (speed-figure features empty). Get outcome data into the model

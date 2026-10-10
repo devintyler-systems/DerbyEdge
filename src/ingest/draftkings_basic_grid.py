@@ -13,7 +13,8 @@ import hashlib
 import re
 
 _PROGRAM = re.compile(r"^(?:AE|MTO)?\d{1,2}[A-Za-z]?$")
-_MEDWT = re.compile(r"^(?P<med>[A-Za-z]*)(?P<wt>\d{2,3})$")
+# "L122" = Lasix + 122 lb; a trailing equipment code ("L122bOn" = blinkers on) may follow the weight.
+_MEDWT = re.compile(r"^(?P<med>[A-Za-z]*)(?P<wt>\d{2,3})(?P<eqp>[A-Za-z]{0,8})$")
 _REQUIRED = ("ml", "runner", "med/wt/eqp", "jockey", "trainer")
 
 
@@ -32,6 +33,7 @@ class BasicGridRow:
     jockey: str | None
     trainer: str | None
     scratched: bool
+    equipment: str | None = None          # e.g. "bOn" in "L122bOn"; informational, not cross-checked
 
 
 @dataclasses.dataclass(frozen=True)
@@ -87,6 +89,6 @@ def parse_basic_grid(text: str) -> BasicGrid:
             morning_line=row[index["ml"]], horse_name=row[index["runner"]],
             medication=medwt.group("med") or None, weight=int(medwt.group("wt")),
             jockey=_clean_person(row[index["jockey"]]), trainer=_clean_person(row[index["trainer"]]),
-            scratched=(odds or "").upper() == "SCR",
+            scratched=(odds or "").upper() == "SCR", equipment=medwt.group("eqp") or None,
         ))
     return BasicGrid(source_sha256=hashlib.sha256(text.encode("utf-8")).hexdigest(), rows=tuple(rows))

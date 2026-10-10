@@ -331,7 +331,11 @@ def _metadata(raw: str, source_path: str) -> Race:
         ]
         window_lines = [line for line in window_lines if line]
         if window_lines:
-            post_display = " ".join(window_lines[:3])
+            joined = " ".join(window_lines[:3])
+            # Keep only the countdown / clock: a class line without a leading "$" ("ALLOWANCE") sits right
+            # after it and used to be glued on ("9 MTP ALLOWANCE"), which no post-time parser recognises.
+            shown = re.match(r"(?i)^(\d{1,3}\s*MTP|\d{1,2}:\d{2}\s*[AP]M)\b", joined)
+            post_display = shown.group(1) if shown else joined
     if post_display is None and post_match:
         post_display = " ".join(post_match.groups())
     purse = None
