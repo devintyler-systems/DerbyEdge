@@ -6,7 +6,7 @@ Morning-line fix + repair, Belmont at the Big A -> BAQ, Equibase chart parser, c
 paper trading, daily cycle, `training.status`, engine-version stamp, play-day checklist, `start_derbyedge.bat`, this file.
 `CLAUDE.md` now tracked (`!CLAUDE.md` in `.gitignore`); the user's old local copy was stale and is replaced by the tracked one.
 ## User's machine
-`C:\Projects\derbyedge-engine`, on the PR branch. Morning-line repair applied to cards 73 and 74. `status` showed 1 graded race:
+`C:\Projects\derbyedge-engine`, should be on `main` (the PR branch is merged). Morning-line repair applied to cards 73 and 74. `status` showed 1 graded race:
 57 older races lack a post time (`AS_OF_UNPROVEN`). Existing runs are `legacy`, never pooled with new ones.
 
 ## First real race (BEL R5 10-9-26) - what it showed
