@@ -1,14 +1,12 @@
 # Session state (update at the end of every outcome; keep under 40 lines)
 Working rules, including the mandatory UPDATE YOUR LOCAL FILES block: `docs/working_rules.md`.
-_Last updated: 2026-10-09 (night), branch `claude/relaxed-noether-0kqijv`, PR devintyler-systems/DerbyEdge#32 (draft). Full suite 1247 passed locally; CI not yet seen on the new commits._
-
-## Done and on the branch (not yet merged to main)
+_Last updated: 2026-10-10, branch `main`: PR devintyler-systems/DerbyEdge#32 MERGED (CI green, 1254 tests passed). Local machine must be on `main`._
+## Done and merged to main (PR #32)
 Morning-line fix + repair, Belmont at the Big A -> BAQ, Equibase chart parser, chart store/join/populate, walk-forward evaluation,
 paper trading, daily cycle, `training.status`, engine-version stamp, play-day checklist, `start_derbyedge.bat`, this file.
 `CLAUDE.md` now tracked (`!CLAUDE.md` in `.gitignore`); the user's old local copy was stale and is replaced by the tracked one.
-
 ## User's machine
-`C:\Projects\derbyedge-engine`, on the PR branch. Morning-line repair applied to cards 73 and 74. `status` showed 1 graded race:
+`C:\Projects\derbyedge-engine`, should be on `main` (the PR branch is merged). Morning-line repair applied to cards 73 and 74. `status` showed 1 graded race:
 57 older races lack a post time (`AS_OF_UNPROVEN`). Existing runs are `legacy`, never pooled with new ones.
 
 ## First real race (BEL R5 10-9-26) - what it showed
@@ -30,11 +28,12 @@ paper trading, daily cycle, `training.status`, engine-version stamp, play-day ch
 
 ## Open
 - Not verified: Streamlit upload / scoring buttons and `start_derbyedge.bat` have not run end to end on a real race.
-- RACE STATS capture CONFIRMED on the user's machine (card 75, post-race TEST row: not evidence). Next: a live race uploaded before post for a valid row, then merge PR #32.
+- RACE STATS capture CONFIRMED on the user's machine (card 75, post-race TEST row: not evidence). Next: a live race uploaded before post for a valid row.
 - Pasting caution: DK and TwinSpires tabs auto-advance to the next race; the first R5 attempt had R6's tabs.
 - Repo tidy done on this branch (stale root files and `artifacts/` removed, `01_downloader.py` -> `scripts/`, `.gitignore` `C*` narrowed, `samples/` templates tracked). Local-only archive of old captures: `data/raw_input/captures/`.
 - Optional: backfill post times for the 57 legacy races (dry run first); keep as a labelled baseline.
 - Not built, by decision: real-bet log (30 graded races), multi-user product. Not handled: dead heats, cancelled / moved-off-turf races.
+- Issue #30 (Race Board: explain LOW-confidence BET suppression): still valid, deliberately parked. Only matters once the engine emits model probabilities AND live odds exist; revisit then.
 ## Next move
 The engine still gives no independent forecast on a real race (speed-figure features empty). Get outcome data into the model
 (backfilled charts + `twinspires_*` evidence) before more capture work; until then `status` correctly shows 0 scored races for new runs.
