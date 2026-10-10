@@ -227,3 +227,53 @@ def test_expert_tag_on_a_scratch_row_with_and_without_a_place_cell():
     tagged = _record_from_chunk("9", ["SCR", "M: 7/2", "-", "expert 1st pick", "Pineapple Man", "7", "E8"])
     plain = _record_from_chunk("9", ["SCR", "M: 7/2", "-", "Pineapple Man", "7", "E8"])
     assert tagged.horse_name == plain.horse_name == "Pineapple Man" and tagged.scratched
+
+
+# ---- CT R7 10-9-26: "L122bOn" in the Basic grid, and a class line with no "$" right after "9 MTP" -----------
+CT2 = ROOT / "tests" / "fixtures" / "CT_Full_Race_Data_R7_10-9-26.md"
+CT2_CAPTURED = datetime(2026, 10, 10, 2, 11, 16, tzinfo=timezone.utc)
+
+
+def _ct2(text: str | None = None):
+    return parse_race_bundle((text or CT2.read_text(encoding="utf-8")), source_path=CT2.name,
+                             as_of=CT2_CAPTURED.replace(second=0, microsecond=0), captured_at=CT2_CAPTURED)
+
+
+def _grid(*rows):
+    head = ["#", "All", "ODDS", "ML", "Runner", "MED/WT/EQP", "Jockey", "Trainer"]
+    return "\n".join(head + [c for r in rows for c in r]) + "\n"
+
+
+def test_basic_grid_accepts_an_equipment_code_after_the_weight():
+    g = parse_basic_grid(_grid(["1", "13", "15", "Amama", "L114", "J One", "T One"],
+                               ["7", "13", "20", "Little Maggie", "L122bOn", "J Two", "T Two"]))
+    assert [(r.medication, r.weight, r.equipment) for r in g.rows] == [("L", 114, None), ("L", 122, "bOn")]
+
+
+@pytest.mark.parametrize("cell", ["Amama", "122bOn123", "L1", "L122-bOn", "L122bOnbOnbOn"])
+def test_a_misaligned_weight_cell_still_fails_the_whole_grid(cell):
+    with pytest.raises(BasicGridError, match="misaligned"):
+        parse_basic_grid(_grid(["1", "13", "15", "Amama", cell, "J One", "T One"]))
+
+
+def test_a_class_line_without_a_dollar_sign_is_not_glued_onto_the_post_countdown():
+    b = _ct2()
+    assert b.card.race.post_time_display == "9 MTP"
+    assert (b.post_utc, b.post_source) == ("2026-10-10T02:20:16+00:00", "MTP_ESTIMATE")
+    clock = _ct2(CT2.read_text(encoding="utf-8").replace("\r\n", "\n").replace("\n9\nMTP\n", "\n7:02\nPM\n", 1))
+    assert clock.card.race.post_time_display == "7:02 PM" and clock.post_source == "CLOCK"
+
+
+def test_ct_r7_10_9_bundle_passes_merges_all_ten_weights_and_stores_the_race_stats():
+    b = _ct2()
+    assert b.validation.passed, b.validation.errors
+    assert b.reconciliation.weights_merged == 10 and b.reconciliation.programs_checked == 10
+    assert b.validation.parsed_unique_runner_count == 9 and b.validation.scratched_runner_count == 1
+    assert {r.program_number: r.equipment for r in b.basic.rows}["7"] == "bOn"
+    assert b.race_stats is not None and b.race_stats.pars == {"E1": 91, "E2": 91, "LP": 79, "SPD": 77}
+    conn = _db()
+    saved = persist_validated_draftkings_markdown(conn, b.card, b.validation, source_filename=CT2.name,
+                                                  scheduled_post_utc=b.post_utc, captured_at=b.captured_at)
+    extras = persist_race_bundle_extras(conn, b, saved.card_id)
+    assert (extras.twinspires_status, extras.race_stats_status) == ("PASS", "STORED")
+    assert extras.market_snapshot_status == "CAPTURED"

@@ -15,7 +15,8 @@ An optional fourth block, the TwinSpires **RACE STATS** panel, may be pasted any
 
 * Track, race number, post time: DK Advanced header. Date: filename. Capture time: when the app received the file.
 * Post time is converted to UTC with the track's registered timezone (`src/derbyedge/tracks.py`).
-  A countdown post ("9 MTP") is an estimate (capture time + minutes) and is labelled `MTP_ESTIMATE`.
+  A countdown post ("9 MTP") is an estimate (capture time + minutes) and is labelled `MTP_ESTIMATE`; a class line with no `$` ("ALLOWANCE")
+  right after it is not part of the post display.
 * The sections are cross-checked per program number (horse, morning line, scratch status, jockey, trainer, weight).
   Any disagreement, missing, or duplicated section blocks the import and names the conflicting values.
 * Received at/after post: the card imports but is flagged `LATE_CAPTURE` and gets no market snapshot or pace features.
@@ -51,4 +52,7 @@ It is captured now because it cannot be reconstructed as-of later. **It is store
 * Track-bias samples are small (the sample has 6 and 3 races): do not weight them until pooled.
 
 Code: `src/ingest/race_bundle.py`, `src/ingest/draftkings_basic_grid.py`, `src/services/race_bundle_intake.py`.
+DK Basic weight cell: `L122` = Lasix + 122 lb; a trailing equipment code is accepted and kept (`L122bOn` = blinkers on, informational,
+not cross-checked). Anything else in that cell still fails the whole grid as misaligned.
+
 Tests: `tests/test_race_bundle.py`, `tests/test_entry_model.py`, `tests/test_twinspires_race_stats.py`.
