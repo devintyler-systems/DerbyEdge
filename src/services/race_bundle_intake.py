@@ -7,6 +7,7 @@ and, when the file was received before post, one pre-post market capture.
 from __future__ import annotations
 
 import dataclasses
+import json
 import sqlite3
 from typing import Any
 
@@ -16,6 +17,46 @@ from src.services.market_snapshot_intake import MarketSnapshotError, ingest_mark
 from src.services.twinspires_intake import persist_twinspires_card, validate_twinspires_card
 
 
+_RACE_STATS_DDL = """
+CREATE TABLE IF NOT EXISTS twinspires_race_stats (
+    race_stats_id  INTEGER PRIMARY KEY AUTOINCREMENT,
+    card_id        INTEGER NOT NULL REFERENCES race_cards(card_id),
+    captured_at    TEXT    NOT NULL,          -- when the app received the bundle (ISO-8601 UTC); the as-of for this block
+    raw_text       TEXT    NOT NULL,          -- the block exactly as pasted (newlines normalised)
+    raw_sha256     TEXT    NOT NULL,
+    parsed_json    TEXT    NOT NULL,          -- pars, race-type stats, track / post bias with sample sizes
+    parser_version TEXT    NOT NULL,
+    bundle_sha256  TEXT,
+    stored_at      TEXT    NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+    UNIQUE(card_id, raw_sha256)               -- re-importing the same block does not duplicate it or move its capture time
+);
+CREATE INDEX IF NOT EXISTS idx_twinspires_race_stats_card ON twinspires_race_stats(card_id);
+"""
+
+
+def ensure_race_stats_table(conn: sqlite3.Connection) -> None:
+    conn.executescript(_RACE_STATS_DDL)
+
+
+def persist_race_stats(conn: sqlite3.Connection, bundle: RaceBundle, card_id: int) -> tuple[int | None, str]:
+    """Store the RACE STATS block raw + parsed against the card.  Returns (row id, status)."""
+    stats = bundle.race_stats
+    if stats is None:
+        return None, "NOT_PRESENT"
+    ensure_race_stats_table(conn)
+    existing = conn.execute("SELECT race_stats_id FROM twinspires_race_stats WHERE card_id=? AND raw_sha256=?",
+                            (card_id, stats.raw_sha256)).fetchone()
+    if existing:
+        return int(existing[0]), "ALREADY_STORED"
+    conn.execute(
+        """INSERT INTO twinspires_race_stats (card_id, captured_at, raw_text, raw_sha256, parsed_json, parser_version, bundle_sha256)
+           VALUES (?,?,?,?,?,?,?)""",
+        (card_id, bundle.captured_at.isoformat(), stats.raw_text, stats.raw_sha256,
+         json.dumps(stats.to_dict(), sort_keys=True), stats.parser_version, bundle.bundle_sha256))
+    conn.commit()
+    return int(conn.execute("SELECT last_insert_rowid()").fetchone()[0]), "STORED"
+
+
 @dataclasses.dataclass
 class BundleExtrasResult:
     twinspires_artifact_id: int | None = None
@@ -23,10 +64,13 @@ class BundleExtrasResult:
     market_snapshot_rows: int = 0
     market_snapshot_status: str = "NOT_ATTEMPTED"
     warnings: list[str] = dataclasses.field(default_factory=list)
+    race_stats_id: int | None = None
+    race_stats_status: str = "NOT_PRESENT"
 
 
 def persist_race_bundle_extras(conn: sqlite3.Connection, bundle: RaceBundle, card_id: int) -> BundleExtrasResult:
     result = BundleExtrasResult()
+    result.race_stats_id, result.race_stats_status = persist_race_stats(conn, bundle, card_id)
     if bundle.twinspires is None:
         return result
     raw = bundle.twinspires_text.encode("utf-8")
@@ -74,4 +118,5 @@ def bundle_summary(bundle: RaceBundle) -> dict[str, Any]:
         "weights_merged_from_basic": bundle.reconciliation.weights_merged,
         "programs_cross_checked": bundle.reconciliation.programs_checked,
         "conflicts": bundle.reconciliation.conflicts,
+        "race_stats_present": bundle.race_stats is not None,
     }

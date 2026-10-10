@@ -1,0 +1,9 @@
+track_code,race_date,race_number,book_id,post_position,horse_name,decimal_odds,american_odds,morning_line,is_scratched,distance,surface,stakes_name
+GP,2026-05-15,6,fanduel,1,Fireside Story,4.20,320,7-2,0,6f,dirt,
+GP,2026-05-15,6,fanduel,2,Ocean Thunder,6.50,550,5-1,0,6f,dirt,
+GP,2026-05-15,6,fanduel,3,Lucky Ace,2.80,180,2-1,0,6f,dirt,
+GP,2026-05-15,6,fanduel,4,Midnight Rally,11.00,1000,9-1,0,6f,dirt,
+GP,2026-05-15,6,fanduel,5,Desert Storm,8.50,750,7-1,0,6f,dirt,
+GP,2026-05-15,6,fanduel,6,Polaris Run,3.60,260,5-2,0,6f,dirt,
+GP,2026-05-15,6,fanduel,7,Golden Ratio,15.00,1400,12-1,0,6f,dirt,
+GP,2026-05-15,6,fanduel,8,Scratched Example,,,10-1,1,6f,dirt,

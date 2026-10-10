@@ -1,3 +1,0 @@
-timestamp=2026-09-03T16:57:38-07:00
-command=pytest -q
-exit_code=0

@@ -204,3 +204,26 @@ def test_basic_grid_rejects_a_missing_cell():
     victim = next(i for i, l in enumerate(body) if l.strip() == "Shane Meyers")
     with pytest.raises(BasicGridError):
         parse_basic_grid("\n".join(body[:victim] + body[victim + 1:]))
+
+
+# ---- BEL R5 10-9-26: a TwinSpires "expert 1st pick" tag above a scratched runner's name ------------------
+BEL = ROOT / "tests" / "fixtures" / "BEL_Full_Race_Data_R5_10-9-26.md"
+
+
+def test_expert_pick_tag_is_not_read_as_the_horse_name_of_a_scratched_runner():
+    captured = datetime(2026, 10, 9, 19, 10, 39, tzinfo=timezone.utc)
+    b = parse_race_bundle(BEL.read_text(encoding="utf-8"), source_path=BEL.name, as_of=captured.replace(second=0, microsecond=0),
+                          captured_at=captured)
+    assert not b.reconciliation.conflicts and b.validation.passed, (b.reconciliation.conflicts, b.validation.errors)
+    assert b.validation.parsed_unique_runner_count == 9 and b.validation.scratched_runner_count == 1
+    sc = b.twinspires.scratched
+    assert [(r.program_number, r.horse_name) for r in sc] == [("9", "Pineapple Man")]
+    assert {r.program_number: r.horse_name for r in b.twinspires.records}["10"] == "Peek"
+    assert len(b.twinspires.records) == 9
+
+
+def test_expert_tag_on_a_scratch_row_with_and_without_a_place_cell():
+    from src.ingest.twinspires_markdown import _record_from_chunk
+    tagged = _record_from_chunk("9", ["SCR", "M: 7/2", "-", "expert 1st pick", "Pineapple Man", "7", "E8"])
+    plain = _record_from_chunk("9", ["SCR", "M: 7/2", "-", "Pineapple Man", "7", "E8"])
+    assert tagged.horse_name == plain.horse_name == "Pineapple Man" and tagged.scratched

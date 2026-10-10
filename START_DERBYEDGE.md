@@ -10,6 +10,10 @@ Canonical local startup procedure for the DerbyEdge Streamlit operator console.
 
 ## Start the application
 
+Windows shortcut: double-click `start_derbyedge.bat` in the repository root (right-click > Send to > Desktop to pin it). It uses `.venv` if present, otherwise the Python on PATH, opens the browser, and runs the commands below.
+
+Manual:
+
 In PowerShell:
 
 ```powershell

@@ -195,3 +195,56 @@ def latest_valid_market_snapshot(
     if len(eligible) > 1 and eligible[0][0] == eligible[1][0]:
         return None  # competing books at the same capture time
     return eligible[0][1]
+
+
+def latest_valid_market_capture(
+    conn: sqlite3.Connection, card_id: int, entry_ids: list[int], *, not_after: str | None = None,
+) -> dict | None:
+    """Latest complete, unambiguous, pre-post book capture AT OR BEFORE ``not_after``, with its time.
+
+    Unlike :func:`latest_valid_market_snapshot` this does not look at ``entries.scratch_flag``: that flag can be
+    rewritten after the race (results ingest confirms scratches), which would leak hindsight into a replay.  The
+    caller names the runners that were live at decision time (``entry_ids``); a capture must quote every one of them,
+    and quotes for any other entry are ignored.  Returns ``{"time", "provider", "implied": {entry_id: prob}}``.
+    """
+    columns = {row[1] for row in conn.execute("PRAGMA table_info(odds_snapshots)")}
+    if not {"source_provider", "source_artifact_sha256"} <= columns:
+        return None
+    race = conn.execute("SELECT scheduled_post_time_utc FROM race_cards WHERE card_id=?", (card_id,)).fetchone()
+    if not race or not race[0]:
+        return None
+    expected = set(entry_ids)
+    if not expected:
+        return None
+    limit = None
+    if not_after is not None:
+        limit = datetime.fromisoformat(str(not_after).replace("Z", "+00:00"))
+    rows = conn.execute(
+        """SELECT s.entry_id, s.snapshot_time, s.implied_prob, s.source_provider, s.source_artifact_sha256
+           FROM odds_snapshots s JOIN entries e ON e.entry_id=s.entry_id
+           WHERE e.card_id=? AND s.source='book'""", (card_id,)).fetchall()
+    groups: dict[tuple[str, str, str], list[tuple[int, float]]] = defaultdict(list)
+    for entry_id, timestamp, probability, provider, sha in rows:
+        if provider in {"draftkings", "twinspires"} and sha and int(entry_id) in expected:
+            groups[(timestamp, provider, sha)].append((int(entry_id), float(probability)))
+    eligible = []
+    for (timestamp, provider, _sha), quotes in groups.items():
+        try:
+            normalized = _pre_post_time(timestamp, race[0])
+        except MarketSnapshotError:
+            continue
+        if limit is not None and datetime.fromisoformat(normalized) > limit:
+            continue
+        observed = dict(quotes)
+        if len(observed) != len(quotes) or set(observed) != expected:
+            continue
+        if not all(0 < value < 1 for value in observed.values()):
+            continue
+        eligible.append((normalized, provider, observed))
+    if not eligible:
+        return None
+    eligible.sort(key=lambda item: item[0], reverse=True)
+    if len(eligible) > 1 and eligible[0][0] == eligible[1][0] and eligible[0][2] != eligible[1][2]:
+        return None                     # two books disagree at the same instant
+    time, provider, implied = eligible[0]
+    return {"time": time, "provider": provider, "implied": implied}

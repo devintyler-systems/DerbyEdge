@@ -80,6 +80,7 @@ def ensure_score_runs_columns(conn: sqlite3.Connection) -> None:
         _add_col_if_missing(conn, "score_runs", "calibration_status", "TEXT", cols),
         _add_col_if_missing(conn, "score_runs", "dispatcher_mode", "TEXT", cols),
         _add_col_if_missing(conn, "score_runs", "dispatcher_reason_codes", "TEXT", cols),
+        _add_col_if_missing(conn, "score_runs", "engine_version", "TEXT", cols),
     ])
     if changed:
         conn.commit()

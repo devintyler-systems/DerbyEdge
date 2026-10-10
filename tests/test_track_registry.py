@@ -23,7 +23,9 @@ VALID_KINDS = {"RACETRACK", "FAIR", "FARM", "TRAINING"}
 
 # Track strings DraftKings prints that no registry file can resolve.  Empty now that the
 # operator-supplied codes are in track_additions.csv; a new name must be added there.
-KNOWN_GAPS: set[str] = set()
+# Two private training venues seen only as WORKOUT locations in BEL_Full_Race_Data_R5_10-9-26.md; no operator-supplied
+# code yet, so they stay unregistered (workout venues do not block an import; only the race's own track does).
+KNOWN_GAPS: set[str] = {"BLACKWOOD STABLES", "SILVERLEAF HILLS TRAINING CENTER"}
 
 
 def _rows(name):
@@ -52,7 +54,8 @@ def test_every_curated_track_has_a_timezone_and_every_zone_is_valid():
 
 
 @pytest.mark.parametrize("text,code", [
-    ("BELMONT AT THE BIG A", "BEL"), ("Belmont at the Big A", "BEL"), ("BEL", "BEL"),
+    ("BELMONT AT THE BIG A", "BAQ"), ("Belmont at the Big A", "BAQ"), ("BAQ", "BAQ"),
+    ("BEL", "BEL"), ("Belmont Park", "BEL"), ("Belmont", "BEL"),
     ("SAR", "SAR"), ("Saratoga", "SAR"), ("SARATOGA RACE COURSE", "SAR"),
     ("CD", "CD"), ("Churchill Downs", "CD"), ("AQU", "AQU"), ("Aqueduct Racetrack", "AQU"),
     ("Santa Anita", "SA"), ("SA", "SA"), ("DMR", "DMR"), ("Del Mar", "DMR"),
@@ -116,7 +119,7 @@ def test_every_track_string_in_the_fixtures_resolves_except_the_known_gaps():
     paths = glob.glob(str(ROOT / "tests" / "fixtures" / "*.md")) + glob.glob(
         str(ROOT / "draftkings_racedata_pdfs" / "fixtures" / "*DK_Horse*.md"))
     for path in paths:
-        if "Speed" in path:
+        if "Speed" in path or Path(path).name.startswith("TS_"):       # TwinSpires exports are not DK cards
             continue
         card = parse_draftkings_markdown(Path(path).read_text(encoding="utf-8"),
                                          source_path=Path(path).name, as_of=AS_OF)
@@ -189,10 +192,13 @@ def test_adding_sources_did_not_change_what_any_primary_name_resolves_to():
     assert not wrong, wrong
 
 
-def test_belmont_at_the_big_a_stays_on_bel_even_though_the_listing_has_a_separate_baq_code():
-    assert resolve_track(track_name="Belmont At The Big A")["track_code"] == "BEL"
-    assert resolve_track(track_code="BAQ")["track_code"] == "BAQ"          # the code itself is known
-    assert T.get_track("BAQ")["state"] == "NY"
+def test_belmont_at_the_big_a_and_belmont_park_are_different_tracks():
+    for name in ("Belmont At The Big A", "BELMONT AT THE BIG A", "Belmont Park at the Big A"):
+        assert resolve_track(track_name=name)["track_code"] == "BAQ", name
+    for name in ("Belmont Park", "Belmont", "BEL"):
+        assert resolve_track(track_name=name)["track_code"] == "BEL", name
+    assert T.get_track("BAQ")["state"] == "NY" and track_timezone("BAQ") == "America/New_York"
+    assert is_race_venue("BAQ") and is_race_venue("BEL")
 
 
 def test_historic_tracks_from_horse_histories_resolve():

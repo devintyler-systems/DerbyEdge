@@ -2879,6 +2879,7 @@ with tab5:
                         )
                         st.info(
                             f"Race bundle: TwinSpires {_p5_extras.twinspires_status} · "
+                            f"RACE STATS {_p5_extras.race_stats_status} · "
                             f"market snapshot {_p5_extras.market_snapshot_status}"
                         )
                         for _p5_bundle_warning in (

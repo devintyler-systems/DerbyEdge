@@ -1,6 +1,6 @@
 alias,code,note
-Belmont at the Big A,BEL,DraftKings name for the Belmont meet run at Aqueduct (2024-26); Equibase code BEL
-Belmont Park at the Big A,BEL,variant of the above
+Belmont at the Big A,BAQ,"Belmont meet run at Aqueduct (the Big A); a different track from Belmont Park (BEL), so it keeps its own code. To fold it into BEL, change this code."
+Belmont Park at the Big A,BAQ,"Belmont meet run at Aqueduct (the Big A); a different track from Belmont Park (BEL), so it keeps its own code. To fold it into BEL, change this code."
 Hollywood Casino at Charles Town Races,CT,DraftKings long name for Charles Town
 Charles Town Races,CT,Equibase listing is 'Charles Town'
 Los Alamitos Race Course,LA,DraftKings long name

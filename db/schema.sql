@@ -385,6 +385,7 @@ CREATE TABLE IF NOT EXISTS score_runs (
     calibration_status TEXT,
     dispatcher_mode TEXT,
     dispatcher_reason_codes TEXT,
+    engine_version TEXT,                       -- NULL = scored before the stamp existed ('legacy')
     created_at            TEXT    NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
 );
 

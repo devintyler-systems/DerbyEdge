@@ -50,6 +50,7 @@ from src.models.trainer import (
     train_or_build,
     build_seed_baseline,
 )
+from src.utils.engine_version import engine_version
 from src.utils.db import (
     get_connection,
     get_derby_card_id,
@@ -1545,6 +1546,8 @@ def score_race(
          policy_tier, policy_tier_reason,
          int(policy_chaos_default), policy_chaos_reason),
     )
+
+    conn.execute("UPDATE score_runs SET engine_version=? WHERE run_id=?", (engine_version(artifact), run_id))
 
     # Keep prior run rows: the app's card-scoped selector supports audit and
     # comparison, and no score run should erase a previous score artifact.

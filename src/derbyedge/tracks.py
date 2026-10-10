@@ -191,11 +191,7 @@ for _row in _read_reference("track_additions.csv"):
     if _code in _ENTRIES:
         raise ValueError(f"track_additions.csv code {_code!r} already exists in the registry")
     _ENTRIES[_code] = _Entry(_code, _name, _kind, {_name})
-for _row in _read_reference("track_aliases.csv"):
-    _code = _row["code"].strip().upper()
-    if _code not in _ENTRIES:
-        raise ValueError(f"track_aliases.csv maps {_row['alias']!r} to unknown code {_code!r}")
-    _ENTRIES[_code].aliases.add(_row["alias"].strip())
+_ALIAS_ROWS = _read_reference("track_aliases.csv")        # validated + applied after every source is loaded
 
 for _code, _entry in _ENTRIES.items():
     _entry.sources.add("curated" if _code in _CODE_TO_NAME else "equibase_or_additions")
@@ -263,16 +259,6 @@ def _index_name(code: str, text: str, *, secondary: bool) -> bool:
     return True
 
 
-# Priority 1: curated + Equibase list + operator additions + operator aliases (may be ambiguous
-# with each other on purpose, e.g. "Eclipse Farm" / "Eclipse TC" at the loosest level).
-for _entry in _ENTRIES.values():
-    for _alias in {_entry.name, *_entry.aliases}:
-        _index_name(_entry.code, _alias, secondary=False)
-
-_PRIMARY_INDEX = tuple({k: set(v) for k, v in level.items()} for level in _INDEX)
-_P1_NAMES: dict[str, set] = {_c: {_e.name, *_e.aliases} for _c, _e in _ENTRIES.items()}
-_UNREGISTERED_NAMES: list[tuple[str, str, str]] = []     # (code, name, source) refused as already claimed
-
 _PSEUDO = re.compile(
     r"\b(special|pick \d|pick four|pick five|double|crossover|wagers?|futures?|best bets|multiple tracks|coast to coast)\b",
     re.I,
@@ -306,9 +292,13 @@ _ST = {"AL": "AL", "AK": "AK", "AZ": "AZ", "AR": "AR", "CA": "CA", "CO": "CO", "
        "VA": "VA", "WA": "WA", "WV": "WV", "WI": "WI", "WY": "WY", "PR": "PR", "CAN": "CAN", "MEX": "MEX"}
 
 
-def _merge_source(rows: list[dict], source: str, *, name_key: str) -> None:
-    """Fold a lower-priority source in.  Existing codes only gain metadata and any extra
-    spelling nobody else owns; unseen codes become new entries."""
+_UNREGISTERED_NAMES: list[tuple[str, str, str]] = []     # (code, name, source) refused as already claimed
+_PENDING_SECONDARY: list[tuple[str, str, str]] = []      # (code, raw_name, source) indexed after the primary pass
+
+
+def _create_from_source(rows: list[dict], source: str, *, name_key: str) -> None:
+    """Fold a lower-priority source in: unseen codes become new entries, existing codes gain
+    metadata.  Names are only queued here; they are indexed after the primary names."""
     for row in rows:
         code = row["code"].strip().upper()
         raw_name = row[name_key].strip()
@@ -317,10 +307,7 @@ def _merge_source(rows: list[dict], source: str, *, name_key: str) -> None:
             entry = _Entry(code, _display(raw_name), _classify(raw_name), set())
             _ENTRIES[code] = entry
         entry.sources.add(source)
-        if not _index_name(code, raw_name, secondary=True):
-            _UNREGISTERED_NAMES.append((code, raw_name, source))
-        else:
-            entry.aliases.add(raw_name)
+        _PENDING_SECONDARY.append((code, raw_name, source))
         if source == "listing":
             entry.state = entry.state or _ST.get(row["state"].strip(), row["state"].strip())
         else:
@@ -328,11 +315,41 @@ def _merge_source(rows: list[dict], source: str, *, name_key: str) -> None:
             entry.note = entry.note or row["note"].strip()
 
 
-_merge_source(_read_reference("source_listing_tracks.csv"), "listing", name_key="name")
+_create_from_source(_read_reference("source_listing_tracks.csv"), "listing", name_key="name")
 _equineline_rows: dict[str, dict] = {}
 for _row in _read_reference("source_equineline_tracks.csv"):
     _equineline_rows.setdefault(_row["code"], _row)       # LP / SND repeat; the first spelling stands
-_merge_source(sorted(_equineline_rows.values(), key=lambda r: r["code"]), "equineline", name_key="name")
+_create_from_source(sorted(_equineline_rows.values(), key=lambda r: r["code"]), "equineline", name_key="name")
+
+# Operator aliases may point at a code that only a lower source defines (BAQ), so they are
+# validated now that every code exists.
+for _row in _ALIAS_ROWS:
+    _code = _row["code"].strip().upper()
+    if _code not in _ENTRIES:
+        raise ValueError(f"track_aliases.csv maps {_row['alias']!r} to unknown code {_code!r}")
+    _ENTRIES[_code].aliases.add(_row["alias"].strip())
+    _ENTRIES[_code].sources.add("operator_alias")
+
+# Priority 1: curated + Equibase list + operator additions + operator aliases (may be ambiguous
+# with each other on purpose, e.g. "Eclipse Farm" / "Eclipse TC" at the loosest level).
+_PRIMARY_SOURCES = {"curated", "equibase_or_additions", "operator_alias"}
+for _entry in _ENTRIES.values():
+    if _entry.sources & _PRIMARY_SOURCES:
+        _names = {_entry.name, *_entry.aliases} if _entry.sources & {"curated", "equibase_or_additions"} else set(_entry.aliases)
+        for _alias in _names:
+            _index_name(_entry.code, _alias, secondary=False)
+_PRIMARY_INDEX = tuple({k: set(v) for k, v in level.items()} for level in _INDEX)
+_P1_NAMES: dict[str, set] = {
+    _c: ({_e.name, *_e.aliases} if _e.sources & {"curated", "equibase_or_additions"} else set(_e.aliases))
+    for _c, _e in _ENTRIES.items() if _e.sources & _PRIMARY_SOURCES
+}
+
+# Priority 2: the track listing and Equineline.  A name a primary source already holds is refused.
+for _code, _raw_name, _source in _PENDING_SECONDARY:
+    if _index_name(_code, _raw_name, secondary=True):
+        _ENTRIES[_code].aliases.add(_raw_name)
+    else:
+        _UNREGISTERED_NAMES.append((_code, _raw_name, _source))
 
 # Timezones: hand-maintained file wins over the ones derived from the listing.
 _TZ: dict[str, str] = {}
