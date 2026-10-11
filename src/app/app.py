@@ -139,6 +139,7 @@ from src.app.board_state import (
     effective_board_mode,
     source_feature_inventory,
 )
+from src.app.auto_score import FAILED as _AS_FAILED, SKIPPED as _AS_SKIPPED, already_ran as _as_already_ran, auto_build_and_score, upload_key as _as_upload_key
 from src.app.board_formatting import (
     DIAGNOSTIC_NOTICE,
     diagnostic_forecast_frame,
@@ -2885,6 +2886,7 @@ with tab5:
                     "markdown_dispatch": _p5_dispatch,
                 }
             else:
+                _p5_auto_scored_now = False
                 try:
                     _p5_persist = persist_validated_draftkings_markdown(
                         _conn5,
@@ -2912,6 +2914,33 @@ with tab5:
                             list(_p5_extras.warnings) + list(_p5_dispatch.validation.warnings)
                         ):
                             st.caption(f"• {_p5_bundle_warning}")
+                        # Build + score once per uploaded file and card, so a forgotten click cannot cost the race its
+                        # pre-post run.  This handler re-runs on every interaction while the file is in the uploader.
+                        _as_done = st.session_state.setdefault("_auto_score_results", {})
+                        _as_key = _as_upload_key(_pdf5_sha, _p5_persist.card_id)
+                        if not _as_already_ran(_as_done, _as_key):
+                            _as_ready = markdown_card_score_readiness(_conn5, _p5_persist.card_id)
+                            with st.spinner("Building features and scoring…"):
+                                _as_done[_as_key] = auto_build_and_score(
+                                    _p5_persist.card_id,
+                                    run_step=_run_pipeline_step,
+                                    newest_run_id=_pin_newest_run,
+                                    blockers=(
+                                        () if _as_ready.score_eligible
+                                        else tuple(f"{b.code}: {b.message}" for b in _as_ready.blockers)
+                                    ),
+                                    late_capture=bool(_p5_dispatch.bundle.late_capture),
+                                )
+                            st.session_state["_last_pipeline_out"] = _as_done[_as_key].output
+                            st.cache_data.clear()
+                            _p5_auto_scored_now = True
+                        _as_res = _as_done[_as_key]
+                        if _as_res.status == _AS_FAILED:
+                            st.error(_as_res.message)
+                        elif _as_res.status == _AS_SKIPPED:
+                            st.warning(_as_res.message)
+                        else:
+                            st.success(_as_res.message)
                     # The following preview/export path must use canonical rows,
                     # never the transient uploaded payload.
                     _pr5 = canonical_markdown_card_ui_payload(_conn5, _p5_persist.card_id)
@@ -2949,7 +2978,7 @@ with tab5:
                     # The board is rendered before Market Intake in this Streamlit
                     # script.  Rerun once after changing active-card state so its
                     # visible score controls hydrate from this same canonical card.
-                    if _p5_active_changed:
+                    if _p5_active_changed or _p5_auto_scored_now:
                         st.rerun()
                 except (ValueError, sqlite3.Error) as _p5_persist_error:
                     _pr5 = {

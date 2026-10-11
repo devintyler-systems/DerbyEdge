@@ -51,6 +51,9 @@ It is captured now because it cannot be reconstructed as-of later. **It is store
   as `-` or `N/A`) may print differently and would fail the strict parse until the new layout is seen.
 * Track-bias samples are small (the sample has 6 and 3 races): do not weight them until pooled.
 
+After a valid bundle import the app builds features and scores the card automatically, once per uploaded file and card (`src/app/auto_score.py`);
+the result is shown under the import message, and a failure never undoes the import.
+
 Code: `src/ingest/race_bundle.py`, `src/ingest/draftkings_basic_grid.py`, `src/services/race_bundle_intake.py`.
 DK Basic weight cell: `L122` = Lasix + 122 lb; a trailing equipment code is accepted and kept (`L122bOn` = blinkers on, informational,
 not cross-checked). Anything else in that cell still fails the whole grid as misaligned.
