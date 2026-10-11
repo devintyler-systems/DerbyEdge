@@ -13,8 +13,9 @@ import hashlib
 import re
 
 _PROGRAM = re.compile(r"^(?:AE|MTO)?\d{1,2}[A-Za-z]?$")
-# "L122" = Lasix + 122 lb; a trailing equipment code ("L122bOn" = blinkers on) may follow the weight.
-_MEDWT = re.compile(r"^(?P<med>[A-Za-z]*)(?P<wt>\d{2,3})(?P<eqp>[A-Za-z]{0,8})$")
+# "L122" = Lasix + 122 lb; a trailing equipment code ("L122bOn" = blinkers on) may follow the weight; a leading "*"
+# ("*L121") marks first-time medication.
+_MEDWT = re.compile(r"^(?P<first>\*?)(?P<med>[A-Za-z]*)(?P<wt>\d{2,3})(?P<eqp>[A-Za-z]{0,8})$")
 _REQUIRED = ("ml", "runner", "med/wt/eqp", "jockey", "trainer")
 
 
@@ -34,6 +35,7 @@ class BasicGridRow:
     trainer: str | None
     scratched: bool
     equipment: str | None = None          # e.g. "bOn" in "L122bOn"; informational, not cross-checked
+    first_time_med: bool = False          # leading "*" in "*L121"; informational, not cross-checked
 
 
 @dataclasses.dataclass(frozen=True)
@@ -90,5 +92,6 @@ def parse_basic_grid(text: str) -> BasicGrid:
             medication=medwt.group("med") or None, weight=int(medwt.group("wt")),
             jockey=_clean_person(row[index["jockey"]]), trainer=_clean_person(row[index["trainer"]]),
             scratched=(odds or "").upper() == "SCR", equipment=medwt.group("eqp") or None,
+            first_time_med=bool(medwt.group("first")),
         ))
     return BasicGrid(source_sha256=hashlib.sha256(text.encode("utf-8")).hexdigest(), rows=tuple(rows))
