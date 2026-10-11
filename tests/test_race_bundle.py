@@ -316,3 +316,27 @@ def test_kee_r9_maiden_with_five_debuts_is_not_blocked_by_the_starter_match_gate
     q = data_quality_from_card(conn, saved.card_id)
     assert (q.entries_parsed, q.entries_with_pp_history, q.first_time_starters, q.starter_match_rate) == (10, 5, 5, 1.0)
     assert resolve_run_mode(q)[0] == RunMode.PP_PARSED_FEATURES_PENDING
+
+
+# ---- WO R10 10-11-26: DK calls the track "Woodbine T-bred" and the header's surface is a bare "Synthetic" ----------
+WO = ROOT / "tests" / "fixtures" / "WO_Full_Race_Data_R10_10-11-26.md"
+WO_CAPTURED = datetime(2026, 10, 11, 21, 54, 22, tzinfo=timezone.utc)
+
+
+def test_wo_r10_synthetic_card_with_a_woodbine_t_bred_label_imports_as_all_weather():
+    b = parse_race_bundle(WO.read_text(encoding="utf-8"), source_path=WO.name,
+                          as_of=WO_CAPTURED.replace(second=0, microsecond=0), captured_at=WO_CAPTURED)
+    assert b.validation.passed, b.validation.errors
+    assert (b.card.race.surface, b.card.race.surface_condition) == ("all_weather", None)
+    conn = _db()
+    saved = persist_validated_draftkings_markdown(conn, b.card, b.validation, source_filename=WO.name,
+                                                  scheduled_post_utc=b.post_utc, captured_at=b.captured_at)
+    assert conn.execute("SELECT surface FROM race_cards WHERE card_id=?", (saved.card_id,)).fetchone()[0] == "all_weather"
+    assert conn.execute("SELECT t.abbrev FROM race_cards rc JOIN tracks t ON t.track_id=rc.track_id").fetchone()[0] == "WO"
+
+
+def test_a_bare_surface_line_is_read_for_dirt_and_turf_too():
+    from src.ingest.draftkings_markdown import _metadata
+    for word, want in (("Dirt", "dirt"), ("Turf", "turf"), ("Tapeta", "all_weather")):
+        raw = f"Track\nRACE 3\n5\nMTP\n$10K CLAIMING\nPurse: $20K\n 3YO+\n 6 F\n{word}\nMore\nPROGRAM\n"
+        assert _metadata(raw, "X_Full_Race_Data_R3_10-11-26.md").surface == want
