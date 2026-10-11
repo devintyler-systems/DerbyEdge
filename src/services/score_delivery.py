@@ -38,6 +38,11 @@ def runtime_score_eligibility(db_path: Path, card_id: int, entry_id: int) -> dic
 def contain_ineligible_board(board: pd.DataFrame, db_path: Path, card_id: int) -> tuple[pd.DataFrame, dict[int, dict[str, Any]]]:
     """Return a non-actionable board for any entry whose persisted context fails."""
     out = board.copy()
+    # The stored model probability is kept, never blanked, as a DIAGNOSTIC value: the gate below blanks the
+    # actionable columns, and the app shows this one only under an explicit "not valid for betting" label.
+    out["diagnostic_win_probability"] = (
+        pd.to_numeric(board["win_probability"], errors="coerce") if "win_probability" in board.columns else float("nan")
+    )
     audits: dict[int, dict[str, Any]] = {}
     for index, row in out.iterrows():
         entry_id = int(row["entry_id"])

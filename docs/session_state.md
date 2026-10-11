@@ -1,39 +1,33 @@
 # Session state (update at the end of every outcome; keep under 40 lines)
 Working rules, including the mandatory UPDATE YOUR LOCAL FILES block: `docs/working_rules.md`.
-_Last updated: 2026-10-10, branch `main`: PR devintyler-systems/DerbyEdge#32 MERGED (CI green, 1254 tests passed). Local machine must be on `main`._
-## Done and merged to main (PR #32)
-Morning-line fix + repair, Belmont at the Big A -> BAQ, Equibase chart parser, chart store/join/populate, walk-forward evaluation,
-paper trading, daily cycle, `training.status`, engine-version stamp, play-day checklist, `start_derbyedge.bat`, this file.
-`CLAUDE.md` now tracked (`!CLAUDE.md` in `.gitignore`); the user's old local copy was stale and is replaced by the tracked one.
-## User's machine
-`C:\Projects\derbyedge-engine`, should be on `main` (the PR branch is merged). Morning-line repair applied to cards 73 and 74. `status` showed 1 graded race:
-57 older races lack a post time (`AS_OF_UNPROVEN`). Existing runs are `legacy`, never pooled with new ones.
-## First real race (BEL R5 10-9-26) - what it showed
-- Launcher works (the desktop **DerbyEdge** shortcut runs `start_derbyedge.bat`). Bundle import PASSED after the
-  TwinSpires "expert Nth pick" tag fix (`twinspires_markdown.py`; fixture `tests/fixtures/BEL_Full_Race_Data_R5_10-9-26.md`).
-- **The engine produced no independent forecast.** Win % is NULL/nan, sum win prob 0, model `seed_only_baseline` (0 labeled starters),
-  run mode `MARKET_ANCHORED_NOT_ACTIONABLE`: the collapse-to-morning-line guard (`scorer.py` ~1394, stores NULL win_probability) fired.
-  About 25% of the feature weight sits on speed-figure features with no data. Consequence: nothing from such runs can be graded
-  (`model_board` absent) or paper-traded (`MODEL_PROBABILITIES_INCOMPLETE`).
-- TwinSpires per-runner speed / class / power ARE parsed and stored as `twinspires_*` evidence (`twinspires_intake.py` ~177) but are
-  deliberately NOT mapped to model features (not labelled Beyer). Candidate inputs once there is outcome data to learn weights.
-- **RACE STATS block now captured, not scored:** optional bundle section (line `RACE STATS`), strict parser
-  `src/ingest/twinspires_race_stats.py`, stored raw + parsed in `twinspires_race_stats` (card_id, captured_at). A malformed block, or one whose
-  track / distance / surface contradicts the DK card, blocks the import with a named reason. Seen in ONE sample (BEL R5); bias samples tiny (6 / 3 races): no weight until pooled.
-  See `docs/race_bundle_format.md`.
-- **`training.status` fixed:** counts a race as scored/graded only if the grading run (last pre-post) has real win probabilities
-  for every active runner; also prints races that collapsed to the morning line and the stored `model_collapse_status`
-  ("(none stored)" = guard fired, no status written). Graded-eligible races lacking `model_board` show as `NO_MODEL_PROBABILITIES`.
-
+_Last updated: 2026-10-10, `main` = PRs #32-#34 merged (CT R7 import fix); the diagnostic-forecast PR is the newest. Local machine must be on `main`._
+## Done and merged to main
+Morning-line fix + repair, BAQ, Equibase chart parser + store/join/populate, walk-forward, paper trading, daily cycle, `training.status`,
+engine-version stamp, RACE STATS capture, import fixes (`L122bOn` Basic weight cell, `9 MTP ALLOWANCE` post display), repo tidy,
+`CLAUDE.md` tracked, `docs/working_rules.md`. User's machine: `C:\Projects\derbyedge-engine` on `main`; launch via desktop **DerbyEdge**
+shortcut (runs `start_derbyedge.bat`). 57 older races lack a post time (`AS_OF_UNPROVEN`); existing runs are `legacy`, never pooled.
+## Why Win % is blank on real races (diagnosed 2026-10-10, CT R7 + BEL R5 reproduced in a sandbox)
+- **The model DOES produce a forecast** (stored `entry_scores.win_probability` sums to 1, not collapsed to the morning line). The app's
+  fail-closed gate (`score_delivery.contain_ineligible_board` -> `score_eligibility`) then blanks Win %, fair odds, edge, tags for every entry.
+  (Earlier notes blamed the collapse guard `scorer.py` ~1394: wrong for these runs.) Not yet confirmed against the user's own DB.
+- Gate reasons, all 9 entries: `calibration_unavailable_or_unaudited` (seed-only baseline; promotion needs >=4,000 labeled starters),
+  `active_input_unavailable_or_defaulted...` (~54% of the weight is on empty features: speed_best_3/speed_last/beyer_last, work_readiness,
+  trainer_intent, traffic_resilience, horses_beaten, finish_energy, derby_override_score), `unsupported_or_unknown_runtime_source`
+  (TwinSpires-sourced pace is not in `SUPPORTED_SOURCES`), `source_evidence_missing_or_not_proven_as_of_decision_timestamp`.
+- **Diagnostic display + forecast class (this branch):** stored probability is shown ONLY as "Diagnostic Win % (not valid for betting)"
+  with the gate reasons; actionable columns stay blank. `status` / walk-forward label graded races `DIAGNOSTIC_SEED_BASELINE` /
+  `TRAINED_MODEL` / `OTHER_MODEL` (from `score_runs.model_type`) and count the diagnostic ones as evidence only. `status` already counted
+  these races (it reads stored probabilities): the old "status shows 0" note was wrong.
+- **Open risk:** paper trading reads stored probabilities / bet tags and never consults the gate, so it can place paper bets on diagnostic
+  forecasts. Decide whether to restrict or label before any paper-bet verdict.
+- Next lever is data, in this order: capture every race pre-post with the full bundle; measure the diagnostic cohort vs morning line;
+  then add inputs one at a time (TwinSpires SPD as a labelled proxy, DK jockey/trainer stats) and re-measure. Calibration needs outcomes.
+## RACE STATS / bundle
+Optional bundle block, strict parser, stored raw + parsed in `twinspires_race_stats`, not scored; confirmed on card 75 (post-race TEST row).
+A malformed block or one contradicting the DK card blocks the import. One sample only (BEL); bias samples tiny. `track_bias`/`trip_flags` empty.
 ## Open
-- Not verified: Streamlit upload / scoring buttons and `start_derbyedge.bat` have not run end to end on a real race.
-- RACE STATS capture CONFIRMED on the user's machine (card 75, post-race TEST row: not evidence). Next: a live race uploaded before post for a valid row.
-- Pasting caution: DK and TwinSpires tabs auto-advance to the next race; the first R5 attempt had R6's tabs.
-- Repo tidy done on this branch (stale root files and `artifacts/` removed, `01_downloader.py` -> `scripts/`, `.gitignore` `C*` narrowed, `samples/` templates tracked). Local-only archive of old captures: `data/raw_input/captures/`.
-- Optional: backfill post times for the 57 legacy races (dry run first); keep as a labelled baseline.
-- Not built, by decision: real-bet log (30 graded races), multi-user product. Not handled: dead heats, cancelled / moved-off-turf races.
-- CT R7 10-9 import fixed (new branch off main): Basic-grid `L122bOn` equipment suffix; `9 MTP ALLOWANCE` glued post display. Known gap: bare `ALLOWANCE` (no `$`) leaves `race_class` NULL; no scoring effect today.
-- Issue #30 (Race Board: explain LOW-confidence BET suppression): still valid, deliberately parked. Only matters once the engine emits model probabilities AND live odds exist; revisit then.
+- Pasting caution: DK and TwinSpires tabs auto-advance to the next race. Bare `ALLOWANCE` (no `$`) leaves `race_class` NULL (no scoring effect).
+- Issue #30 (explain LOW-confidence BET suppression): parked until real probabilities + live odds coexist.
+- Optional: backfill post times for the 57 legacy races (dry run first). Not built: real-bet log, multi-user. Not handled: dead heats.
 ## Next move
-The engine still gives no independent forecast on a real race (speed-figure features empty). Get outcome data into the model
-(backfilled charts + `twinspires_*` evidence) before more capture work; until then `status` correctly shows 0 scored races for new runs.
+A live race uploaded before post with its RACE STATS block, then read the `status` diagnostic cohort as the baseline.

@@ -19,7 +19,7 @@ from datetime import date, datetime, timedelta, timezone
 
 from src.analysis.forecast_metrics import MIN_RACES_FOR_VERDICT
 from src.services.paper_trading import MIN_BETS_FOR_CLV_VERDICT, MIN_BETS_FOR_VERDICT
-from src.services.walk_forward_eval import _ts, load_graded_races
+from src.services.walk_forward_eval import DIAGNOSTIC_SEED, _ts, forecast_class, load_graded_races
 from src.utils.engine_version import LEGACY
 
 MIN_DAYS_FOR_PACE = 14
@@ -76,15 +76,18 @@ def _has_model_probabilities(conn: sqlite3.Connection, run_id: str) -> bool:
     return bool(rows) and all(v is not None and v == v and v >= 0 for v in rows) and sum(rows) > 0
 
 
-def _scored_races(conn: sqlite3.Connection, version: str, stamped: bool) -> tuple[list[date], int, Counter]:
+def _scored_races(conn: sqlite3.Connection, version: str, stamped: bool) -> tuple[list[date], int, Counter, Counter]:
     """Races whose last pre-post run (the run grading would use) is of ``version``.
 
     Returns (days of races with real model probabilities, how many scored races collapsed to the morning line, the
-    stored ``model_collapse_status`` of every scored race in the cohort).
+    stored ``model_collapse_status`` of every scored race in the cohort, the forecast class of the races with
+    real probabilities).
     """
     stamp = "COALESCE(engine_version, 'legacy')" if stamped else "'legacy'"
     has_status = "model_collapse_status" in {r[1] for r in conn.execute("PRAGMA table_info(score_runs)")}
     status_sql = "model_collapse_status" if has_status else "NULL"
+    type_sql = "model_type" if "model_type" in {r[1] for r in conn.execute("PRAGMA table_info(score_runs)")} else "NULL"
+    classes: Counter = Counter()
     days: list[date] = []
     collapsed = 0
     statuses: Counter = Counter()
@@ -92,18 +95,20 @@ def _scored_races(conn: sqlite3.Connection, version: str, stamped: bool) -> tupl
             "SELECT card_id, card_date, scheduled_post_time_utc FROM race_cards WHERE scheduled_post_time_utc IS NOT NULL"):
         post_dt = _ts(post)
         runs = [r for r in conn.execute(
-            f"SELECT run_id, run_timestamp, {stamp}, {status_sql} FROM score_runs WHERE card_id=? ORDER BY run_timestamp, run_id",
+            f"SELECT run_id, run_timestamp, {stamp}, {status_sql}, {type_sql} FROM score_runs WHERE card_id=? "
+            "ORDER BY run_timestamp, run_id",
             (card_id,)) if post_dt is not None and (_ts(r[1]) or post_dt) < post_dt]
         if not runs or runs[-1][2] != version:
             continue
-        run_id, _, _, collapse_status = runs[-1]
+        run_id, _, _, collapse_status, model_type = runs[-1]
         statuses[collapse_status or NO_STATUS] += 1
         if _has_model_probabilities(conn, run_id):
             if (d := _day(card_date)):
                 days.append(d)
+            classes[forecast_class(model_type)] += 1
         else:
             collapsed += 1
-    return days, collapsed, statuses
+    return days, collapsed, statuses, classes
 
 
 def build_status(conn: sqlite3.Connection, *, today: date | None = None) -> dict:
@@ -111,7 +116,7 @@ def build_status(conn: sqlite3.Connection, *, today: date | None = None) -> dict
     version, latest = _cohorts(conn)
     stamped = "engine_version" in {r[1] for r in conn.execute("PRAGMA table_info(score_runs)")}
     ver_sql = "COALESCE(s.engine_version, 'legacy')" if stamped else "'legacy'"
-    scored, scored_collapsed, collapse_statuses = _scored_races(conn, version, stamped)
+    scored, scored_collapsed, collapse_statuses, scored_classes = _scored_races(conn, version, stamped)
     graded_all, excluded = load_graded_races(conn)
     excluded = Counter(excluded)
     no_probs = [g for g in graded_all if "model_board" not in g.race.forecasts]
@@ -123,6 +128,7 @@ def build_status(conn: sqlite3.Connection, *, today: date | None = None) -> dict
         by_version[g.engine_version] = by_version.get(g.engine_version, 0) + 1
     graded = [g for g in graded_all if g.engine_version == version]
     graded_days = [g.race.when for g in graded]
+    graded_classes = Counter(g.forecast_class for g in graded)
     bets: list[date] = []
     clv: list[date] = []
     open_bets = 0
@@ -153,7 +159,8 @@ def build_status(conn: sqlite3.Connection, *, today: date | None = None) -> dict
     return {"today": today.isoformat(), "engine_version": version, "graded_by_version": by_version,
             "last_scored_by_version": latest, "metrics": metrics,
             "excluded_from_grading": dict(excluded), "open_bets": open_bets,
-            "scored_collapsed_to_morning_line": scored_collapsed, "model_collapse_status": dict(collapse_statuses)}
+            "scored_collapsed_to_morning_line": scored_collapsed, "model_collapse_status": dict(collapse_statuses),
+            "forecast_class": {"scored": dict(scored_classes), "graded": dict(graded_classes)}}
 
 
 def render_text(status: dict) -> str:
@@ -174,6 +181,13 @@ def render_text(status: dict) -> str:
     if status["model_collapse_status"]:
         L.append("Stored model_collapse_status of the scored runs: " +
                  ", ".join(f"{k}={n}" for k, n in sorted(status["model_collapse_status"].items())))
+    fc = status.get("forecast_class", {})
+    if fc.get("scored") or fc.get("graded"):
+        L += ["", "Forecast class of the counted races (scored / graded): " + ", ".join(
+            f"{k}={fc['scored'].get(k, 0)}/{fc['graded'].get(k, 0)}" for k in sorted(set(fc["scored"]) | set(fc["graded"])))]
+        if fc["scored"].get(DIAGNOSTIC_SEED) or fc["graded"].get(DIAGNOSTIC_SEED):
+            L.append("  DIAGNOSTIC_SEED_BASELINE = uncalibrated seed forecasts that the app's eligibility gate withholds for "
+                     "display and betting; they are counted here as evidence only.")
     if status["excluded_from_grading"]:
         L += ["", "Scored races left out of grading: " + ", ".join(f"{k}={v}" for k, v in sorted(status["excluded_from_grading"].items()))]
     L += ["", "A threshold being reached lets the report issue a verdict; it does not mean the verdict will be good."]

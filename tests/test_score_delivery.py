@@ -46,3 +46,17 @@ def test_cache_key_changes_with_artifact_calibration_build_or_as_of():
         assert score_delivery.eligibility_cache_key(changed) != baseline
     changed = {**result, "artifact": {"model_id": 7, "version": "2"}}
     assert score_delivery.eligibility_cache_key(changed) != baseline
+
+
+def test_blocked_score_keeps_the_stored_probability_only_as_a_diagnostic_value(monkeypatch, tmp_path):
+    monkeypatch.setattr(score_delivery, "runtime_score_eligibility", lambda *_: {
+        "score_valid": False, "reason_codes": ["calibration_unavailable_or_unaudited"], "artifact": {}, "calibration": {},
+        "race_context": {}, "decision_timestamp": None,
+    })
+    out, _ = score_delivery.contain_ineligible_board(_board(), tmp_path / "db", 73)
+    row = out.iloc[0]
+    assert row["diagnostic_win_probability"] == .2                       # the stored value survives
+    for col in score_delivery.ACTIONABLE_COLUMNS:                         # and every actionable column is still blank
+        if col in out.columns:
+            assert pd.isna(row[col]), col
+    assert row["wager_valid"] is False and row["output_status"] == "BLOCKED_INELIGIBLE"

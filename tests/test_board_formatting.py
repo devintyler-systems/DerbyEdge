@@ -240,3 +240,48 @@ def test_confidence_select_fragment_legacy_flag_0_synthesizes_low():
     confidence_flag, confidence_score, confidence_bucket, confidence_reasons, is_persisted, dummy = row
     assert confidence_bucket == "LOW"
     assert is_persisted == 0
+
+
+# ---- diagnostic forecast display (stored probability behind a blocked eligibility gate) -----------------
+from src.app.board_formatting import (  # noqa: E402
+    DIAGNOSTIC_NOTICE, diagnostic_forecast_frame, diagnostic_reason_codes, is_diagnostic_only, win_pct_text,
+)
+
+
+def _blocked_board():
+    return pd.DataFrame({
+        "horse_name": ["A", "B", "C"], "post_position": [1, 2, 3], "morning_line_odds": [2.0, 4.0, 9.0],
+        "market_implied_prob": [0.3333, 0.2, 0.1],
+        "win_probability": [np.nan, np.nan, np.nan],                 # blanked by the gate
+        "diagnostic_win_probability": [0.20, 0.50, 0.30],
+        "score_eligibility_reason_codes": ["calibration_unavailable_or_unaudited;unsupported_or_unknown_runtime_source"] * 3,
+    })
+
+
+def test_win_pct_text_prefers_the_valid_value_then_the_labelled_diagnostic():
+    assert win_pct_text(0.285, 0.31) == ("Win %", "28.5%")
+    label, text = win_pct_text(float("nan"), 0.285)
+    assert text == "28.5%" and "Diagnostic" in label and "not valid for betting" in label
+    assert win_pct_text(None, None) == ("Win %", "unavailable") and win_pct_text(float("nan"), "x")[1] == "unavailable"
+
+
+def test_diagnostic_frame_only_when_every_valid_win_pct_is_blank():
+    board = _blocked_board()
+    assert is_diagnostic_only(board)
+    frame = diagnostic_forecast_frame(board)
+    assert list(frame["Horse"]) == ["B", "C", "A"] and list(frame["Rank"]) == [1, 2, 3]            # ranked by the diagnostic value
+    assert list(frame["Diagnostic Win %"]) == [50.0, 30.0, 20.0]
+    assert list(frame["Diff vs ML (pts)"]) == [30.0, 20.0, -13.3]
+    assert list(frame.columns) == ["Rank", "Horse", "Post", "Morning Line", "Diagnostic Win %", "ML-Implied %", "Diff vs ML (pts)"]
+    valid = board.assign(win_probability=[0.2, 0.5, 0.3])
+    assert not is_diagnostic_only(valid) and diagnostic_forecast_frame(valid) is None            # a valid board is never relabelled
+    assert diagnostic_forecast_frame(board.drop(columns="diagnostic_win_probability")) is None   # nothing stored -> nothing shown
+    assert diagnostic_forecast_frame(None) is None and diagnostic_forecast_frame(board.iloc[0:0]) is None
+    nothing = board.assign(diagnostic_win_probability=np.nan)
+    assert diagnostic_forecast_frame(nothing) is None                                            # no fabricated numbers
+
+
+def test_reason_codes_are_listed_once_in_first_seen_order_and_the_notice_says_not_for_betting():
+    assert diagnostic_reason_codes(_blocked_board()) == ["calibration_unavailable_or_unaudited", "unsupported_or_unknown_runtime_source"]
+    assert diagnostic_reason_codes(None) == [] and diagnostic_reason_codes(pd.DataFrame({"a": [1]})) == []
+    assert "not valid for betting" in DIAGNOSTIC_NOTICE

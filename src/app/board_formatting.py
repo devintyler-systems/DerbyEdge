@@ -160,3 +160,68 @@ def prepare_probability_display_columns(
     if show_edge:
         out["Edge"] = out["value_score"].apply(_edge_str)
     return out
+
+
+DIAGNOSTIC_NOTICE = (
+    "DIAGNOSTIC FORECAST - not valid for betting. These are the stored model probabilities of an uncalibrated seed "
+    "baseline. The eligibility gate withholds Win %, fair odds, edge and bet tags until the scoring context passes it."
+)
+
+
+def _finite(value: object) -> float | None:
+    try:
+        numeric = float(value)
+    except (TypeError, ValueError):
+        return None
+    return numeric if math.isfinite(numeric) else None
+
+
+def is_diagnostic_only(board: pd.DataFrame | None) -> bool:
+    """True when the gated Win % is blank for every runner but a stored diagnostic probability exists."""
+    if board is None or board.empty or "diagnostic_win_probability" not in board.columns:
+        return False
+    gated = pd.to_numeric(board.get("win_probability"), errors="coerce")
+    diag = pd.to_numeric(board["diagnostic_win_probability"], errors="coerce")
+    return not bool(gated.notna().any()) and bool(diag.notna().any())
+
+
+def win_pct_text(win_probability: object, diagnostic_win_probability: object = None) -> tuple[str, str]:
+    """(label, text) for a single Win % readout: the valid value, else the labelled diagnostic, else unavailable."""
+    valid = _finite(win_probability)
+    if valid is not None:
+        return "Win %", f"{valid * 100:.1f}%"
+    diag = _finite(diagnostic_win_probability)
+    if diag is not None:
+        return "Diagnostic Win % (not valid for betting)", f"{diag * 100:.1f}%"
+    return "Win %", "unavailable"
+
+
+def diagnostic_forecast_frame(board: pd.DataFrame | None) -> pd.DataFrame | None:
+    """The labelled diagnostic table, or None when the board has valid Win % (or no stored probability)."""
+    if not is_diagnostic_only(board):
+        return None
+    out = pd.DataFrame({
+        "Horse": board["horse_name"],
+        "Post": board["post_position"],
+        "Morning Line": board["morning_line_odds"].apply(morning_line_str),
+    })
+    diag = pd.to_numeric(board["diagnostic_win_probability"], errors="coerce")
+    ml = pd.to_numeric(board.get("market_implied_prob"), errors="coerce")
+    out["Diagnostic Win %"] = (diag * 100).round(1)
+    out["ML-Implied %"] = (ml * 100).round(1)
+    out["Diff vs ML (pts)"] = ((diag - ml) * 100).round(1)
+    out = out.assign(_k=diag).sort_values("_k", ascending=False, na_position="last").drop(columns="_k")
+    out.insert(0, "Rank", range(1, len(out) + 1))
+    return out.reset_index(drop=True)
+
+
+def diagnostic_reason_codes(board: pd.DataFrame | None) -> list[str]:
+    """Distinct eligibility reason codes the gate recorded, in first-seen order."""
+    if board is None or "score_eligibility_reason_codes" not in board.columns:
+        return []
+    seen: dict[str, None] = {}
+    for cell in board["score_eligibility_reason_codes"].dropna():
+        for code in str(cell).split(";"):
+            if code.strip():
+                seen.setdefault(code.strip(), None)
+    return list(seen)

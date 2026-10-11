@@ -305,3 +305,41 @@ def test_cli_opens_the_database_read_only(tmp_path):
     before = db.read_bytes()
     cli_main(["--db", str(db), "--out-dir", str(tmp_path / "o"), "--boot", "50"])
     assert db.read_bytes() == before
+
+
+# ---- forecast class: a seed-only baseline is graded as DIAGNOSTIC evidence, never relabelled as a trained model ----
+def test_forecast_class_follows_the_model_type_of_the_graded_run():
+    from src.services.walk_forward_eval import DIAGNOSTIC_SEED, OTHER, TRAINED, forecast_class
+    assert forecast_class("seed_only_baseline") == forecast_class(" Seed_Only_Baseline ") == DIAGNOSTIC_SEED
+    assert forecast_class("xgboost") == TRAINED
+    # never passed off as trained: the heuristic fallback, the Derby override and anything unknown stay apart
+    assert forecast_class("fallback") == forecast_class("derby_override") == forecast_class(None) == forecast_class("?") == OTHER
+
+
+def test_graded_races_carry_their_forecast_class_and_the_report_says_which_are_diagnostic():
+    from src.services.walk_forward_eval import DIAGNOSTIC_SEED, TRAINED
+    conn = new_db()
+    add_race(conn, day=2, probs=[.5, .3, .2], ml=[1, 2, 3], winner=0)
+    add_race(conn, day=3, probs=[.5, .3, .2], ml=[1, 2, 3], winner=0)
+    conn.execute("""UPDATE score_runs SET model_type='seed_only_baseline'
+                    WHERE card_id=(SELECT card_id FROM race_cards WHERE card_date='2026-03-02')""")
+    conn.execute("""UPDATE score_runs SET model_type='xgboost'
+                    WHERE card_id=(SELECT card_id FROM race_cards WHERE card_date='2026-03-03')""")
+    graded, excluded = load_graded_races(conn)
+    assert {g.race.when.day: g.forecast_class for g in graded} == {2: DIAGNOSTIC_SEED, 3: TRAINED}
+    res = evaluate(graded, excluded)
+    assert res["population"]["forecast_classes"] == {DIAGNOSTIC_SEED: 1, TRAINED: 1}
+    md = render_markdown(res)
+    assert "1 of 2 graded race(s) are DIAGNOSTIC seed-baseline forecasts" in md and "evidence only" in md
+    only_trained = evaluate([g for g in graded if g.forecast_class == TRAINED], excluded)
+    assert "DIAGNOSTIC" not in render_markdown(only_trained)
+
+
+def test_a_score_runs_table_without_model_type_still_grades_as_a_trained_model():
+    from src.services.walk_forward_eval import OTHER
+    conn = new_db()
+    add_race(conn, day=2, probs=[.5, .3, .2], ml=[1, 2, 3], winner=0)
+    conn.execute("DROP VIEW race_review")                       # the view reads score_runs.model_type
+    conn.execute("ALTER TABLE score_runs DROP COLUMN model_type")
+    graded, _ = load_graded_races(conn)
+    assert [g.forecast_class for g in graded] == [OTHER]
