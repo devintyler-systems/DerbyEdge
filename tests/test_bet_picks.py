@@ -245,3 +245,18 @@ def test_race_without_a_stored_chart_counts_for_hit_rate_but_not_return(mem_conn
     assert show["money_legs"] == 0 and "return_per_2" not in show        # a loss is known but the win's payoff is not: no ROI
     text = " ".join(bp.render_track_record(bp.track_record(mem_conn)))
     assert "hit rate 50%" in text and "return not computed: no stored chart payoffs" in text
+
+
+def test_board_columns_are_in_a_fixed_order_and_missing_legs_show_a_dash():
+    frame = bp.picks_frame(bp.recommend_picks(_runners()))
+    legs = [c for c in frame.columns if "model / ML-implied" in c]
+    assert legs == ["WIN: model / ML-implied", "PLACE: model / ML-implied", "SHOW: model / ML-implied"]
+    assert list(frame.columns).index("Bet") < list(frame.columns).index(legs[0])
+    assert frame.loc[frame["Horse"] == "H5", "PLACE: model / ML-implied"].iloc[0] == "—"          # WIN-only pick
+    assert not frame.isna().any().any()
+
+
+def test_track_record_singular_pick():
+    one = {"picks_version": bp.PICKS_VERSION, "engine_version": "v", "other_engine_versions_not_counted": [],
+           "by_type": {"PLACE": {"graded": 1, "hits": 0, "sufficient": False}}}
+    assert "1 pick graded" in bp.render_track_record(one)[0] and "1 picks" not in bp.render_track_record(one)[0]
