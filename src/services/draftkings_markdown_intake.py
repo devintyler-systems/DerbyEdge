@@ -232,7 +232,7 @@ def _surface(value: str | None) -> str:
     text = (value or "").lower()
     if text.startswith("turf") or text.startswith("i-"):
         return "turf"
-    if text.startswith(("aw", "synthetic")):
+    if text.startswith(("aw", "synthetic", "all_weather", "all weather", "all-weather", "tapeta", "polytrack")):
         return "all_weather"
     return "dirt"
 

@@ -285,7 +285,7 @@ def _normal_surface(value: str | None) -> str | None:
         return "dirt"
     if value.startswith(("turf", "i-", "tr.t")):
         return "turf"
-    if value.startswith("aw"):
+    if value.startswith(("aw", "synth", "all weather", "all-weather", "tapeta", "polytrack")):
         return "all_weather"
     return value
 
@@ -308,12 +308,16 @@ def _metadata(raw: str, source_path: str) -> Race:
     purse_match = re.search(r"Purse:\s*\$([\d,.]+)K?", header, re.I)
     distance_match = re.search(r"(?m)^\s*(\d+(?:\s+\d+/\d+)?\s*[MF])\s*$", header, re.I)
     surface_match = re.search(r"(?m)^\s*([A-Za-z.]+):\s*([A-Za-z ]+)\s*$", header)
+    # Some cards show the surface alone, with no track condition ("Synthetic").
+    bare_surface = None if surface_match else re.search(
+        r"(?im)^\s*(Dirt|Turf|Synthetic|All[ -]Weather|Tapeta|Polytrack)\s*$", header)
     class_match = re.search(r"(?m)^\s*(\$[^\n]+(?:CLAIMING|MAIDEN|ALLOWANCE|STAKES)[^\n]*)\s*$", header, re.I)
     age_match = re.search(r"(?m)^\s*(\dYO\+?|\d\s*YO\+?)\s*$", header, re.I)
     post_match = re.search(r"(?m)^(\d{1,2}:\d{2})\s*$\s*^([AP]M)\s*$", header)
     track = lines[0] if lines else None
     distance = distance_match.group(1) if distance_match else None
-    raw_surface = "-".join(surface_match.groups()) if surface_match else None
+    raw_surface = "-".join(surface_match.groups()) if surface_match else (
+        bare_surface.group(1) if bare_surface else None)
 
     # Post display + card status.  The header renders either a clock time
     # ("1:03" / "PM") or a minutes-to-post countdown ("9" / "MTP"); capture the
@@ -352,7 +356,8 @@ def _metadata(raw: str, source_path: str) -> Race:
         age_restriction=_clean(age_match.group(1)) if age_match else None,
         distance=distance,
         normalized_distance_furlongs=_distance_furlongs(distance),
-        surface=_normal_surface(surface_match.group(1) if surface_match else None),
+        surface=_normal_surface(
+            surface_match.group(1) if surface_match else (bare_surface.group(1) if bare_surface else None)),
         surface_condition=_clean(surface_match.group(2)) if surface_match else None,
         raw_distance=distance,
         raw_class_code=_clean(class_match.group(1)) if class_match else None,
