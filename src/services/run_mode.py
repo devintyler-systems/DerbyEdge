@@ -104,8 +104,9 @@ def data_quality_from_card(
            WHERE rc.card_id=?""",
         (card_id,),
     ).fetchone()
+    has_career_starts = any(r[1] == "career_starts" for r in conn.execute("PRAGMA table_info(entries)"))
     entries = conn.execute(
-        "SELECT entry_id, morning_line_odds FROM entries "
+        "SELECT entry_id, morning_line_odds, " + ("career_starts" if has_career_starts else "NULL") + " FROM entries "
         "WHERE card_id=? AND scratch_flag=0",
         (card_id,),
     ).fetchall()
@@ -141,7 +142,12 @@ def data_quality_from_card(
             pp_entry_ids.update(int(row[0]) for row in rows if int(row[0]) in entry_ids)
         parsed = len(entries)
         entries_with_pp = len(pp_entry_ids)
-        match_rate = entries_with_pp / parsed if parsed else 0.0
+        # A debut (career_starts == 0 on the card, no PP rows) has nothing to match; it is not a parser miss.
+        first_time_starters = sum(
+            1 for row in entries if int(row[0]) not in pp_entry_ids and row[2] is not None and int(row[2]) == 0
+        )
+        expected_pp = parsed - first_time_starters
+        match_rate = entries_with_pp / expected_pp if expected_pp > 0 else 0.0
         declared = int(race[0]) if race and race[0] else None
         metadata_complete = bool(
             race and race[1] and race[2] is not None and race[3] and race[4] and race[5]
@@ -149,6 +155,8 @@ def data_quality_from_card(
         has_morning_lines = bool(entries) and all(row[1] is not None for row in entries)
         blocking_errors = [] if race else [f"No race card found for card_id={card_id}."]
         scratches = 0
+    if audit:
+        first_time_starters = 0
     return DataQuality(
         entries_parsed=parsed,
         field_size_declared=int(declared) if declared else None,
@@ -164,6 +172,7 @@ def data_quality_from_card(
         required_model_features_complete=required_model_features_complete,
         blocking_errors=blocking_errors,
         entries_scratched=scratches,
+        first_time_starters=first_time_starters,
     )
 
 

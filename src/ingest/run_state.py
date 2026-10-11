@@ -36,6 +36,9 @@ class DataQuality:
     # active entries, while this count lets the field-size gate distinguish a
     # fully explained scratch reduction from a parser omission.
     entries_scratched: int = 0
+    # Active entries whose card says career_starts == 0 and that have no PP rows: a debut has no past performances
+    # to match, so it is not a parser miss.  A horse with career starts but no PP rows still counts against the rate.
+    first_time_starters: int = 0
 
 
 def resolve_run_mode(q: DataQuality) -> tuple[RunMode, list[str]]:
@@ -80,10 +83,10 @@ def resolve_run_mode(q: DataQuality) -> tuple[RunMode, list[str]]:
             f"Starter-to-PP match rate is {q.starter_match_rate:.0%}; minimum is 90%."
         ]
 
-    pp_coverage = q.entries_with_pp_history / q.entries_parsed
+    pp_coverage = q.entries_with_pp_history / max(q.entries_parsed - q.first_time_starters, 1)
     if pp_coverage < 0.80:
         return RunMode.BLOCKED, [
-            f"PP coverage is {pp_coverage:.0%}; minimum is 80% of parsed entries."
+            f"PP coverage is {pp_coverage:.0%}; minimum is 80% of entries with prior starts."
         ]
 
     if not q.required_model_features_complete:

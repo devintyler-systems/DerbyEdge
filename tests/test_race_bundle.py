@@ -303,3 +303,16 @@ def test_kee_r9_10_11_bundle_passes_and_merges_all_twelve_weights():
     assert b.reconciliation.weights_merged == 12 and b.reconciliation.programs_checked == 12
     assert b.validation.scratched_runner_count == 2
     assert {r.program_number: r.weight for r in b.basic.rows}["2"] == 118
+
+
+def test_kee_r9_maiden_with_five_debuts_is_not_blocked_by_the_starter_match_gate():
+    from src.ingest.run_state import RunMode, resolve_run_mode
+    from src.services.run_mode import data_quality_from_card
+    b = parse_race_bundle(KEE.read_text(encoding="utf-8"), source_path=KEE.name,
+                          as_of=KEE_CAPTURED.replace(second=0, microsecond=0), captured_at=KEE_CAPTURED)
+    conn = _db()
+    saved = persist_validated_draftkings_markdown(conn, b.card, b.validation, source_filename=KEE.name,
+                                                  scheduled_post_utc=b.post_utc, captured_at=b.captured_at)
+    q = data_quality_from_card(conn, saved.card_id)
+    assert (q.entries_parsed, q.entries_with_pp_history, q.first_time_starters, q.starter_match_rate) == (10, 5, 5, 1.0)
+    assert resolve_run_mode(q)[0] == RunMode.PP_PARSED_FEATURES_PENDING

@@ -122,3 +122,47 @@ def test_model_call_guard_rejects_ml_only_card(tmp_path):
     )
     with pytest.raises(ScoringBlockedError, match="MARKET_BASELINE_ONLY"):
         ensure_scoring_eligible(conn, 8, runs_root=tmp_path)
+
+
+# ---- KEE R9 10-11-26: a maiden race with 5 debut runners was blocked as a 50% "starter match" ---------------------
+def test_debut_runners_are_not_counted_as_parser_misses():
+    q = _quality(entries_parsed=10, field_size_declared=12, entries_scratched=2, entries_with_pp_history=5,
+                 starter_match_rate=1.0, first_time_starters=5)
+    mode, _ = resolve_run_mode(q)
+    assert mode == RunMode.PP_PARSED_FEATURES_PENDING
+
+
+def test_a_horse_with_prior_starts_but_no_pp_rows_still_blocks():
+    mode, reasons = resolve_run_mode(_quality(entries_parsed=10, field_size_declared=10, entries_with_pp_history=5,
+                                              starter_match_rate=0.5, first_time_starters=0))
+    assert mode == RunMode.BLOCKED and any("50%" in r for r in reasons)
+
+
+def _db_card(starts_and_pp):
+    """starts_and_pp: list of (career_starts, has_pp_row)."""
+    c = sqlite3.connect(":memory:")
+    c.executescript("""
+        CREATE TABLE race_cards (card_id INTEGER, field_size INT, card_date TEXT, race_number INT,
+                                 distance_yards INT, surface TEXT, track_id INT);
+        CREATE TABLE tracks (track_id INTEGER, abbrev TEXT);
+        CREATE TABLE entries (entry_id INTEGER, card_id INT, morning_line_odds REAL, scratch_flag INT, career_starts INT);
+        CREATE TABLE horse_starts (entry_id INT, card_id INT);
+        INSERT INTO tracks VALUES (1, 'KEE');
+        INSERT INTO race_cards VALUES (1, %d, '2026-10-11', 9, 1320, 'dirt', 1);""" % len(starts_and_pp))
+    for i, (starts, pp) in enumerate(starts_and_pp, 1):
+        c.execute("INSERT INTO entries VALUES (?,1,5.0,0,?)", (i, starts))
+        if pp:
+            c.execute("INSERT INTO horse_starts VALUES (?,1)", (i,))
+    return c
+
+
+def test_card_quality_treats_career_starts_zero_as_a_debut_but_not_a_missing_pp():
+    from src.services.run_mode import data_quality_from_card
+    q = data_quality_from_card(_db_card([(12, True)] * 5 + [(0, False)] * 5), 1)
+    assert (q.first_time_starters, q.entries_with_pp_history, q.starter_match_rate) == (5, 5, 1.0)
+    assert resolve_run_mode(q)[0] != RunMode.BLOCKED
+    miss = data_quality_from_card(_db_card([(12, True)] * 5 + [(3, False)] * 5), 1)
+    assert (miss.first_time_starters, miss.starter_match_rate) == (0, 0.5)
+    assert resolve_run_mode(miss)[0] == RunMode.BLOCKED
+    unknown = data_quality_from_card(_db_card([(12, True)] * 5 + [(None, False)] * 5), 1)
+    assert unknown.first_time_starters == 0
