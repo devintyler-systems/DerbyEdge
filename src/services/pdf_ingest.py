@@ -159,6 +159,18 @@ def _is_1stbet(text: str) -> bool:
     return len(re.findall(r'(?<!\d)\d{1,2}PP\d{1,2}(?!\d)', text)) >= 3
 
 
+def _is_equibase_chart(text: str) -> bool:
+    """True when the text carries an Equibase chart's own structure.
+
+    A 1/ST BET pre-race page never has these: the "Last Raced / Pgm / Horse Name" column header, or the
+    "Fractional Times" and "Total WPS Pool" lines.  Used to stop a chart whose race title merely contains the
+    sponsor name ("West Virginia 1/ST BET Breeders Classic Stakes") from being rejected as a pre-race card.
+    """
+    if re.search(r'Last\s+Raced\s+Pgm\s+Horse\s+Name', text, re.I):
+        return True
+    return bool(re.search(r'Fractional\s+Times', text, re.I) and re.search(r'Total\s+WPS\s+Pool', text, re.I))
+
+
 # ── Generic field extractors ──────────────────────────────────────────────────
 
 def _extract_date(text: str) -> str | None:
@@ -1653,8 +1665,10 @@ def parse_results_pdf(
         }
 
     # ── Format guard: reject pre-race PP cards before wasting parse effort ────
-    # 1/ST BET PP cards are the most common accidental upload.
-    if _is_1stbet(text):
+    # 1/ST BET PP cards are the most common accidental upload.  The brand text alone is not proof: stakes races carry the
+    # sponsor in their title ("West Virginia 1/ST BET Breeders Classic"), so a text that has the Equibase chart's own
+    # structure is a chart, whatever its race is called.
+    if _is_1stbet(text) and not _is_equibase_chart(text):
         _diag = {
             "detected_format":    "1stbet_pp_card",
             "parsed_track":       None,
