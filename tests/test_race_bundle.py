@@ -277,3 +277,29 @@ def test_ct_r7_10_9_bundle_passes_merges_all_ten_weights_and_stores_the_race_sta
     extras = persist_race_bundle_extras(conn, b, saved.card_id)
     assert (extras.twinspires_status, extras.race_stats_status) == ("PASS", "STORED")
     assert extras.market_snapshot_status == "CAPTURED"
+
+
+# ---- KEE R9 10-11-26: "*L121" (first-time Lasix) in the Basic grid blocked the whole import ---------------------
+KEE = ROOT / "tests" / "fixtures" / "KEE_Full_Race_Data_R9_10-11-26.md"
+KEE_CAPTURED = datetime(2026, 10, 11, 21, 7, 59, tzinfo=timezone.utc)
+
+
+def test_basic_grid_accepts_a_first_time_medication_star():
+    g = parse_basic_grid(_grid(["3", "4", "12", "Colossus", "*L121", "J One", "T One"],
+                               ["4", "4", "8", "Jozempic", "L121", "J Two", "T Two"]))
+    assert [(r.medication, r.weight, r.first_time_med) for r in g.rows] == [("L", 121, True), ("L", 121, False)]
+
+
+@pytest.mark.parametrize("cell", ["**L121", "*121*", "*", "L*121"])
+def test_a_malformed_star_cell_still_fails_the_whole_grid(cell):
+    with pytest.raises(BasicGridError, match="misaligned"):
+        parse_basic_grid(_grid(["1", "13", "15", "Amama", cell, "J One", "T One"]))
+
+
+def test_kee_r9_10_11_bundle_passes_and_merges_all_twelve_weights():
+    b = parse_race_bundle(KEE.read_text(encoding="utf-8"), source_path=KEE.name,
+                          as_of=KEE_CAPTURED.replace(second=0, microsecond=0), captured_at=KEE_CAPTURED)
+    assert b.validation.passed, b.validation.errors
+    assert b.reconciliation.weights_merged == 12 and b.reconciliation.programs_checked == 12
+    assert b.validation.scratched_runner_count == 2
+    assert {r.program_number: r.weight for r in b.basic.rows}["2"] == 118
