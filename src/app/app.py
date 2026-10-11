@@ -95,6 +95,7 @@ from src.services.pp_intake import (
     parse_pp_csv,
     preview_pp_match,
 )
+from src.services import bet_picks as _bp
 from src.services.results_intake import (
     delete_results_for_race,
     ensure_race_review_view,
@@ -1846,6 +1847,51 @@ with tab1:
                     "Diff vs ML (pts)": st.column_config.NumberColumn("Diff vs ML (pts)", format="%+.1f"),
                 },
             )
+
+        # ── Pre-threshold picks (WIN / PLACE / SHOW) ───────────────────────────
+        _pk_ok = _bp.picks_allowed(board_df, (meta or {}).get("model_type"))
+        _pk_runners = _bp.runners_from_board(board_df) if _pk_ok else []
+        _picks = _bp.recommend_picks(_pk_runners)
+        _pk_source = _bp.forecast_source(_pk_runners)
+        st.markdown("#### Bet-type picks")
+        st.warning(
+            f"**{_bp.LABEL.upper()}.** Based on an uncalibrated diagnostic forecast the eligibility gate withholds. "
+            "Fewer than 30 graded picks exist per bet type, so none of this is proven. Model probability, break-even "
+            "payout per $2 and the morning-line price are shown side by side for your own judgment; each is unvalidated. "
+            "The app computes no stake, and none of this is a recommended wager.")
+        if not _pk_ok:
+            st.info(_bp.SCOPE_NOTE)
+        elif _pk_source == _bp.ML_BASELINE:
+            st.info(_bp.ML_BASELINE_NOTE)
+        elif not _picks:
+            st.info("No WIN / PLACE / SHOW pick clears the thresholds for this race.")
+        else:
+            st.dataframe(_bp.picks_frame(_picks), use_container_width=True, hide_index=True)
+            _ls = [p["horse_name"] for p in _picks if p.get("longshot_warning")]
+            if _ls:
+                st.warning(f"{_bp.LONGSHOT_NOTE} ({', '.join(_ls)})")
+        try:
+            _tr_conn = get_connection()
+            try:
+                for _line in _bp.render_track_record(_bp.track_record(_tr_conn)):
+                    st.caption(_line)
+            finally:
+                _tr_conn.close()
+        except Exception as _tr_exc:
+            st.caption(f"Track record unavailable: {_tr_exc}")
+        st.caption(f"Picks version {_bp.PICKS_VERSION}: untuned default thresholds; place/show probabilities are "
+                   "Harville estimates; the market side is the morning line (no live place/show pool captured).")
+        try:
+            _pk_conn = get_connection()
+            try:
+                _pk_n, _pk_reason = (_bp.persist_picks_pre_post(_pk_conn, selected_run_id, active_card_id, _picks)
+                                     if _picks and _pk_ok else (0, "no picks"))
+            finally:
+                _pk_conn.close()
+            if _picks and _pk_reason != "recorded":
+                st.caption(f"Not graded later: {_pk_reason}.")
+        except Exception as _pk_exc:                     # picks are advisory; never break the board
+            st.caption(f"Picks could not be recorded: {_pk_exc}")
 
         # ── Kelly debug view ──────────────────────────────────────────────────
         if has_kelly and st.checkbox("Show Kelly debug", key="kelly_debug", value=False):
@@ -4393,7 +4439,8 @@ with tab7:
         elif not selected_run_id:
             st.info("Select a score run in the sidebar to evaluate model performance.")
         else:
-            _eval = evaluate_score_run(_conn7, selected_run_id, active_card_id)
+            _bet_tags_ok = not is_diagnostic_only(board_df)
+            _eval = evaluate_score_run(_conn7, selected_run_id, active_card_id, bet_tags_valid=_bet_tags_ok)
             if _eval is None:
                 st.info("No matching predictions found for the selected score run and race.")
             else:
@@ -4443,6 +4490,9 @@ with tab7:
 
                 # Bet performance
                 st.markdown("**BET-Tagged Performance**")
+                if _eval.get("bet_tags_withheld"):
+                    st.info("No BET tags were shown for this run (the eligibility gate withheld them), so none is graded "
+                            "here. The pre-threshold bet-type picks are graded below.")
                 _bv1, _bv2, _bv3, _bv4 = st.columns(4)
                 _bv1.metric("BET candidates", _eval["n_bets"])
                 _bv2.metric("Bets won (W)", _eval["n_bets_won"])
@@ -4476,8 +4526,9 @@ with tab7:
                         "Rank":     r["rank"],
                         "Horse":    r["horse_name"],
                         "Post":     r["post_position"],
-                        "Win%":     f"{r['win_probability']*100:.1f}%" if r["win_probability"] else "—",
-                        "Tag":      TAG_ICON.get(r["bet_tag"], "—"),
+                        ("Diag Win% (not valid for betting)" if _eval.get("bet_tags_withheld") else "Win%"):
+                                    f"{r['win_probability']*100:.1f}%" if r["win_probability"] else "—",
+                        "Tag":      "—" if _eval.get("bet_tags_withheld") else TAG_ICON.get(r["bet_tag"], "—"),
                         "Finish":   r["official_finish"] if r["official_finish"] else (
                                     "SCR" if r["is_scratched"] else
                                     "DQ"  if r["is_disqualified"] else
@@ -4501,6 +4552,41 @@ with tab7:
                         _fr_df.style.apply(_result_row_style, axis=1),
                         use_container_width=True, hide_index=True,
                     )
+
+                    # Pre-threshold bet-type picks, graded hit / miss against the official finish
+                    st.markdown("**Bet-type picks vs result**")
+                    _stored = _bp.stored_picks(_conn7, selected_run_id)
+                    _retro = not _stored
+                    if _retro:
+                        _stored = [
+                            {"entry_id": p["entry_id"], "horse_name": p["horse_name"], "bet_type": t,
+                             "model_prob": l["model_prob"], "market_prob": l["market_prob"],
+                             "breakeven_payout": l["breakeven_payout"]}
+                            for p in _bp.recommend_picks(
+                                _bp.runners_from_board(board_df)
+                                if _bp.picks_allowed(board_df, (meta or {}).get("model_type")) else [])
+                            for t, l in p["legs"].items()]
+                    _fin = {}
+                    for _eid, _of, _fp, _sc in _conn7.execute(
+                            "SELECT entry_id, official_finish, finish_position, is_scratched FROM race_results WHERE card_id=?",
+                            (active_card_id,)):
+                        _fin[int(_eid)] = None if _sc else (_of or _fp)
+                    if not _stored:
+                        st.caption("No WIN / PLACE / SHOW pick cleared the thresholds for this race.")
+                    else:
+                        if _retro:
+                            st.warning("RETROSPECTIVE: no picks were recorded before post for this run, so these are "
+                                       "re-derived after the result for review only and are not counted as evidence.")
+                        else:
+                            st.caption(f"{_bp.LABEL}. Recorded before post; hit = finished in the money for that bet type "
+                                       "(WIN 1st, PLACE top 2, SHOW top 3). Return at chart payoffs is in the track record on "
+                                       "the Race Board once the Equibase chart is stored.")
+                        _settled = _bp.settle_legs(_stored, _fin)
+                        st.dataframe(pd.DataFrame([{
+                            "Horse": x["horse_name"], "Bet": x["bet_type"], "Model prob": f"{x['model_prob']*100:.0f}%",
+                            "Break-even $ per $2": f"${x['breakeven_payout']:.2f}",
+                            "Finish": x["finish"] or "—", "Result": x["status"]} for x in _settled]),
+                            use_container_width=True, hide_index=True)
 
                     # Training label export hint
                     with st.expander("📦 Training label SQL (copy for batch retraining)"):

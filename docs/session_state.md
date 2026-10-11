@@ -23,8 +23,10 @@ shortcut (runs `start_derbyedge.bat`). 57 older races lack a post time (`AS_OF_U
   Paper bets on diagnostic forecasts are allowed as an experiment, never a basis for a real bet. Fixed `place --dry-run` (it never worked).
 - **Auto build + score (this branch):** a validated bundle import builds features and scores once per uploaded file and card (`src/app/auto_score.py`);
   failures never undo the import; late captures are scored but flagged ungradable. Verified by uploading in the real app on a sandbox DB.
-- Next lever is data, in this order: capture every race pre-post with the full bundle; measure the diagnostic cohort vs morning line;
-  then add inputs one at a time (TwinSpires SPD as a labelled proxy, DK jockey/trainer stats) and re-measure. Calibration needs outcomes.
+- **Bet-type picks (this branch):** Race Board shows WIN/PLACE/SHOW picks labelled PRE-THRESHOLD with break-even $ per $2 (`src/services/bet_picks.py`,
+  `docs/bet_picks.md`); stored pre-post in `bet_picks`, track record under the picks (hit rate vs expected, return at stored chart payoffs + CI, INSUFFICIENT <30), longshot warning; Results Import itself stores no place/show payoffs.
+  Fixed a gate leak: the results page graded stored BET tags the board never showed (CT R10 "BET 1, ROI -100%"); withheld now. Thresholds untuned.
+- Next lever is data: full bundle pre-post every race; measure the diagnostic cohort; add inputs one at a time. Calibration needs outcomes.
 ## RACE STATS / bundle
 Optional bundle block, strict parser, stored raw + parsed in `twinspires_race_stats`, not scored; confirmed on card 75 (post-race TEST row).
 A malformed block or one contradicting the DK card blocks the import. One sample only (BEL); bias samples tiny. `track_bias`/`trip_flags` empty.
@@ -33,6 +35,5 @@ A malformed block or one contradicting the DK card blocks the import. One sample
 - Results Import rejected a real Equibase chart for a stakes race whose title has the sponsor ("West Virginia 1/ST BET Breeders Classic") as a
   "1/ST BET pre-race card": fixed (a chart's own structure now wins; real 1/ST BET pages are still rejected). Unverified on the user's actual PDF.
 - Issue #30 (explain LOW-confidence BET suppression): parked until real probabilities + live odds coexist. Race Board `Sum win prob 0.0000` still reads the gated column.
-- Optional: backfill post times for the 57 legacy races (dry run first). Not built: real-bet log, multi-user. Not handled: dead heats.
-## Next move
-A live race uploaded before post with its RACE STATS block, then read the `status` diagnostic cohort as the baseline.
+- Optional: backfill post times for the 57 legacy races (dry run first). Not built: real-bet log (DK slips), place/show payoff capture from the chart PDF, multi-user. Not handled: dead heats.
+## Next move: a live race uploaded before post with its RACE STATS block, then read the `status` diagnostic cohort as the baseline.

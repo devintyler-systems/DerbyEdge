@@ -691,7 +691,7 @@ def get_effective_top_pick(
 
 # ── Model evaluation ──────────────────────────────────────────────────────────
 def evaluate_score_run(
-    conn: sqlite3.Connection, run_id: str, card_id: int
+    conn: sqlite3.Connection, run_id: str, card_id: int, *, bet_tags_valid: bool = True
 ) -> dict | None:
     """Compare a score_run's predictions against ingested race_results.
 
@@ -700,6 +700,9 @@ def evaluate_score_run(
 
     Kelly ROI uses a normalized $1,000 bankroll with 5% cap so the result
     is comparable across different user bankroll settings.
+
+    ``bet_tags_valid=False`` (the eligibility gate withheld this run's actionable columns on the Race Board) leaves
+    the stored BET tags out of the evaluation: a tag the user was never shown must not be graded as a bet.
     """
     try:
         n_results = conn.execute(
@@ -823,7 +826,7 @@ def evaluate_score_run(
     top3_hit = len(top3_model & actual_top3)
 
     # BET-tagged performance
-    bet_rows = [r for r in active if r["bet_tag"] == "bet"]
+    bet_rows = [r for r in active if r["bet_tag"] == "bet"] if bet_tags_valid else []
     bet_won  = [r for r in bet_rows if r["official_finish"] == 1]
     bet_itm  = [r for r in bet_rows
                 if r["finish_position"] and r["finish_position"] <= 3
@@ -877,6 +880,7 @@ def evaluate_score_run(
         "post_time_favorite_won":  ptf_won,
         "post_time_favorite_odds": ptf_fav["official_odds_decimal"] if ptf_fav else None,
         "top3_hit":        top3_hit,
+        "bet_tags_withheld": not bet_tags_valid,
         "n_bets":          len(bet_rows),
         "n_bets_won":      len(bet_won),
         "n_bets_itm":      len(bet_itm),
