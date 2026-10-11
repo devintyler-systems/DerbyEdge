@@ -250,7 +250,9 @@ def parse_race_bundle(
     )
     late = bool(post_utc) and captured_at >= datetime.fromisoformat(post_utc)
     if race_stats is not None:
-        wrong = identity_mismatches(race_stats, track_code=track_code, distance=race.distance, surface=race.surface)
+        # An "Off Turf" race is stored as dirt (where it ran), but RACE STATS still describes the scheduled turf race.
+        scheduled_surface = "turf" if re.match(r"(?i)\s*off\s*turf\b", race.surface_condition or "") else race.surface
+        wrong = identity_mismatches(race_stats, track_code=track_code, distance=race.distance, surface=scheduled_surface)
         if wrong:
             errors.append("RACE STATS block looks like a different race than the DK card (" + "; ".join(wrong) +
                           "); paste the block for this race, or remove it")

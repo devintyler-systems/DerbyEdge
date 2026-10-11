@@ -25,7 +25,11 @@ VALID_KINDS = {"RACETRACK", "FAIR", "FARM", "TRAINING"}
 # operator-supplied codes are in track_additions.csv; a new name must be added there.
 # Two private training venues seen only as WORKOUT locations in BEL_Full_Race_Data_R5_10-9-26.md; no operator-supplied
 # code yet, so they stay unregistered (workout venues do not block an import; only the race's own track does).
-KNOWN_GAPS: set[str] = {"BLACKWOOD STABLES", "SILVERLEAF HILLS TRAINING CENTER"}
+# MNR_Full_Race_Data_R1_10-11-26.md adds past-performance venues abroad and two workout venues (same rule: not the race track).
+KNOWN_GAPS: set[str] = {
+    "BLACKWOOD STABLES", "SILVERLEAF HILLS TRAINING CENTER",
+    "ASHWOOD TRAINING CENTER", "THREE DIAMONDS TRAINING CENTER", "DEAUVILLE", "SAINT CLOUD", "Dubai - Meydan",
+}
 
 
 def _rows(name):
