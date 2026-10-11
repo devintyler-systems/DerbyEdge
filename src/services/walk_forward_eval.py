@@ -31,26 +31,13 @@ from src.analysis.forecast_metrics import (
     running_log_loss, summarize,
 )
 from src.models.policy import bucket_field_size
+from src.services.forecast_class import DIAGNOSTIC_SEED, OTHER, TRAINED, forecast_class  # noqa: F401  (re-exported)
 from src.services.market_snapshot_intake import latest_valid_market_snapshot
 from src.services.model_family import classify_model_family
 
 FORECASTS = ("model_board", "model_pre_market", "morning_line", "live_market", "closing_tote", "uniform")
 HINDSIGHT = frozenset({"closing_tote"})
 THIN_SEGMENT_RACES = 10
-
-
-# What kind of forecast a graded run is, from score_runs.model_type (schema: xgboost | fallback | derby_override |
-# seed_only_baseline).  A seed-only baseline has no audited calibration, so the app's eligibility gate withholds its
-# Win % / odds / bets: its probabilities are graded here as evidence only.  Only an xgboost run is called trained;
-# fallback / derby_override / unknown are kept apart as OTHER rather than being passed off as trained.
-DIAGNOSTIC_SEED = "DIAGNOSTIC_SEED_BASELINE"
-TRAINED = "TRAINED_MODEL"
-OTHER = "OTHER_MODEL"
-
-
-def forecast_class(model_type: str | None) -> str:
-    kind = (model_type or "").strip().lower()
-    return DIAGNOSTIC_SEED if kind == "seed_only_baseline" else TRAINED if kind == "xgboost" else OTHER
 
 
 @dataclasses.dataclass

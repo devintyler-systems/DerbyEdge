@@ -13,6 +13,10 @@ pool closes.  The harness therefore keeps the two apart.
            on the same payoffs (every runner; the favourite) that show what the takeout alone costs.
 
 Bets are recorded once per policy and race; the first qualifying decision stands.
+
+Every bet carries the FORECAST CLASS of the run that made it (``src/services/forecast_class.py``, derived from
+``score_runs.model_type``).  A seed-only baseline is DIAGNOSTIC: the app's eligibility gate withholds its Win % / odds / bets,
+so paper bets placed on it are labelled and reported as their own cohort, never pooled with a trained model's.
 """
 from __future__ import annotations
 
@@ -30,6 +34,7 @@ import numpy as np
 from src.services.chart_results_intake import (
     ensure_chart_result_tables, load_chart_race, reconcile_race_to_card, store_reconciliation,
 )
+from src.services.forecast_class import DIAGNOSTIC_SEED, OTHER, forecast_class, forecast_classes_for_runs
 from src.services.market_snapshot_intake import latest_valid_market_capture
 
 _DDL = """
@@ -148,6 +153,7 @@ class PaperBet:
     edge: float
     ev: float
     stake: float
+    forecast_class: str = OTHER      # of the run that made the bet; derived, not stored (paper_bets.run_id -> score_runs.model_type)
 
 
 @dataclasses.dataclass
@@ -226,6 +232,7 @@ def decide_bets(
             skipped["NO_SCORE_RUN_BEFORE_CUTOFF"] += 1
             continue
         run_id, run_ts = runs[-1]
+        run_class = forecast_classes_for_runs(conn, [run_id]).get(run_id, OTHER)
         scored = conn.execute(
             """SELECT s.entry_id, s.win_probability, s.p_model_pre_market, s.bet_tag, s.low_conf_bet_block, s.horse_name,
                       e.program_number
@@ -277,7 +284,7 @@ def decide_bets(
                 continue
             bets.append(PaperBet(policy.policy_id, card_id, key, entry_id, program, name, run_id,
                                  decision_time.isoformat(), capture["time"], capture["provider"], post.isoformat(),
-                                 p, m, decimal, edge, ev, stake))
+                                 p, m, decimal, edge, ev, stake, run_class))
     conn.commit()
     return DecisionReport(bets, no_bet, skipped, races_decided)
 
@@ -450,12 +457,16 @@ def summarize_bets(rows: Sequence[dict], *, n_boot: int = 2000, seed: int = 0) -
             "bets_needed_to_detect_5pct_roi": needed}
 
 
-def _baselines(conn: sqlite3.Connection, policy_id: str, stake: float) -> dict[str, dict]:
+def _baselines(conn: sqlite3.Connection, policy_id: str, stake: float, only_class: str | None = None) -> dict[str, dict]:
     """Settle two reference strategies on the same decided races and the same payoffs: back every runner, back the
     favourite (shortest captured price).  Both include the takeout, so they show what betting costs by itself."""
     all_rows, fav_rows = [], []
-    for race_key, runners_json in conn.execute(
-            "SELECT race_key, runners_json FROM paper_race_decisions WHERE policy_id=? ORDER BY decision_id", (policy_id,)):
+    decisions = conn.execute(
+        "SELECT race_key, runners_json, run_id FROM paper_race_decisions WHERE policy_id=? ORDER BY decision_id", (policy_id,)).fetchall()
+    classes = forecast_classes_for_runs(conn, [d[2] for d in decisions]) if only_class else {}
+    for race_key, runners_json, run_id in decisions:
+        if only_class and classes.get(run_id, OTHER) != only_class:
+            continue
         cur = conn.execute("SELECT result_race_id, flags_json FROM result_races WHERE race_key=? AND is_current=1", (race_key,)).fetchone()
         if cur is None or "DEAD_HEAT" in json.loads(cur[1]):
             continue
@@ -483,17 +494,31 @@ def build_report(conn: sqlite3.Connection, policy_id: str, *, n_boot: int = 2000
         raise KeyError(f"unknown policy {policy_id}")
     params = json.loads(pol[1])
     cols = ["bet_id", "race_key", "horse_name", "program", "decision_time", "status", "stake", "profit", "model_p",
-            "market_p", "captured_decimal", "final_decimal", "clv", "edge", "ev", "win_payoff", "note"]
+            "market_p", "captured_decimal", "final_decimal", "clv", "edge", "ev", "win_payoff", "note", "run_id"]
     rows = [dict(zip(cols, r)) for r in conn.execute(
         f"SELECT {', '.join(cols)} FROM paper_bets WHERE policy_id=? ORDER BY decision_time, bet_id", (policy_id,))]
+    classes = forecast_classes_for_runs(conn, [r["run_id"] for r in rows])
+    for r in rows:
+        r["forecast_class"] = classes.get(r["run_id"], OTHER)
     status_counts = Counter(r["status"] for r in rows)
     decided = conn.execute("SELECT COUNT(*), SUM(status='BET') FROM paper_race_decisions WHERE policy_id=?", (policy_id,)).fetchone()
     settled = [r for r in rows if r["status"] in SETTLED]
+    stake = float(params["flat_stake"])
+    by_class = {}
+    for name in sorted({r["forecast_class"] for r in rows}):
+        in_class = [r for r in rows if r["forecast_class"] == name]
+        by_class[name] = {
+            "bets_by_status": dict(Counter(r["status"] for r in in_class)),
+            "summary": summarize_bets([r for r in in_class if r["status"] in SETTLED], n_boot=n_boot, seed=seed),
+            "baselines": _baselines(conn, policy_id, stake, only_class=name)}
     return {
         "policy_id": policy_id, "name": pol[0], "policy": params, "races_decided": decided[0], "races_with_a_bet": decided[1] or 0,
         "bets_by_status": dict(status_counts), "summary": summarize_bets(settled, n_boot=n_boot, seed=seed),
-        "baselines": _baselines(conn, policy_id, float(params["flat_stake"])), "bets": rows,
+        "baselines": _baselines(conn, policy_id, stake), "bets": rows,
         "open_bets": status_counts.get("OPEN", 0),
+        # Verdicts are per forecast class.  `summary` / `baselines` above pool every bet and are only shown by the report
+        # when a single class exists: a diagnostic seed baseline is never pooled with a trained model.
+        "by_forecast_class": by_class,
     }
 
 
@@ -503,18 +528,12 @@ def _f(x, nd=3, pct=False):
     return f"{x * 100:.1f}%" if pct else f"{x:.{nd}f}"
 
 
-def render_markdown(rep: dict) -> str:
-    s, pol = rep["summary"], rep["policy"]
-    L = [f"# Paper trading: {rep['name']} (`{rep['policy_id']}`)", "",
-         f"Races decided: **{rep['races_decided']}**, with a bet in **{rep['races_with_a_bet']}**. "
-         f"Bets: {rep['bets_by_status']}.", "",
-         "Decisions use only the last model run and book capture available at least "
-         f"{pol['decision_lag_minutes']:g} minutes before post. Bets are settled on the exact $2 payoff printed in the chart; "
-         "the price at decision time is **not** the price paid (pari-mutuel).", ""]
+def _class_block(s: dict, baselines: dict, pol: dict, *, level: str) -> list[str]:
+    L: list[str] = []
     if s["n_bets"] < MIN_BETS_FOR_VERDICT:
         L += [f"> **INSUFFICIENT DATA**: {s['n_bets']} settled bets (< {MIN_BETS_FOR_VERDICT}). Treat every number below as a "
               "description of those bets, not as evidence the policy works.", ""]
-    L += ["## Result", "", "| bets | staked | returned | profit | ROI | 95% CI | hit rate | expected hit rate | max drawdown |",
+    L += [f"{level} Result", "", "| bets | staked | returned | profit | ROI | 95% CI | hit rate | expected hit rate | max drawdown |",
           "|---|---|---|---|---|---|---|---|---|",
           f"| {s['n_bets']} | {_f(s['staked'], 2)} | {_f(s['returned'], 2)} | {_f(s['profit'], 2)} | {_f(s['roi'], pct=True)} | "
           f"{('[' + _f(s['roi_ci'][0], pct=True) + ', ' + _f(s['roi_ci'][1], pct=True) + ']') if s['roi_ci'] else '—'} | "
@@ -523,15 +542,46 @@ def render_markdown(rep: dict) -> str:
     if s.get("wins_z") is not None:
         L += [f"Calibration of the backed horses: {s['wins']} wins vs {s['expected_wins']:.1f} expected from the model's own "
               f"probabilities (z = {s['wins_z']:.2f}). A large negative z means the model is overrating the horses it backs.", ""]
-    L += ["## Closing-line value", "",
+    L += [f"{level} Closing-line value", "",
           f"Mean CLV (decision price / final price - 1): **{_f(s['mean_clv'], pct=True)}**, "
           f"95% CI {('[' + _f(s['clv_ci'][0], pct=True) + ', ' + _f(s['clv_ci'][1], pct=True) + ']') if s['clv_ci'] else '—'}, "
           f"{_f(s['pct_positive_clv'], pct=True)} of bets beat the close. Verdict: **{s['clv_verdict']}**. "
           "Positive CLV is the earliest, least noisy sign of an edge: beating the close does not need hundreds of results.", "",
-          "## What betting costs by itself (same races, same payoffs, flat stake)", "",
+          f"{level} What betting costs by itself (same races, same payoffs, flat stake)", "",
           "| strategy | bets | ROI | 95% CI |", "|---|---|---|---|"]
-    for name, b in rep["baselines"].items():
+    for name, b in baselines.items():
         ci = f"[{_f(b['roi_ci'][0], pct=True)}, {_f(b['roi_ci'][1], pct=True)}]" if b["roi_ci"] else "—"
         L.append(f"| {name.replace('_', ' ')} | {b['n_bets']} | {_f(b['roi'], pct=True)} | {ci} |")
     L += ["", "A policy that cannot beat these is paying the takeout for nothing.", ""]
+    return L
+
+
+_CLASS_NOTE = {
+    DIAGNOSTIC_SEED: "Diagnostic seed-baseline forecasts: uncalibrated, withheld by the app's eligibility gate for display and "
+                     "betting. These paper bets measure whether the baseline has any edge; they are not a basis for a real bet.",
+}
+
+
+def render_markdown(rep: dict) -> str:
+    pol = rep["policy"]
+    classes = rep.get("by_forecast_class") or {}
+    L = [f"# Paper trading: {rep['name']} (`{rep['policy_id']}`)", "",
+         f"Races decided: **{rep['races_decided']}**, with a bet in **{rep['races_with_a_bet']}**. "
+         f"Bets: {rep['bets_by_status']}.", "",
+         "Decisions use only the last model run and book capture available at least "
+         f"{pol['decision_lag_minutes']:g} minutes before post. Bets are settled on the exact $2 payoff printed in the chart; "
+         "the price at decision time is **not** the price paid (pari-mutuel).", ""]
+    if len(classes) > 1:
+        L += ["Bets come from more than one forecast class, so **no pooled verdict is shown**: each class is reported on its own "
+              "below, with its own thresholds.", ""]
+        for name, c in classes.items():
+            L += [f"## Forecast class: {name}", "", f"Bets: {c['bets_by_status']}.", ""]
+            if name in _CLASS_NOTE:
+                L += [_CLASS_NOTE[name], ""]
+            L += _class_block(c["summary"], c["baselines"], pol, level="###")
+        return "\n".join(L)
+    if classes:
+        (name, _c), = classes.items()
+        L += [f"Forecast class of every bet: **{name}**." + (f" {_CLASS_NOTE[name]}" if name in _CLASS_NOTE else ""), ""]
+    L += _class_block(rep["summary"], rep["baselines"], pol, level="##")
     return "\n".join(L)

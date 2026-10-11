@@ -68,3 +68,18 @@ Shows races scored before post, races graded, settled paper bets and settled bet
 thresholds that unlock a verdict (30 races, 100 bets, 50 bets), and projects the date each is reached from your actual
 pace since the first event (idle days count). Until 14 days and 5 events exist it says "pace not established" instead
 of extrapolating from noise. Reaching a threshold only allows a verdict; it does not make the verdict good.
+
+## Forecast class: diagnostic bets are labelled and never pooled
+Every bet carries the forecast class of the run that made it (`src/services/forecast_class.py`, derived from `score_runs.model_type`
+through `paper_bets.run_id`, so older bets are labelled too): `DIAGNOSTIC_SEED_BASELINE` (`seed_only_baseline`: uncalibrated, so the app's
+eligibility gate withholds its Win % / odds / bets), `TRAINED_MODEL` (`xgboost`), or `OTHER_MODEL` (`fallback`, `derby_override`, unknown).
+Paper bets on a diagnostic forecast are allowed, because they are the experiment that shows whether the baseline has any edge, but they are
+**never a basis for a real bet**, and:
+
+* `place` prints the class on every bet and a NOTE when any are diagnostic.
+* `report` gives each class its own result, closing-line value, baselines (settled on that class's races only) and verdict. When more than one
+  class exists it shows **no pooled verdict**; with a single class it names it. The JSON keeps `summary` / `baselines` pooled for callers, plus
+  `by_forecast_class`.
+* `python -m training.status` shows the settled paper bets per class; the 100-bet / 50-bet thresholds apply to each class on its own.
+* `place --dry-run` now decides on an in-memory copy and writes nothing (it previously crashed on a savepoint the table setup had committed).
+

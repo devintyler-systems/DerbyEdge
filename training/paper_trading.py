@@ -25,6 +25,7 @@ sys.path.insert(0, str(ROOT))
 from src.services.paper_trading import (  # noqa: E402
     PaperPolicy, build_report, decide_bets, ensure_paper_tables, place_paper_bets, render_markdown, settle_paper_bets,
 )
+from src.services.forecast_class import DIAGNOSTIC_SEED  # noqa: E402
 from src.utils.db import DB_PATH  # noqa: E402
 
 
@@ -71,18 +72,28 @@ def main(argv: list[str] | None = None) -> int:
             now = None if args.backfill else (datetime.fromisoformat(args.now) if args.now else datetime.now(timezone.utc))
             kwargs = {"now": now, "since": args.since, "until": args.until, "track": args.track}
             if args.dry_run:
-                conn.execute("SAVEPOINT dry")
-                ensure_paper_tables(conn)
-                rep = decide_bets(conn, policy, **kwargs)
-                conn.execute("ROLLBACK TO dry")
+                # Decide on an in-memory copy: decide/ensure commit, so a savepoint cannot undo them, and the real
+                # database must stay byte-for-byte untouched.
+                scratch = sqlite3.connect(":memory:")
+                scratch.row_factory = sqlite3.Row
+                try:
+                    conn.backup(scratch)
+                    ensure_paper_tables(scratch)
+                    rep = decide_bets(scratch, policy, **kwargs)
+                finally:
+                    scratch.close()
             else:
                 rep = place_paper_bets(conn, policy, **kwargs)
             print(f"policy {policy.name} {policy.policy_id}: {rep.races_decided} race(s) decided, {len(rep.bets)} bet(s)"
                   f"{' (dry run, nothing written)' if args.dry_run else ''}")
             for b in rep.bets:
-                print(f"  {b.race_key} #{b.program} {b.horse_name}: p={b.model_p:.3f} market={b.market_p:.3f} "
+                print(f"  [{b.forecast_class}] {b.race_key} #{b.program} {b.horse_name}: p={b.model_p:.3f} market={b.market_p:.3f} "
                       f"price={b.captured_decimal:.2f} edge={b.edge:+.3f} ev={b.ev:+.3f} stake=${b.stake:.2f} "
                       f"at {b.decision_time} (price from {b.capture_provider} {b.capture_time})")
+            n_diag = sum(1 for b in rep.bets if b.forecast_class == DIAGNOSTIC_SEED)
+            if n_diag:
+                print(f"  NOTE: {n_diag} bet(s) are on DIAGNOSTIC_SEED_BASELINE forecasts (uncalibrated; the app's eligibility gate "
+                      "withholds them for betting). They are labelled and reported as their own cohort, never pooled.")
             if rep.skipped:
                 print("  skipped: " + ", ".join(f"{k}={v}" for k, v in sorted(rep.skipped.items())))
             return 0

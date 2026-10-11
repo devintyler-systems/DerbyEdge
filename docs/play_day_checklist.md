@@ -12,7 +12,9 @@ price, so it can be graded and paper-traded. Scoring only the races you would be
 3. **Timing matters.** The upload time is the price time. Do it **2 to 20 minutes before post**.
    - Later than post: the race imports flagged `LATE_CAPTURE`, with no market snapshot. It cannot be graded as pre-race.
    - Earlier than 20 minutes before post: the price is too old for `place` to use (it refuses a price older than 20 min).
-4. **Score it:** `Build + Score now` on the race. The score run's timestamp must be before post.
+4. **Scoring is automatic.** A valid bundle import builds features and scores the race itself, once per uploaded file (a green "Built features and scored card N" line
+   appears under the import message). Its timestamp is the pre-post proof. If it says the build or score failed, or the card is not score-eligible,
+   the import is kept: fix the cause and use `Build + Score now` on the race. A late capture is scored for viewing but cannot be graded.
 5. **Place the paper bet** while at least 2 minutes remain before post:
    ```
    python -m training.paper_trading place
