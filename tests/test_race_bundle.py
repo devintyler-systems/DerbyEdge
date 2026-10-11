@@ -340,3 +340,38 @@ def test_a_bare_surface_line_is_read_for_dirt_and_turf_too():
     for word, want in (("Dirt", "dirt"), ("Turf", "turf"), ("Tapeta", "all_weather")):
         raw = f"Track\nRACE 3\n5\nMTP\n$10K CLAIMING\nPurse: $20K\n 3YO+\n 6 F\n{word}\nMore\nPROGRAM\n"
         assert _metadata(raw, "X_Full_Race_Data_R3_10-11-26.md").surface == want
+
+
+# ---- MNR R1 10-11-26: foreign PP rows (program 0, blank ODDS), 3-word conditions, and an "Off Turf" race ---------
+MNR = ROOT / "tests" / "fixtures" / "MNR_Full_Race_Data_R1_10-11-26.md"
+MNR_CAPTURED = datetime(2026, 10, 11, 22, 56, 7, tzinfo=timezone.utc)
+
+
+def _mnr():
+    return parse_race_bundle(MNR.read_text(encoding="utf-8"), source_path=MNR.name,
+                             as_of=MNR_CAPTURED.replace(second=0, microsecond=0), captured_at=MNR_CAPTURED)
+
+
+def test_mnr_r1_foreign_pp_rows_with_a_blank_odds_cell_read_their_finish():
+    b = _mnr()
+    assert b.validation.passed, b.validation.errors
+    rows = {(x.start_date.isoformat(), x.finish_position, x.beaten_lengths, x.odds, x.surface_condition)
+            for x in b.card.past_performances if x.horse_name == "Priyanka" and x.start_date.year < 2024}
+    assert ("2023-03-04", 5, "6.5", None, "DIRT-Fast") in rows                    # "0 <blank> 5 6.5"
+    assert ("2022-09-09", 1, "nk", None, "TURF-Good to Soft") in rows              # 3-word condition
+
+
+def test_a_scratched_pp_row_keeps_scr_out_of_the_surface_condition():
+    b = _mnr()
+    scr = [x for x in b.card.past_performances if x.finish_position == "SCR"]
+    assert scr and all("SCR" not in (x.surface_condition or "") for x in scr)
+
+
+def test_off_turf_race_is_stored_as_dirt_with_a_warning_and_still_matches_its_race_stats():
+    b = _mnr()
+    assert (b.card.race.surface, b.card.race.surface_condition) == ("dirt", "Off Turf")
+    assert any("off the turf" in w for w in b.validation.warnings)
+    conn = _db()
+    saved = persist_validated_draftkings_markdown(conn, b.card, b.validation, source_filename=MNR.name,
+                                                  scheduled_post_utc=b.post_utc, captured_at=b.captured_at)
+    assert conn.execute("SELECT surface FROM race_cards WHERE card_id=?", (saved.card_id,)).fetchone()[0] == "dirt"

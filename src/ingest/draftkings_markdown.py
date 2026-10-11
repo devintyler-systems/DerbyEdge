@@ -290,6 +290,13 @@ def _normal_surface(value: str | None) -> str | None:
     return value
 
 
+def _surface_run(surface: str | None, condition: str | None) -> str | None:
+    """Surface the race is actually run on: "Turf: Off Turf" means a turf race moved to the main track (dirt)."""
+    if (surface or "").lower().startswith("turf") and re.match(r"(?i)\s*off\s*turf\b", condition or ""):
+        return "dirt"
+    return _normal_surface(surface)
+
+
 def _distance_furlongs(value: str | None) -> float | None:
     if not value:
         return None
@@ -356,8 +363,9 @@ def _metadata(raw: str, source_path: str) -> Race:
         age_restriction=_clean(age_match.group(1)) if age_match else None,
         distance=distance,
         normalized_distance_furlongs=_distance_furlongs(distance),
-        surface=_normal_surface(
-            surface_match.group(1) if surface_match else (bare_surface.group(1) if bare_surface else None)),
+        surface=_surface_run(
+            surface_match.group(1) if surface_match else (bare_surface.group(1) if bare_surface else None),
+            surface_match.group(2) if surface_match else None),
         surface_condition=_clean(surface_match.group(2)) if surface_match else None,
         raw_distance=distance,
         raw_class_code=_clean(class_match.group(1)) if class_match else None,
@@ -503,7 +511,7 @@ def _parse_history(entry: Entry, block: str) -> tuple[list[PastPerformance], lis
         joined = " ".join(lines)
         dist_match = re.search(
             r"((?:\d+(?:\s+\d+/\d+)?\s*[MF](?:\s+\d+\s*Y)?)|(?:\d{2,4}\s*Y))\s+"
-            r"([A-Za-z.]+-[A-Za-z]+(?:\s+[A-Za-z]+)?)\s+(.+)$", joined, re.I,
+            r"([A-Za-z.]+-[A-Za-z]+(?:\s+(?!SCR\b)[A-Za-z]+){0,2})\s+(.+)$", joined, re.I,
         )
         before = joined[:dist_match.start()].strip() if dist_match else joined
         after = dist_match.group(3).split() if dist_match else []
@@ -511,10 +519,14 @@ def _parse_history(entry: Entry, block: str) -> tuple[list[PastPerformance], lis
         track = lines[0] if lines else None
         race_class = lines[1] if len(lines) > 1 else None
         surface_condition = dist_match.group(2) if dist_match else None
+        detail_text = dist_match.group(3) if dist_match else ""
+        # Foreign starts (Dubai, France) carry program 0 and a blank ODDS cell, so the row has one fewer field.
         detail_match = re.match(
+            r"(?P<program>0)\s+(?P<finish>\d+)\s+(?P<bl>\S+)\s+(?P<jockey>\S+)\s*(?P<comment>.*)$", detail_text,
+        ) or re.match(
             r"(?P<program>\d+(?:\s+\(\d+\))?)\s+(?P<odds>\S+)\s+"
             r"(?P<finish>\d+|SCR)\s+(?P<bl>\S+)\s+(?P<jockey>\S+)\s*(?P<comment>.*)$",
-            dist_match.group(3) if dist_match else "",
+            detail_text,
         )
         finish: int | str | None = None
         if detail_match and detail_match.group("finish").isdigit():
@@ -529,13 +541,13 @@ def _parse_history(entry: Entry, block: str) -> tuple[list[PastPerformance], lis
             horse_name=entry.horse_name or "", start_date=start_date, track=track, race_class=race_class,
             distance=dist_match.group(1) if dist_match else None, surface_condition=surface_condition,
             program_or_post=detail_match.group("program") if detail_match else None,
-            odds=detail_match.group("odds") if detail_match else None,
+            odds=(detail_match.groupdict().get("odds") if detail_match else None),
             finish_position=finish, beaten_lengths=detail_match.group("bl") if detail_match else None,
             jockey=detail_match.group("jockey") if detail_match else None,
             comment=_clean(detail_match.group("comment")) if detail_match else None,
             raw_distance=dist_match.group(1) if dist_match else None, raw_race_class=race_class,
             raw_surface_condition=surface_condition,
-            raw_odds=detail_match.group("odds") if detail_match else None,
+            raw_odds=(detail_match.groupdict().get("odds") if detail_match else None),
             raw_beaten_lengths=detail_match.group("bl") if detail_match else None, raw_text=joined,
         ))
     for work_date, lines in _dated_blocks(workout_section):
@@ -905,6 +917,8 @@ def validate_draftkings_markdown_card(card: DraftKingsMarkdownCard) -> Validatio
                 f"race track {race.track!r} resolves to {resolved['track_code']} ({resolved['kind']}), "
                 "which is not a race venue"
             )
+    if re.match(r"(?i)\s*off\s*turf\b", race.surface_condition or ""):
+        warnings.append("race moved off the turf; treated as a dirt race (verify the surface actually used)")
     if not card.entries:
         errors.append("no entries parsed")
     program_seen: set[str] = set()
