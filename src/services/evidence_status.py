@@ -130,11 +130,13 @@ def build_status(conn: sqlite3.Connection, *, today: date | None = None) -> dict
     graded_days = [g.race.when for g in graded]
     graded_classes = Counter(g.forecast_class for g in graded)
     bets: list[date] = []
+    paper_classes: Counter = Counter()
     clv: list[date] = []
     open_bets = 0
     try:
-        for status, decided, final_clv in conn.execute(
-                f"""SELECT b.status, b.decision_time, b.clv FROM paper_bets b LEFT JOIN score_runs s ON s.run_id=b.run_id
+        type_col = "s.model_type" if "model_type" in {r[1] for r in conn.execute("PRAGMA table_info(score_runs)")} else "NULL"
+        for status, decided, final_clv, model_type in conn.execute(
+                f"""SELECT b.status, b.decision_time, b.clv, {type_col} FROM paper_bets b LEFT JOIN score_runs s ON s.run_id=b.run_id
                     WHERE {ver_sql} = ?""", (version,)):
             if status == "OPEN":
                 open_bets += 1
@@ -142,6 +144,7 @@ def build_status(conn: sqlite3.Connection, *, today: date | None = None) -> dict
                 d = _day(decided)
                 if d:
                     bets.append(d)
+                    paper_classes[forecast_class(model_type)] += 1
                     if final_clv is not None:
                         clv.append(d)
     except sqlite3.OperationalError:
@@ -152,7 +155,9 @@ def build_status(conn: sqlite3.Connection, *, today: date | None = None) -> dict
         _metric("Races graded against official results", MIN_RACES_FOR_VERDICT, graded_days, today,
                 "scored before post AND with a result; below this the walk-forward report gives no verdict"),
         _metric("Settled paper bets (return verdict)", MIN_BETS_FOR_VERDICT, bets, today,
-                f"{open_bets} more open, waiting for a chart"),
+                f"{open_bets} more open, waiting for a chart" + (
+                    "; by forecast class " + ", ".join(f"{k}={n}" for k, n in sorted(paper_classes.items()))
+                    + " (the report gives each class its own verdict, never pooled)" if len(paper_classes) > 1 else "")),
         _metric("Settled paper bets with closing-line value", MIN_BETS_FOR_CLV_VERDICT, clv, today,
                 "the earliest and least noisy edge signal"),
     ]
@@ -160,7 +165,7 @@ def build_status(conn: sqlite3.Connection, *, today: date | None = None) -> dict
             "last_scored_by_version": latest, "metrics": metrics,
             "excluded_from_grading": dict(excluded), "open_bets": open_bets,
             "scored_collapsed_to_morning_line": scored_collapsed, "model_collapse_status": dict(collapse_statuses),
-            "forecast_class": {"scored": dict(scored_classes), "graded": dict(graded_classes)}}
+            "forecast_class": {"scored": dict(scored_classes), "graded": dict(graded_classes), "paper_settled": dict(paper_classes)}}
 
 
 def render_text(status: dict) -> str:

@@ -128,7 +128,7 @@ def test_status_labels_seed_baseline_races_as_diagnostic_evidence():
     conn.execute("UPDATE score_runs SET model_type='seed_only_baseline' WHERE card_id=(SELECT card_id FROM race_cards WHERE card_date='2026-03-02')")
     conn.execute("UPDATE score_runs SET model_type='xgboost' WHERE card_id=(SELECT card_id FROM race_cards WHERE card_date='2026-03-03')")
     st = build_status(conn, today=date(2026, 3, 31))
-    assert st["forecast_class"] == {"scored": {DIAGNOSTIC_SEED: 1, TRAINED: 1}, "graded": {DIAGNOSTIC_SEED: 1}}
+    assert st["forecast_class"] == {"scored": {DIAGNOSTIC_SEED: 1, TRAINED: 1}, "graded": {DIAGNOSTIC_SEED: 1}, "paper_settled": {}}
     text = render_text(st)
     assert f"{DIAGNOSTIC_SEED}=1/1" in text and f"{TRAINED}=1/0" in text and "evidence only" in text
 
