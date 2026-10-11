@@ -30,6 +30,8 @@ Optional bundle block, strict parser, stored raw + parsed in `twinspires_race_st
 A malformed block or one contradicting the DK card blocks the import. One sample only (BEL); bias samples tiny. `track_bias`/`trip_flags` empty.
 ## Open
 - Pasting caution: DK and TwinSpires tabs auto-advance to the next race. Bare `ALLOWANCE` (no `$`) leaves `race_class` NULL (no scoring effect).
+- Results Import rejected a real Equibase chart for a stakes race whose title has the sponsor ("West Virginia 1/ST BET Breeders Classic") as a
+  "1/ST BET pre-race card": fixed (a chart's own structure now wins; real 1/ST BET pages are still rejected). Unverified on the user's actual PDF.
 - Issue #30 (explain LOW-confidence BET suppression): parked until real probabilities + live odds coexist. Race Board `Sum win prob 0.0000` still reads the gated column.
 - Optional: backfill post times for the 57 legacy races (dry run first). Not built: real-bet log, multi-user. Not handled: dead heats.
 ## Next move
