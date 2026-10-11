@@ -185,8 +185,8 @@ def picks_frame(picks: list[dict]):
         rows.append({
             "Horse": p["horse_name"], "Post": p["post_position"],
             "Morning line": f"{ml:.0f}-1" if ml is not None else "—", "Bet": p["label"],
-            **{f"{t}: model / ML-implied": f"{p['legs'][t]['model_prob'] * 100:.0f}% / {p['legs'][t]['market_prob'] * 100:.0f}%"
-               for t in BET_TYPES if t in p["legs"]},
+            **{f"{t}: model / ML-implied": (f"{p['legs'][t]['model_prob'] * 100:.0f}% / {p['legs'][t]['market_prob'] * 100:.0f}%"
+                                            if t in p["legs"] else "—") for t in BET_TYPES},
             "Break-even payout per $2": " · ".join(f"{t} ≥ ${p['legs'][t]['breakeven_payout']:.2f}" for t in p["bet_types"]),
             "Warning": "LONGSHOT (model > 2x market)" if p.get("longshot_warning") else "",
             "Source": "engine forecast (pre-threshold)" if p.get("source") == ENGINE_FORECAST else "morning-line baseline",
@@ -356,7 +356,7 @@ def render_track_record(rec: dict) -> list[str]:
     lines = []
     for bet_type, r in rec["by_type"].items():
         if not r["sufficient"]:
-            lines.append(f"{bet_type}: {r['graded']} picks graded ({r['hits']} hit). INSUFFICIENT DATA "
+            lines.append(f"{bet_type}: {r['graded']} pick{'s' if r['graded'] != 1 else ''} graded ({r['hits']} hit). INSUFFICIENT DATA "
                          f"(needs {MIN_PICKS_FOR_RECORD}). {LABEL}.")
             continue
         lo, hi = r["hit_rate_ci"]
