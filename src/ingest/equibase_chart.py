@@ -34,7 +34,7 @@ from typing import Any
 
 from src.derbyedge.tracks import resolve_track
 
-PARSER_VERSION = "equibase_chart/1.1.0"
+PARSER_VERSION = "equibase_chart/1.1.1"
 X_TOLERANCE = 1.5
 
 _HEADER = re.compile(r"^(?P<track>[A-Z][A-Z .'&-]+?)\s+-\s+(?P<date>[A-Z][a-z]+ \d{1,2}, \d{4})\s+-\s+Race\s+(?P<race>\d+)\s*$")
@@ -438,6 +438,9 @@ def _parse_race(header: re.Match, block: list[str]) -> ChartRace:
     vi = next((i for i, ln in enumerate(head) if ln.startswith("Value of Race:")), None)
     if vi is not None:                       # the line wraps when many places are paid
         vtext = _section(head, vi, ("Weather:", "Off at:"))
+        # The PDF's video-replay link text can land inside the wrapped line ("9th Video Race Replay $1,250"),
+        # hiding that place's purse piece from the sum.
+        vtext = re.sub(r"\s*Video Race Replay\s*", " ", vtext)
         m = re.match(r"^Value of Race:\s*\$([\d,]+)", vtext)
         race.value_of_race = int(m.group(1).replace(",", "")) if m else None
         pieces = [(int(n), int(v.replace(",", "")))

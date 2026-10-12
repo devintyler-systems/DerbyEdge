@@ -34,6 +34,10 @@ tied horses both get that `finish_order` (3, 3, 5) and each keeps its own payoff
 assigned to the pools actually paid, and a finisher with no amounts is allowed. Bumping `PARSER_VERSION` re-reads stored
 charts: unchanged races stay `UNCHANGED`, changed ones are `SUPERSEDED` (the old version is kept).
 
+A chart whose payoff table contradicts its own disqualification (GP 2025-12-13 R10: #7 moved from 2nd to 7th, but the
+exacta, trifecta, place and show still pay #7 second) stays rejected with `payoff table row N is program X, finish order
+says Y`: the source is inconsistent and the parser does not pick one side.
+
 ## Not handled yet (they are flagged or reported, never guessed)
 Cancelled or moved-off-turf races, quarter-horse and harness charts, exotic rows with unusual wording (kept as `raw`, `parsed=False`).
 
