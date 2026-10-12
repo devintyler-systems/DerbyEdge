@@ -111,6 +111,43 @@ CREATE INDEX IF NOT EXISTS idx_rr_entry ON race_results(entry_id);
 """
 
 
+MAX_BACKFILL_SCRATCHES = 2
+
+
+def _backfill_absent_scratches(conn: sqlite3.Connection, card_ids=None) -> list[str]:
+    """Mark entries with no race_results row as scratched, only when the results look like the full field.
+
+    Needs at least one non-scratched finisher, at most MAX_BACKFILL_SCRATCHES absent entries, and fewer absent
+    entries than finishers.  A top-5 results list for a 10-horse field leaves five real starters absent; marking
+    them scratched rewrote the pre-race card (KEE R9 10-11-26), so those are left alone and named in a warning.
+    ``card_ids=None`` checks every card that has a non-scratched result.  Returns the warnings."""
+    if card_ids is None:
+        card_ids = [r[0] for r in conn.execute("SELECT DISTINCT card_id FROM race_results WHERE is_scratched = 0")]
+    warnings: list[str] = []
+    for cid in card_ids:
+        absent = conn.execute(
+            """SELECT e.entry_id, h.name FROM entries e JOIN horses h ON h.horse_id = e.horse_id
+               WHERE e.card_id = ? AND e.scratch_flag = 0
+                 AND NOT EXISTS (SELECT 1 FROM race_results rr WHERE rr.entry_id = e.entry_id AND rr.card_id = ?)""",
+            (cid, cid),
+        ).fetchall()
+        finishers = conn.execute(
+            "SELECT COUNT(*) FROM race_results WHERE card_id = ? AND is_scratched = 0", (cid,)
+        ).fetchone()[0]
+        if not (absent and finishers):
+            continue
+        if len(absent) <= MAX_BACKFILL_SCRATCHES and len(absent) < finishers:
+            conn.executemany("UPDATE entries SET scratch_flag = 1 WHERE entry_id = ?", [(a[0],) for a in absent])
+        else:
+            warnings.append(
+                f"Results cover {finishers} finisher(s) but {len(absent)} active entr"
+                f"{'y has' if len(absent) == 1 else 'ies have'} no result row ("
+                + ", ".join(sorted(str(a[1]) for a in absent))
+                + "); NOT marked scratched. The results list looks incomplete."
+            )
+    return warnings
+
+
 def _ensure_table(conn: sqlite3.Connection) -> None:
     conn.executescript(_RESULTS_DDL)
     conn.commit()
@@ -587,27 +624,10 @@ def ingest_results(
 
     conn.commit()
 
-    # Back-fill: entries with no race_results row are pre-ingest scratches — but only
-    # when at least one non-scratched result was ingested for that race (meaning the full
-    # field was processed and the absent horse was truly scratched, not just un-ingested).
+    # Back-fill pre-ingest scratches (guarded: see _backfill_absent_scratches).
     processed_card_ids = {cid for cid in card_cache.values() if cid is not None}
+    warnings.extend(_backfill_absent_scratches(conn, sorted(processed_card_ids)))
     for cid in processed_card_ids:
-        conn.execute(
-            """UPDATE entries SET scratch_flag = 1
-               WHERE card_id = ?
-                 AND scratch_flag = 0
-                 AND EXISTS (
-                     SELECT 1 FROM race_results rr
-                     WHERE rr.card_id = ? AND rr.is_scratched = 0
-                 )
-                 AND NOT EXISTS (
-                     SELECT 1 FROM race_results rr
-                     WHERE rr.entry_id = entries.entry_id
-                       AND rr.card_id = ?
-                 )""",
-            (cid, cid, cid),
-        )
-
         # Normalize "silent scratches": a horse present in race_results with
         # is_scratched=0 but no finish when other runners in the same race have
         # finish positions. This happens when results CSVs list scratched horses
@@ -1227,23 +1247,9 @@ def ensure_race_review_view(conn: sqlite3.Connection) -> None:
     except Exception:
         pass
 
-    # Idempotent startup back-fill: entries absent from race_results for an already-ingested
-    # race (one with at least one non-scratched result) were scratched pre-ingest.
-    # The is_scratched=0 guard prevents marking all horses as scratched in a race where
-    # only a single scratched-horse result row exists (e.g. a scratch notification ingest).
+    # Idempotent startup back-fill (guarded the same way as the ingest path).
     try:
-        conn.execute(
-            """UPDATE entries SET scratch_flag = 1
-               WHERE scratch_flag = 0
-                 AND card_id IN (
-                     SELECT DISTINCT card_id FROM race_results WHERE is_scratched = 0
-                 )
-                 AND NOT EXISTS (
-                     SELECT 1 FROM race_results rr
-                     WHERE rr.entry_id = entries.entry_id
-                       AND rr.card_id  = entries.card_id
-                 )"""
-        )
+        _backfill_absent_scratches(conn)
         conn.commit()
     except Exception:
         pass
