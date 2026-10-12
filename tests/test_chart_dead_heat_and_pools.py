@@ -61,3 +61,28 @@ def test_a_normal_three_pool_race_is_unchanged(mnr):
     assert r.pools_paid == 3 and "DEAD_HEAT" not in r.flags
     s = r.starters[0]
     assert (s.win_payoff, s.place_payoff, s.show_payoff) == (17.6, 7.0, 2.4)
+
+
+# ---- GP 12-13-25: replay-link text inside the "Value of Race" line; a DQ whose payoffs contradict the order ----
+@pytest.fixture(scope="module")
+def gp():
+    return {r.race_number: r for r in parse_chart_pdf(FIX / "eqb_GP_2025-12-13_fullcard.pdf").races}
+
+
+def test_video_replay_link_text_inside_the_value_of_race_line_does_not_hide_a_purse_piece(gp):
+    for n in (8, 11):                                    # "... 9th Video Race Replay $1,250, 10th ..."
+        r = gp[n]
+        assert r.value_of_race == 125000 and r.purse_listed_total == 125000, n
+        assert r.valid, r.problems
+
+
+def test_a_dq_whose_payoffs_still_follow_the_as_run_order_stays_rejected(gp):
+    """R10: stewards moved #7 from 2nd to 7th, yet the exacta/trifecta/place/show still pay him 2nd.  The official order
+    and the payoffs contradict each other in the source, so the race must not be ingested on a guess."""
+    r = gp[10]
+    assert not r.valid
+    assert any("payoff table row 2 is program 7" in p for p in r.problems)
+
+
+def test_only_the_dq_race_is_invalid_on_the_december_card(gp):
+    assert [n for n, r in gp.items() if not r.valid] == [10]
