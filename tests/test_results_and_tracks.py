@@ -971,3 +971,35 @@ class TestMNRResolution:
         assert result["track_code"] == "MNR"
         diag = result.get("parse_diagnostics") or {}
         assert diag.get("track_extraction_path") == "filename"
+
+
+# ── Suite 5b: partial (top-N) results must not scratch real starters (KEE R9 10-11-26) ──────────────────────────
+
+class TestPartialResultsDoNotScratchStarters:
+    """A results list that names only the top finishers leaves real starters without a row.  Marking those
+    scratched rewrote the pre-race card (5 of 10 KEE R9 starters), blocking scoring and the TwinSpires match."""
+
+    def _ingest(self, mem_conn, n_listed):
+        ids = insert_minimal_race(mem_conn)
+        rows = _make_result_rows(ids, _NAMES)[:n_listed]
+        result = ingest_results(mem_conn, rows)
+        flags = [f[0] for f in mem_conn.execute(
+            "SELECT scratch_flag FROM entries WHERE card_id=? ORDER BY post_position", (ids["card_id"],))]
+        return ids, result, flags
+
+    def test_top_two_of_five_leave_the_other_three_unscratched_and_warn(self, mem_conn):
+        _, result, flags = self._ingest(mem_conn, 2)
+        assert flags == [0, 0, 0, 0, 0]
+        assert any("NOT marked scratched" in w and "Charlie" in w for w in result["warnings"])
+
+    def test_two_absent_of_five_are_still_back_filled(self, mem_conn):
+        _, _, flags = self._ingest(mem_conn, 3)       # Delta, Echo absent: 2 absent < 3 finishers
+        assert flags == [0, 0, 0, 1, 1]
+
+    def test_the_startup_back_fill_has_the_same_guard(self, mem_conn):
+        ids, _, flags = self._ingest(mem_conn, 2)
+        assert flags == [0, 0, 0, 0, 0]
+        ensure_race_review_view(mem_conn)             # runs on every app start
+        after = [f[0] for f in mem_conn.execute(
+            "SELECT scratch_flag FROM entries WHERE card_id=? ORDER BY post_position", (ids["card_id"],))]
+        assert after == [0, 0, 0, 0, 0]
