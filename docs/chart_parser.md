@@ -27,9 +27,15 @@ winner row == the chart's `Winner:` line; winner odds == `win payoff / 2 - 1` to
 three official finishers in order; unique programs and a trainer for each; distance, surface, final time, fractional
 times and track condition understood; track resolves in the registry; no duplicate or missing race numbers on the card.
 
+## Dead heats and short fields (parser 1.1.0)
+A dead heat is flagged `DEAD_HEAT` (the winner-odds identity is skipped). The `Dead Heats:` lines give the shared place, so
+tied horses both get that `finish_order` (3, 3, 5) and each keeps its own payoff. The purse check adds every listed piece
+(a dead heat lists a place twice). A field too small for a show pool prints a `Win Place` table header; amounts are
+assigned to the pools actually paid, and a finisher with no amounts is allowed. Bumping `PARSER_VERSION` re-reads stored
+charts: unchanged races stay `UNCHANGED`, changed ones are `SUPERSEDED` (the old version is kept).
+
 ## Not handled yet (they are flagged or reported, never guessed)
-Dead heats (flag `DEAD_HEAT`; the payoff identity is skipped), cancelled or moved-off-turf races, quarter-horse and
-harness charts, exotic rows with unusual wording (kept as `raw`, `parsed=False`).
+Cancelled or moved-off-turf races, quarter-horse and harness charts, exotic rows with unusual wording (kept as `raw`, `parsed=False`).
 
 Gate: `python -m pytest tests/test_chart_parser.py -q` (28 races / 3 cards).
 

@@ -34,7 +34,7 @@ from typing import Any
 
 from src.derbyedge.tracks import resolve_track
 
-PARSER_VERSION = "equibase_chart/1.0.0"
+PARSER_VERSION = "equibase_chart/1.1.0"
 X_TOLERANCE = 1.5
 
 _HEADER = re.compile(r"^(?P<track>[A-Z][A-Z .'&-]+?)\s+-\s+(?P<date>[A-Z][a-z]+ \d{1,2}, \d{4})\s+-\s+Race\s+(?P<race>\d+)\s*$")
@@ -48,6 +48,7 @@ _MONEY = r"\d{1,3}(?:,\d{3})*\.\d\d|\d+\.\d\d"
 _PAYOFF_LEFT = re.compile(
     rf"^(?P<pgm>\d{{1,2}}[A-Z]?)\s+(?P<name>.+?)\s+(?P<m1>{_MONEY})(?:\s+(?P<m2>{_MONEY}))?(?:\s+(?P<m3>{_MONEY}))?(?=\s+\$|\s*$)"
 )
+_PAYOFF_NAME_ONLY = re.compile(r"^(?P<pgm>\d{1,2}[A-Z]?)\s+(?P<name>[^$]+?)(?=\s+\$|\s*$)")
 _WAGER = re.compile(
     rf"(?P<base>\$\d+(?:\.\d\d)?)\s*(?P<type>[A-Za-z][A-Za-z0-9 ]*?)\s+"
     rf"(?P<nums>\d{{1,2}}[A-Z]?(?:[/-]\d{{1,2}}[A-Z]?)*|EVEN|ODD)(?:\s+\((?P<note>[^)]*)\))?\s+"
@@ -195,6 +196,9 @@ class ChartRace:
     purse: int | None = None
     value_of_race: int | None = None
     purse_by_place: dict[int, int] = dataclasses.field(default_factory=dict)      # official place -> earnings
+    # Parse-time state, deliberately not dataclass fields (so not persisted or compared): ``purse_listed_total`` is the
+    # sum of every listed purse piece (a dead heat lists a place twice) and ``pools_paid`` is 3 or 2 (a 5-horse field
+    # has no show pool).  Read them with getattr; they are absent on a race loaded back from the database.
     weather: str | None = None
     track_condition: str | None = None
     off_time: str | None = None
@@ -326,6 +330,21 @@ def _apply_disqualifications(race: ChartRace, lines: list[str]) -> None:
     race.starters = order
 
 
+def _apply_dead_heats(race: ChartRace, lines: list[str]) -> None:
+    """``Dead Heats: 3rd place - # 1 Yep (GB) / 3rd place - # 3 Postmodern``: horses that tie share the place.
+    Rows stay in as-run order, so the second tied horse would otherwise read as 4th; the next finisher is 5th."""
+    i = _find(lines, "Dead Heats:")
+    if i is None:
+        return
+    text = _section(lines, i, ("Scratched Horse", "Total WPS Pool", "Pgm Horse", "Claiming Prices"))
+    for place, program in re.findall(r"(\d{1,2})(?:st|nd|rd|th)\s+place\s*-\s*#\s*(\d{1,2}[A-Z]?)", text):
+        horse = next((s for s in race.starters if s.program == program), None)
+        if horse is None:
+            race.problems.append(f"Dead Heats line names unknown program {program}")
+        else:
+            horse.finish_order = int(place)
+
+
 def _parse_people(lines: list[str], label: str, stop: tuple[str, ...]) -> dict[str, str]:
     i = _find(lines, label)
     if i is None:
@@ -341,10 +360,12 @@ def _parse_people(lines: list[str], label: str, stop: tuple[str, ...]) -> dict[s
 
 
 def _parse_payoffs(lines: list[str], race: ChartRace) -> dict[int, ChartPayoff | None]:
-    start = next((i for i, line in enumerate(lines) if line.startswith("Pgm Horse Win Place Show")), None)
+    start = next((i for i, line in enumerate(lines) if line.startswith("Pgm Horse Win Place")), None)
     if start is None:
         race.problems.append("payoff table not found")
         return {}
+    head_cols = lines[start].split("Wager")[0]
+    race.pools_paid = 3 if re.search(r"\bShow\b", head_cols) else 2
     end = next((i for i in range(start + 1, len(lines)) if lines[i].startswith("Past Performance Running Line")), len(lines))
     left_rows: list[tuple[str, str, list[float]]] = []
     wager_lines: list[str] = []
@@ -358,6 +379,11 @@ def _parse_payoffs(lines: list[str], race: ChartRace) -> dict[int, ChartPayoff |
             amounts = [_money(lm.group(k)) for k in ("m1", "m2", "m3") if lm.group(k)]
             left_rows.append((lm.group("pgm"), lm.group("name").strip(), amounts))
             right = line[lm.end():].strip()
+        else:
+            nm = _PAYOFF_NAME_ONLY.match(line)       # a finisher outside the paid pools has a name and no amounts
+            if nm:
+                left_rows.append((nm.group("pgm"), nm.group("name").strip(), []))
+                right = line[nm.end():].strip()
         if right.startswith("$"):
             wager_lines.append(right)
         elif right and wager_lines:
@@ -414,8 +440,10 @@ def _parse_race(header: re.Match, block: list[str]) -> ChartRace:
         vtext = _section(head, vi, ("Weather:", "Off at:"))
         m = re.match(r"^Value of Race:\s*\$([\d,]+)", vtext)
         race.value_of_race = int(m.group(1).replace(",", "")) if m else None
-        race.purse_by_place = {int(n): int(v.replace(",", ""))
-                               for n, v in re.findall(r"(\d{1,2})(?:st|nd|rd|th)\s+\$([\d,]+)", vtext)}
+        pieces = [(int(n), int(v.replace(",", "")))
+                  for n, v in re.findall(r"(\d{1,2})(?:st|nd|rd|th)\s+\$([\d,]+)", vtext)]
+        race.purse_by_place = dict(pieces)
+        race.purse_listed_total = sum(v for _, v in pieces)
     for ln in head:
         if ln.startswith("Distance:"):
             text = re.sub(r"\s*Current Track Record.*$", "", ln[len("Distance:"):]).strip()
@@ -471,6 +499,7 @@ def _parse_race(header: re.Match, block: list[str]) -> ChartRace:
 
     race.scratches = _parse_scratches(lines)
     _apply_disqualifications(race, lines)
+    _apply_dead_heats(race, lines)
     trainers = _parse_people(lines, "Trainers:", ("Owners:", "Footnotes"))
     owners = _parse_people(lines, "Owners:", ("Footnotes",))
     for s in race.starters:
@@ -485,11 +514,11 @@ def _parse_race(header: re.Match, block: list[str]) -> ChartRace:
         if pgm != s.program:
             race.problems.append(f"payoff table row {n} is program {pgm}, finish order says {s.program}")
             continue
-        tail = {3: ("win_payoff", "place_payoff", "show_payoff"), 2: ("place_payoff", "show_payoff"),
-                1: ("show_payoff",)}.get(len(amounts))
-        if tail is None:
+        pools = ("win_payoff", "place_payoff", "show_payoff")[:getattr(race, "pools_paid", 3)]
+        if len(amounts) > len(pools):
             race.problems.append(f"payoff row for program {pgm} has {len(amounts)} amounts")
             continue
+        tail = pools[len(pools) - len(amounts):]
         for key, value in zip(tail, amounts):
             setattr(s, key, value)
 
@@ -534,8 +563,11 @@ def _self_check(race: ChartRace) -> None:
         p.append("no fractional times")
     if race.track_condition is None:
         p.append("no track condition")
-    if race.value_of_race is not None and sum(race.purse_by_place.values()) != race.value_of_race:
-        p.append(f"purse by place sums to {sum(race.purse_by_place.values())}, race value is {race.value_of_race}")
+    listed = getattr(race, "purse_listed_total", None)
+    if listed is None:
+        listed = sum(race.purse_by_place.values())
+    if race.value_of_race is not None and listed != race.value_of_race:
+        p.append(f"purse by place sums to {listed}, race value is {race.value_of_race}")
     race.problems = list(dict.fromkeys(p))
 
 
