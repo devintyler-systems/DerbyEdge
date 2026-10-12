@@ -1003,3 +1003,55 @@ class TestPartialResultsDoNotScratchStarters:
         after = [f[0] for f in mem_conn.execute(
             "SELECT scratch_flag FROM entries WHERE card_id=? ORDER BY post_position", (ids["card_id"],))]
         assert after == [0, 0, 0, 0, 0]
+
+
+# ── Suite 5c: a runner the results rows failed to match is not a scratch (SA R7 10-11-26, "Yep" vs "Yep (GB)") ──
+
+class TestUnmatchedRunnersAreNotScratches:
+    def _flags(self, conn, ids):
+        return [f[0] for f in conn.execute(
+            "SELECT scratch_flag FROM entries WHERE card_id=? ORDER BY post_position", (ids["card_id"],))]
+
+    def test_a_country_suffix_on_the_chart_name_still_matches_the_entry(self, mem_conn):
+        ids = insert_minimal_race(mem_conn)
+        rows = _make_result_rows(ids, ["Alpha (GB)", "Bravo", "Charlie", "Delta", "Echo"])
+        result = ingest_results(mem_conn, rows)
+        assert result["n_inserted"] == 5 and result["n_unmatched_horse"] == 0
+        assert self._flags(mem_conn, ids) == [0, 0, 0, 0, 0]
+
+    def test_an_unmatched_result_row_blocks_the_back_fill_for_that_card(self, mem_conn):
+        ids = insert_minimal_race(mem_conn)
+        rows = _make_result_rows(ids, ["Totally Different", "Bravo", "Charlie", "Delta", "Echo"])
+        result = ingest_results(mem_conn, rows)
+        assert result["n_unmatched_horse"] == 1
+        assert self._flags(mem_conn, ids) == [0, 0, 0, 0, 0]       # Alpha has no row but may be the unmatched horse
+        assert any("Skipped the scratch back-fill" in w for w in result["warnings"])
+
+    def _store_chart(self, conn, programs):
+        from src.services.chart_results_intake import ensure_chart_result_tables
+        ensure_chart_result_tables(conn)
+        conn.execute("INSERT INTO result_sources (sha256, parser_version, filename, raw_bytes, n_races, n_stored, status, "
+                     "errors_json, ingested_at) VALUES ('x','v','f.pdf',x'00',1,1,'INGESTED','[]','now')")
+        conn.execute("INSERT INTO result_races (source_id, race_key, track_code, race_date, race_number, content_hash, "
+                     "is_current, purse_by_place_json, fractional_times_json, flags_json, ingested_at) "
+                     "VALUES (1,'CD|2026-05-02|R1','CD','2026-05-02',1,'h',1,'{}','[]','[]','now')")
+        for n, pgm in enumerate(programs, start=1):
+            conn.execute("INSERT INTO result_starters (result_race_id, program, horse_name, horse_key, finish_order, run_order, "
+                         "disqualified, odds_to_one, decimal_odds, favorite) VALUES (1,?,?,?,?,?,0,1.0,2.0,0)",
+                         (pgm, f"H{pgm}", f"h{pgm}", n, n))
+        conn.commit()
+
+    def test_a_horse_the_official_chart_lists_as_a_starter_is_never_back_filled_as_scratched(self, mem_conn):
+        ids = insert_minimal_race(mem_conn)
+        for i, eid in enumerate(ids["entry_ids"], start=1):
+            mem_conn.execute("UPDATE entries SET program_number=? WHERE entry_id=?", (str(i), eid))
+        self._store_chart(mem_conn, ["1", "2", "3", "4", "5"])
+        ingest_results(mem_conn, _make_result_rows(ids, _NAMES, skip_first=True))   # Alpha (program 1) has no result row
+        assert self._flags(mem_conn, ids) == [0, 0, 0, 0, 0]
+        ensure_race_review_view(mem_conn)                                          # the start-up path too
+        assert self._flags(mem_conn, ids) == [0, 0, 0, 0, 0]
+
+    def test_without_a_chart_the_single_absent_runner_is_still_back_filled(self, mem_conn):
+        ids = insert_minimal_race(mem_conn)
+        ingest_results(mem_conn, _make_result_rows(ids, _NAMES, skip_first=True))
+        assert self._flags(mem_conn, ids) == [1, 0, 0, 0, 0]
