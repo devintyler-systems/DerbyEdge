@@ -114,7 +114,23 @@ CREATE INDEX IF NOT EXISTS idx_rr_entry ON race_results(entry_id);
 MAX_BACKFILL_SCRATCHES = 2
 
 
-def _backfill_absent_scratches(conn: sqlite3.Connection, card_ids=None) -> list[str]:
+def _programs_in_official_chart(conn: sqlite3.Connection, card_id: int) -> set[str]:
+    """Programs the official Equibase chart lists as starters for this card's race (empty if no chart is stored)."""
+    try:
+        row = conn.execute(
+            """SELECT t.abbrev || '|' || rc.card_date || '|R' || rc.race_number
+               FROM race_cards rc JOIN tracks t ON t.track_id = rc.track_id WHERE rc.card_id = ?""", (card_id,),
+        ).fetchone()
+        if row is None:
+            return set()
+        return {str(r[0]).upper() for r in conn.execute(
+            """SELECT s.program FROM result_starters s JOIN result_races rr ON rr.result_race_id = s.result_race_id
+               WHERE rr.race_key = ? AND rr.is_current = 1""", (row[0],))}
+    except sqlite3.OperationalError:          # chart tables not created yet
+        return set()
+
+
+def _backfill_absent_scratches(conn: sqlite3.Connection, card_ids=None, skip_cards=()) -> list[str]:
     """Mark entries with no race_results row as scratched, only when the results look like the full field.
 
     Needs at least one non-scratched finisher, at most MAX_BACKFILL_SCRATCHES absent entries, and fewer absent
@@ -125,8 +141,14 @@ def _backfill_absent_scratches(conn: sqlite3.Connection, card_ids=None) -> list[
         card_ids = [r[0] for r in conn.execute("SELECT DISTINCT card_id FROM race_results WHERE is_scratched = 0")]
     warnings: list[str] = []
     for cid in card_ids:
+        if cid in skip_cards:
+            warnings.append(
+                f"Skipped the scratch back-fill for card {cid}: a result row matched no entry, so an entry with "
+                "no result row may be that horse, not a scratch."
+            )
+            continue
         absent = conn.execute(
-            """SELECT e.entry_id, h.name FROM entries e JOIN horses h ON h.horse_id = e.horse_id
+            """SELECT e.entry_id, h.name, e.program_number FROM entries e JOIN horses h ON h.horse_id = e.horse_id
                WHERE e.card_id = ? AND e.scratch_flag = 0
                  AND NOT EXISTS (SELECT 1 FROM race_results rr WHERE rr.entry_id = e.entry_id AND rr.card_id = ?)""",
             (cid, cid),
@@ -134,6 +156,9 @@ def _backfill_absent_scratches(conn: sqlite3.Connection, card_ids=None) -> list[
         finishers = conn.execute(
             "SELECT COUNT(*) FROM race_results WHERE card_id = ? AND is_scratched = 0", (cid,)
         ).fetchone()[0]
+        ran = _programs_in_official_chart(conn, cid)      # the official chart says these ran: never scratch them
+        if ran:
+            absent = [a for a in absent if str(a[2] or "").upper() not in ran]
         if not (absent and finishers):
             continue
         if len(absent) <= MAX_BACKFILL_SCRATCHES and len(absent) < finishers:
@@ -407,6 +432,13 @@ def _find_card_id(
     return row[0] if row else None
 
 
+_COUNTRY_SUFFIX = re.compile(r"\s*\([A-Za-z]{2,3}\)\s*$")
+
+
+def _strip_country(name: str) -> str:
+    return _COUNTRY_SUFFIX.sub("", name or "").strip() or (name or "")
+
+
 def _find_entry(
     conn: sqlite3.Connection,
     card_id: int,
@@ -423,8 +455,9 @@ def _find_entry(
     if not rows:
         return None, None, 0.0
 
-    name_map = {r[1].lower(): (r[0], r[1]) for r in rows}
-    h_lower = horse_name.lower()
+    # Charts append a country suffix ("Yep (GB)") that DraftKings omits; ignore it on both sides.
+    name_map = {_strip_country(r[1]).lower(): (r[0], r[1]) for r in rows}
+    h_lower = _strip_country(horse_name).lower()
     if h_lower in name_map:
         eid, mname = name_map[h_lower]
         return eid, mname, 1.0
@@ -539,6 +572,7 @@ def ingest_results(
 
     n_inserted = n_unmatched_race = n_unmatched_horse = n_duplicate = n_scratch_flag = 0
     warnings: list[str] = []
+    unmatched_cards: set[int] = set()
     card_cache: dict[tuple, int | None] = {}
 
     for row in parsed_rows:
@@ -560,6 +594,7 @@ def ingest_results(
         entry_id, matched_name, score = _find_entry(conn, card_id, row["horse_name"], threshold)
         if entry_id is None:
             n_unmatched_horse += 1
+            unmatched_cards.add(card_id)
             warnings.append(
                 f"No entry match for '{row['horse_name']}' — "
                 f"{row['track_code']} R{row['race_number']}"
@@ -626,7 +661,7 @@ def ingest_results(
 
     # Back-fill pre-ingest scratches (guarded: see _backfill_absent_scratches).
     processed_card_ids = {cid for cid in card_cache.values() if cid is not None}
-    warnings.extend(_backfill_absent_scratches(conn, sorted(processed_card_ids)))
+    warnings.extend(_backfill_absent_scratches(conn, sorted(processed_card_ids), skip_cards=unmatched_cards))
     for cid in processed_card_ids:
         # Normalize "silent scratches": a horse present in race_results with
         # is_scratched=0 but no finish when other runners in the same race have
