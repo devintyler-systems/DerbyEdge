@@ -523,10 +523,11 @@ def _parse_history(entry: Entry, block: str) -> tuple[list[PastPerformance], lis
         surface_condition = dist_match.group(2) if dist_match else None
         detail_text = dist_match.group(3) if dist_match else ""
         # Foreign starts (Dubai, France) carry program 0 and a blank ODDS cell, so the row has one fewer field.
+        # A coupled entry in that past race prints its program with a letter and the post in brackets: "1A (9)".
         detail_match = re.match(
             r"(?P<program>0)\s+(?P<finish>\d+)\s+(?P<bl>\S+)\s+(?P<jockey>\S+)\s*(?P<comment>.*)$", detail_text,
         ) or re.match(
-            r"(?P<program>\d+(?:\s+\(\d+\))?)\s+(?P<odds>\S+)\s+"
+            r"(?P<program>\d+[A-Za-z]?(?:\s+\(\d+\))?)\s+(?P<odds>\S+)\s+"
             r"(?P<finish>\d+|SCR)\s+(?P<bl>\S+)\s+(?P<jockey>\S+)\s*(?P<comment>.*)$",
             detail_text,
         )
