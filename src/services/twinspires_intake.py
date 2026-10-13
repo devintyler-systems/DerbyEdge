@@ -179,6 +179,7 @@ def _candidate_rows(record: TwinSpiresRecord, artifact_sha: str, parser_version:
         ("twinspires_speed_back", record.back_speed, None, "proprietary BACK speed/reference; not labeled Beyer without explicit artifact evidence"),
         ("twinspires_class_rating", record.class_rating, None, "source-specific class rating; race-type/source context is not universal truth"),
         ("twinspires_power_rating", record.power_rating, None, "source-specific power rating; not mapped to model class or power feature"),
+        ("twinspires_profit_line", record.profit_line_decimal, record.profit_line, "BRIS Profit Line (computer-modelled fair odds, decimal); an external benchmark for shadow comparison only, not a market price"),
         ("twinspires_jockey_win_pct", record.jockey_win_pct, None, "source-context jockey percentage; no global jockey inference"),
         ("twinspires_trainer_win_pct", record.trainer_win_pct, None, "source-context trainer percentage; no global trainer inference"),
     ]

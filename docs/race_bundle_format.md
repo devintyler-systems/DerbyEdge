@@ -23,6 +23,44 @@ An optional fourth block, the TwinSpires **RACE STATS** panel, may be pasted any
 * Scratches, also-eligibles (`AE…`) and main-track-only (`MTO…`) entries are kept but are not starters;
   `field_size` and runner counts are starters only. The `AE`/`MTO` label spelling is UNVERIFIED against a real DK export.
 
+## Optional: TwinSpires SPEED, CLASS and PACE tabs
+
+Three more TwinSpires program tabs (BRIS figures with ranks) can be pasted into the same file. Sample:
+`tests/fixtures/TS_Tabs_MNR_R5_10-12-26.md`. **They are stored only; scoring does not read them.** None is required.
+
+**How to paste (all in one sitting, before post).** Order does not matter to the app, because each tab is recognised by its column
+header row; use this order so none is forgotten: DK Advanced, DK Basic, TwinSpires summary (the existing tab), **Speed**, **Class**,
+**Pace**, then RACE STATS if you have it. For each of the three new tabs, open it on TwinSpires, select the table from its `#` header
+row down to the last runner (scratches included), copy, and paste it below the previous tab. Do **not** type labels such as `(SPEED)`
+and do not trim the header row: it is how the app tells the tabs apart. TwinSpires auto-advances to the next race, so confirm each
+tab still shows the same race before copying (a tab from another race blocks the import and names the horse that does not match).
+
+| Tab | Recognised by header cells | Printed columns kept (value and rank each) |
+|---|---|---|
+| Speed | `Average Distance`, `best speed` | run style (+ points 0-8), `Average Speed`, `Average Distance`, `best speed` |
+| Class | `prime power`, `last class` | `days off`, `prime power`, `last class`, `Average Class` |
+| Pace | `early pace 1` | run style (+ points), `early pace 1`, `early pace 2`, `late pace` |
+
+* Strict, like RACE STATS: the header row must match literally and each runner must have exactly the expected cells. A malformed tab
+  **blocks the import** with `TwinSpires Speed tab is malformed (remove the tab to import without it): ...` naming the program and the
+  cell. Each tab is also cross-checked per program against the DK card (horse, morning line, scratch status, program set); a mismatch
+  blocks the import. Two copies of the same tab is an error. To import without a tab, delete it from the file.
+* Values are stored under their exact printed column names with **no interpretation**: TwinSpires' help screens define "Average Speed"
+  and "Average Class" inconsistently, so which reading predicts is for outcome data to decide. A printed `-` is stored as null, never 0.
+  Run style is kept as printed (`NA 0`, `E/P 2`): `NA` runners (first-timers, no style) are stored, not dropped.
+* The live ODDS cell is **not** parsed (the tabs are captured at different moments, so it disagrees between them); the morning line is kept.
+* Stored in `twinspires_tab_stats` (created on first use): `card_id`, `tab_kind`, `captured_at`, `late_capture`, the race distance and its
+  `sprint`/`route` category (E1/E2/LP are measured to different calls in each, so never pool across them), the tab text as pasted,
+  `parsed_json`, `parser_version` (`twinspires_tabs_v1`). Re-importing an identical tab keeps the first row and its capture time.
+* Caution when using them later: **Prime Power already combines speed, class, pace, form and weight**, so never put it in one model beside
+  those components. BRIS speed is not the Beyer scale and must not be mapped onto `speed_last` / `beyer_last`.
+* Code: `src/ingest/twinspires_tabs.py`; tests: `tests/test_twinspires_tabs.py`. UNVERIFIED beyond the MNR R5 sample: other tracks, turf,
+  and rows with extra editorial tags.
+
+**Profit Line.** The existing TwinSpires summary tab's `PL` cell is now parsed (`profit_line` as printed, `profit_line_decimal` through the
+shared odds math: `7/2`, `Even`, `20`; `-` is null) and stored as the `twinspires_profit_line` source candidate. It is BRIS's
+computer-modelled fair odds: an external benchmark for shadow comparison, not a market price and not scored.
+
 ## Optional: TwinSpires RACE STATS block
 
 Paste the panel that starts with a line reading exactly `RACE STATS`. Sample: `tests/fixtures/TS_RaceStats_BEL_R5_10-9-26.md`.

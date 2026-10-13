@@ -13,6 +13,7 @@ from typing import Any
 
 from src.ingest.race_bundle import RaceBundle
 from src.ingest.twinspires_markdown import parse_twinspires_markdown
+from src.ingest.twinspires_tabs import distance_category
 from src.services.market_snapshot_intake import MarketSnapshotError, ingest_market_snapshot
 from src.services.twinspires_intake import persist_twinspires_card, validate_twinspires_card
 
@@ -32,6 +33,54 @@ CREATE TABLE IF NOT EXISTS twinspires_race_stats (
 );
 CREATE INDEX IF NOT EXISTS idx_twinspires_race_stats_card ON twinspires_race_stats(card_id);
 """
+
+
+_TAB_DDL = """
+CREATE TABLE IF NOT EXISTS twinspires_tab_stats (
+    tab_id            INTEGER PRIMARY KEY AUTOINCREMENT,
+    card_id           INTEGER NOT NULL REFERENCES race_cards(card_id),
+    tab_kind          TEXT    NOT NULL,        -- ts_speed | ts_class | ts_pace
+    captured_at       TEXT    NOT NULL,        -- when the app received the bundle (ISO-8601 UTC); the as-of for this tab
+    late_capture      INTEGER NOT NULL,        -- 1 when received at/after post: never usable as a live feature
+    race_distance     TEXT,                    -- the DK card's distance as printed
+    distance_category TEXT,                    -- sprint | route: pace calls differ, so never pool across them
+    raw_text          TEXT    NOT NULL,        -- the tab exactly as pasted (newlines normalised)
+    raw_sha256        TEXT    NOT NULL,
+    parsed_json       TEXT    NOT NULL,        -- per runner: printed column -> value and rank, style as printed; "-" is null
+    parser_version    TEXT    NOT NULL,
+    bundle_sha256     TEXT,
+    stored_at         TEXT    NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+    UNIQUE(card_id, tab_kind, raw_sha256)      -- re-importing the same tab does not duplicate it or move its capture time
+);
+CREATE INDEX IF NOT EXISTS idx_twinspires_tab_stats_card ON twinspires_tab_stats(card_id);
+"""
+
+
+def ensure_tab_stats_table(conn: sqlite3.Connection) -> None:
+    conn.executescript(_TAB_DDL)
+
+
+def persist_ts_tabs(conn: sqlite3.Connection, bundle: RaceBundle, card_id: int) -> dict[str, str]:
+    """Store each pasted Speed / Class / Pace tab raw + parsed against the card.  Returns {kind: status}."""
+    if not bundle.ts_tabs:
+        return {}
+    ensure_tab_stats_table(conn)
+    distance = bundle.card.race.distance
+    out: dict[str, str] = {}
+    for kind, tab in bundle.ts_tabs.items():
+        existing = conn.execute("SELECT 1 FROM twinspires_tab_stats WHERE card_id=? AND tab_kind=? AND raw_sha256=?",
+                                (card_id, kind, tab.raw_sha256)).fetchone()
+        if existing:
+            out[kind] = "ALREADY_STORED"
+            continue
+        conn.execute(
+            """INSERT INTO twinspires_tab_stats (card_id, tab_kind, captured_at, late_capture, race_distance, distance_category,
+               raw_text, raw_sha256, parsed_json, parser_version, bundle_sha256) VALUES (?,?,?,?,?,?,?,?,?,?,?)""",
+            (card_id, kind, bundle.captured_at.isoformat(), int(bundle.late_capture), distance, distance_category(distance),
+             tab.raw_text, tab.raw_sha256, json.dumps(tab.to_dict(), sort_keys=True), tab.parser_version, bundle.bundle_sha256))
+        out[kind] = "STORED"
+    conn.commit()
+    return out
 
 
 def ensure_race_stats_table(conn: sqlite3.Connection) -> None:
@@ -66,11 +115,13 @@ class BundleExtrasResult:
     warnings: list[str] = dataclasses.field(default_factory=list)
     race_stats_id: int | None = None
     race_stats_status: str = "NOT_PRESENT"
+    ts_tab_status: dict[str, str] = dataclasses.field(default_factory=dict)
 
 
 def persist_race_bundle_extras(conn: sqlite3.Connection, bundle: RaceBundle, card_id: int) -> BundleExtrasResult:
     result = BundleExtrasResult()
     result.race_stats_id, result.race_stats_status = persist_race_stats(conn, bundle, card_id)
+    result.ts_tab_status = persist_ts_tabs(conn, bundle, card_id)
     if bundle.twinspires is None:
         return result
     raw = bundle.twinspires_text.encode("utf-8")
@@ -119,4 +170,5 @@ def bundle_summary(bundle: RaceBundle) -> dict[str, Any]:
         "programs_cross_checked": bundle.reconciliation.programs_checked,
         "conflicts": bundle.reconciliation.conflicts,
         "race_stats_present": bundle.race_stats is not None,
+        "twinspires_tabs_present": sorted(bundle.ts_tabs),
     }
