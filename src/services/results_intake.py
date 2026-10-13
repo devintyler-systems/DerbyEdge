@@ -646,6 +646,11 @@ def ingest_results(
         )
         n_inserted += 1
 
+        if not row["is_scratched"] and row["finish_position"] is not None:
+            # The official result has this horse finishing, so a scratch flag on its entry is wrong (an earlier import
+            # that missed its row back-filled it: SA R10 10-12-26, a first-time starter).  A real finisher never stays scratched.
+            conn.execute("UPDATE entries SET scratch_flag=0 WHERE entry_id=? AND scratch_flag=1", (entry_id,))
+
         if row["is_scratched"]:
             conn.execute(
                 "UPDATE entries SET scratch_flag=1 WHERE entry_id=?", (entry_id,)

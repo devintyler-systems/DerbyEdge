@@ -1272,7 +1272,7 @@ def _parse_results_1stbet(text: str, warnings: list[str]) -> dict:
             header_idx = i
             break
     if header_idx == -1:
-        return {"finishers": [], "scratches": []}
+        return {"finishers": [], "scratches": [], "unreadable_rows": []}
 
     _boundary = re.compile(
         r'^(?:Fractional\s+Times?|Winner\b|Pgm\s+Horse(?:\s+Name|\s+Win)\b|'
@@ -1298,7 +1298,7 @@ def _parse_results_1stbet(text: str, warnings: list[str]) -> dict:
                     scratches.append(horse)
 
     re_result = re.compile(
-        r'^\s*\d{1,2}[A-Za-z]{3}\d{2}\S*\s+'  # last-raced + race-ref (e.g. 8Apr267PEN8)
+        r'^\s*(?:\d{1,2}[A-Za-z]{3}\d{2}\S*|-{3})\s+'  # last-raced + race-ref (8Apr267PEN8), or --- for a first-time starter
         r'(\d{1,2})\s+'                          # group 1: program number
         r'([A-Za-z]\S+?)'                         # group 2: HorseName (CamelCase, spaces removed by pdfplumber)
         r'\(([^)]+)\)\s+'                         # group 3: Jockey,Name
@@ -1308,6 +1308,10 @@ def _parse_results_1stbet(text: str, warnings: list[str]) -> dict:
         r'(.+)$'                                   # group 5: Start..Fin Odds Comments
     )
 
+    # Anything shaped like a chart row (last-raced cell, program, Name(Jockey), weight) that re_result cannot read.
+    re_row_like = re.compile(r'^\S+\s+\d{1,2}\s+[A-Za-z]\S*\([^)]+\)\s+\d{2,3}\b')
+    unreadable: list[str] = []
+
     finish_pos = 0
     for line in body:
         stripped = line.strip()
@@ -1316,6 +1320,8 @@ def _parse_results_1stbet(text: str, warnings: list[str]) -> dict:
 
         mr = re_result.match(stripped)
         if not mr:
+            if re_row_like.match(stripped):
+                unreadable.append(stripped[:90])
             continue
 
         pgm      = int(mr.group(1))
@@ -1364,7 +1370,7 @@ def _parse_results_1stbet(text: str, warnings: list[str]) -> dict:
             "comment":               None,
         })
 
-    return {"finishers": finishers, "scratches": scratches}
+    return {"finishers": finishers, "scratches": scratches, "unreadable_rows": unreadable}
 
 
 # ── Public API ────────────────────────────────────────────────────────────────
@@ -1779,10 +1785,12 @@ def parse_results_pdf(
 
     runners: list[dict] = []
     scratches: list[dict] = []
+    unreadable_rows: list[str] = []
     if is_equibase_chart:
         parsed    = _parse_results_1stbet(text, warnings)
         runners   = parsed["finishers"]
         scratches = [{"horse_name": n, "is_scratched": True} for n in parsed["scratches"]]
+        unreadable_rows = parsed.get("unreadable_rows") or []
     if not runners:
         runners, scratches = _parse_results_runners(text, warnings)
 
@@ -1793,16 +1801,24 @@ def parse_results_pdf(
         detected_format, track_code, race_date, race_number, len(finishers),
     )
 
-    # ── Explicit failure when no finishers could be extracted ─────────────────
-    if not finishers:
-        _fail_reason = (
-            f"No finishers extracted from PDF "
-            f"(format={detected_format}, track={track_code!r}, "
-            f"date={race_date!r}, race={race_number}). "
-            "The file may not be a standard Equibase results chart. "
-            "Check that you uploaded an official chart PDF, not a race program or PP card. "
-            "Use the CSV import as fallback."
-        )
+    # ── Explicit failure when no finishers could be extracted, or a chart row could not be read ──
+    # A skipped starter is never a quiet partial read: it drops a real runner and shifts every later finish position.
+    if not finishers or unreadable_rows:
+        if unreadable_rows:
+            _fail_reason = (
+                f"{len(unreadable_rows)} chart row(s) could not be read, so the results would be incomplete "
+                f"and the finish order wrong: {' | '.join(unreadable_rows)}. Nothing was imported; "
+                "use the CSV import as fallback."
+            )
+        else:
+            _fail_reason = (
+                f"No finishers extracted from PDF "
+                f"(format={detected_format}, track={track_code!r}, "
+                f"date={race_date!r}, race={race_number}). "
+                "The file may not be a standard Equibase results chart. "
+                "Check that you uploaded an official chart PDF, not a race program or PP card. "
+                "Use the CSV import as fallback."
+            )
         warnings.append(_fail_reason)
         _log.warning("parse_results_pdf: %s", _fail_reason)
         _diag = {
