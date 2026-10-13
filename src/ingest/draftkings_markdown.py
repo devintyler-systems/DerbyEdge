@@ -42,7 +42,9 @@ _DMR_IDENTITY_RE = re.compile(
     r"(?P<med>[A-Za-z0-9*/ ]+?)?\s*$",
     re.I,
 )
-_PCT_RECORD_RE = re.compile(r"^\d{1,3}\s*%")
+# Strike-rate line under a jockey/trainer: "10% 360 - 37 - 32 - 53", or the bare
+# "0 - 0 - 0 - 0" DK prints (no %) for a person with no starts.
+_PCT_RECORD_RE = re.compile(r"^(?:\d{1,3}\s*%|\d+\s*-\s*\d+\s*-\s*\d+\s*-\s*\d+\s*$)")
 _MTP_RE = re.compile(r"(?mi)^\s*(?:(\d{1,3})\s*)?MTP\s*$")
 _SCRATCH_TOKENS = frozenset({"SCR", "SCRATCH", "SCRATCHED"})
 _SEX_WORDS = frozenset({

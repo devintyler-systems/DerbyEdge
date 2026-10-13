@@ -1,6 +1,6 @@
 # Session state (update at the end of every outcome; keep under 40 lines)
 Working rules, including the mandatory UPDATE YOUR LOCAL FILES block: `docs/working_rules.md`.
-_Last updated: 2026-10-11, `main` = PRs #32-#39 merged; the Basic-grid `*L121` fix is on its own branch/PR. Local machine must be on `main`._
+_Last updated: 2026-10-13, `main` = PRs #32-#39 merged; the Basic-grid `*L121` fix and the zero-start-jockey fix are on their own branches/PRs. Local machine must be on `main`._
 ## Done and merged to main
 Morning-line fix + repair, BAQ, Equibase chart parser + store/join/populate, walk-forward, paper trading, daily cycle, `training.status`,
 engine-version stamp, RACE STATS capture, import fixes (`L122bOn` Basic weight cell, `9 MTP ALLOWANCE` post display), repo tidy,
@@ -26,15 +26,15 @@ shortcut (runs `start_derbyedge.bat`). 57 older races lack a post time (`AS_OF_U
 - **Bet-type picks (this branch):** Race Board shows WIN/PLACE/SHOW picks labelled PRE-THRESHOLD with break-even $ per $2 (`src/services/bet_picks.py`,
   `docs/bet_picks.md`); stored pre-post in `bet_picks`, track record under the picks (hit rate vs expected, return at stored chart payoffs + CI, INSUFFICIENT <30), longshot warning; Results Import itself stores no place/show payoffs.
   Fixed a gate leak: the results page graded stored BET tags the board never showed (CT R10 "BET 1, ROI -100%"); withheld now. Thresholds untuned.
-- Next lever is data: full bundle pre-post every race; measure the diagnostic cohort; add inputs one at a time. Calibration needs outcomes.
 ## RACE STATS / bundle
 Optional bundle block, strict parser, stored raw + parsed in `twinspires_race_stats`, not scored; confirmed on card 75 (post-race TEST row).
 A malformed block or one contradicting the DK card blocks the import. One sample only (BEL); bias samples tiny. `track_bias`/`trip_flags` empty.
 ## Open
+- MNR R5 10-12 was blocked by a trainer CONFLICT (not the `*` jockey): DK prints a bare `0 - 0 - 0 - 0` under a jockey with no starts and the Advanced parser took it as the trainer. Fixed in `_PCT_RECORD_RE`; fixture `tests/fixtures/MNR_Full_Race_Data_R5_10-12-26.md`. That file was a late capture (post 5:40 PM ET): imports, scored but ungradable.
 - Basic grid weight cell accepts a leading `*` (first-time Lasix, `*L121`; KEE R9 10-11 was blocked by it). CT R7 10-10 race_results had the on-track order for a DQ'd horse (Results Import); overwritten from the chart with `scripts/ingest_results_charts.py --populate --replace` (path that stores on-track order for DQs not yet fixed). 18 older GP charts fail the chart parser (not blocking).
 - Pasting caution: DK and TwinSpires tabs auto-advance to the next race. Bare `ALLOWANCE` (no `$`) leaves `race_class` NULL (no scoring effect).
 - Results Import rejected a real Equibase chart for a stakes race whose title has the sponsor ("West Virginia 1/ST BET Breeders Classic") as a
   "1/ST BET pre-race card": fixed (a chart's own structure now wins; real 1/ST BET pages are still rejected). Unverified on the user's actual PDF.
 - Issue #30 (explain LOW-confidence BET suppression): parked until real probabilities + live odds coexist. Race Board `Sum win prob 0.0000` still reads the gated column.
 - Not built: real-bet log (DK slips), place/show payoff capture from the chart PDF, multi-user. Not handled: dead heats.
-## Next move: a live race uploaded before post with its RACE STATS block, then read the `status` diagnostic cohort as the baseline.
+## Next move: a live race uploaded before post with its RACE STATS block, then read the `status` diagnostic cohort. Next lever is data: add inputs one at a time.

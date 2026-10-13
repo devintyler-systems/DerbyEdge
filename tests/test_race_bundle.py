@@ -375,3 +375,18 @@ def test_off_turf_race_is_stored_as_dirt_with_a_warning_and_still_matches_its_ra
     saved = persist_validated_draftkings_markdown(conn, b.card, b.validation, source_filename=MNR.name,
                                                   scheduled_post_utc=b.post_utc, captured_at=b.captured_at)
     assert conn.execute("SELECT surface FROM race_cards WHERE card_id=?", (saved.card_id,)).fetchone()[0] == "dirt"
+
+
+def test_mnr_r5_jockey_with_no_starts_does_not_leak_his_record_into_the_trainer():
+    """DK prints a bare "0 - 0 - 0 - 0" (no %) under a jockey with no starts; it was read as the trainer
+    and blocked the import as a DK Advanced vs Basic trainer conflict (MNR R5 10-12, program 7)."""
+    fixture = ROOT / "tests" / "fixtures" / "MNR_Full_Race_Data_R5_10-12-26.md"
+    bundle = parse_race_bundle(
+        fixture.read_text(encoding="utf-8"), source_path=fixture.name,
+        as_of=datetime(2026, 10, 13, 0, 32, tzinfo=timezone.utc),
+        captured_at=datetime(2026, 10, 13, 0, 32, 35, tzinfo=timezone.utc),
+    )
+    assert bundle.validation.passed and not bundle.validation.errors
+    by_program = {e.program_number: e for e in bundle.card.entries}
+    assert (by_program["7"].jockey, by_program["7"].trainer) == ("Reynaldo Dumont", "Juan C. Vazquez")
+    assert by_program["2"].jockey == "Luis Alberto Batista"   # leading "*" (apprentice) is stripped
