@@ -37,10 +37,13 @@ from src.ingest.race_time import post_time_to_utc
 from src.ingest.twinspires_markdown import TwinSpiresMarkdownCard, parse_twinspires_markdown
 from src.ingest.twinspires_race_stats import HEADING as RACE_STATS_HEADING
 from src.ingest.twinspires_race_stats import RaceStats, RaceStatsError, identity_mismatches, parse_race_stats
+from src.ingest.twinspires_tabs import (
+    TAB_KINDS, TAB_SPECS, TwinSpiresTab, TwinSpiresTabError, header_kind as ts_tab_header_kind, parse_twinspires_tab,
+)
 from src.utils.horse_norm import normalize_horse_name
 
 SECTION_KINDS = ("dk_advanced", "twinspires", "dk_basic")      # the three tabs a bundle requires
-OPTIONAL_KINDS = ("race_stats",)                                # captured when present, never required
+OPTIONAL_KINDS = ("race_stats",) + TAB_KINDS                    # captured when present, never required
 _RACE_LINE = re.compile(r"^RACE\s+\d+$", re.I)
 
 
@@ -68,6 +71,7 @@ class RaceBundle:
     post_source: str
     late_capture: bool
     race_stats: RaceStats | None = None
+    ts_tabs: dict[str, TwinSpiresTab] = dataclasses.field(default_factory=dict)
 
 
 def _normalize_newlines(text: str) -> list[str]:
@@ -82,7 +86,7 @@ def _header_kind(lines: list[str], at: int) -> str | None:
         return "dk_basic"
     if "style" in window and "run" in window:
         return "twinspires"
-    return None
+    return ts_tab_header_kind(window)       # the optional Speed / Class / Pace tabs ("run style" is one cell there)
 
 
 def locate_sections(text: str) -> tuple[dict[str, tuple[int, int]], list[str], list[str]]:
@@ -137,6 +141,7 @@ def _ml_equal(a: str | None, b: str | None) -> bool:
 
 def reconcile_bundle(
     card: DraftKingsMarkdownCard, basic: BasicGrid | None, ts: TwinSpiresMarkdownCard | None,
+    ts_tabs: dict[str, TwinSpiresTab] | None = None,
 ) -> Reconciliation:
     out = Reconciliation()
     dk = {(e.program_number or "").upper(): e for e in card.entries}
@@ -193,6 +198,20 @@ def reconcile_bundle(
                 conflict(p, "scratched", not e.is_active, "TwinSpires", r.scratched)
         out.errors.extend(f"TwinSpires: {m}" for m in ts.parser_errors)
         out.warnings.extend(f"TwinSpires: {m}" for m in ts.parser_warnings)
+    for tab in (ts_tabs or {}).values():
+        label = f"TwinSpires {tab.title}"
+        rows = {r.program_number.upper(): r for r in tab.runners}
+        program_sets(label, set(rows))
+        for p, r in rows.items():
+            e = dk.get(p)
+            if e is None:
+                continue
+            if normalize_horse_name(e.horse_name or "") != normalize_horse_name(r.horse_name):
+                conflict(p, "horse", e.horse_name, label, r.horse_name)
+            if r.morning_line is not None and not _ml_equal(e.morning_line, r.morning_line):
+                conflict(p, "morning_line", e.morning_line, label, r.morning_line)
+            if r.scratched != (not e.is_active):
+                conflict(p, "scratched", not e.is_active, label, r.scratched)
     active = sum(1 for e in card.entries if e.is_active)
     if basic is not None and active != sum(1 for r in basic.rows if not r.scratched):
         out.errors.append("active runner count differs between DK Advanced and DK Basic")
@@ -236,13 +255,20 @@ def parse_race_bundle(
             race_stats = parse_race_stats(body("race_stats"))
         except RaceStatsError as exc:
             errors.append(f"RACE STATS block is malformed (remove the block to import without it): {exc}")
+    ts_tabs: dict[str, TwinSpiresTab] = {}
+    for kind in TAB_KINDS:
+        if kind in sections:
+            try:
+                ts_tabs[kind] = parse_twinspires_tab(body(kind), kind)
+            except TwinSpiresTabError as exc:
+                errors.append(f"TwinSpires {TAB_SPECS[kind]['title']} tab is malformed (remove the tab to import without it): {exc}")
     ts_text = body("twinspires") if "twinspires" in sections else ""
     ts = (
         parse_twinspires_markdown(
             ts_text.encode("utf-8"), source_filename=source_path, declared_as_of=captured_at.isoformat(),
         ) if ts_text else None
     )
-    recon = reconcile_bundle(card, basic, ts)   # merges Basic weights before validation
+    recon = reconcile_bundle(card, basic, ts, ts_tabs)   # merges Basic weights before validation
     race = card.race
     track_code = resolve_track(track_name=race.track or "").get("track_code")
     post_utc, post_source = post_time_to_utc(
@@ -272,5 +298,5 @@ def parse_race_bundle(
         reconciliation=recon, sections=sections,
         bundle_sha256=hashlib.sha256(text.encode("utf-8")).hexdigest(),
         captured_at=captured_at, post_utc=post_utc, post_source=post_source, late_capture=late,
-        race_stats=race_stats,
+        race_stats=race_stats, ts_tabs=ts_tabs,
     )

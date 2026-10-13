@@ -12,10 +12,11 @@ import re
 from datetime import datetime, timezone
 from pathlib import Path
 
+from src.derbyedge.odds_math import morningline_to_decimal
 from src.utils.source_file_guard import stamp_source, warn_if_outside_fixtures
 
 
-PARSER_VERSION = "twinspires_markdown_speed_power_style/1.1.0"
+PARSER_VERSION = "twinspires_markdown_speed_power_style/1.2.0"
 _STYLE = re.compile(r"^(E/P|E|P|S|NA)(\d+)$", re.I)
 # TwinSpires prints an editorial tag above some runners' names ("expert 1st pick"); it is not part of the name.
 _TAG = re.compile(r"^expert\s+\w+\s+pick$", re.I)
@@ -46,6 +47,10 @@ class TwinSpiresRecord:
     early_speed_points: int | None = None
     current_odds: str | None = None
     morning_line: str | None = None
+    # BRIS Profit Line (computer-modelled fair odds): the cell after the morning line.  Kept as printed ('7/2', 'Even',
+    # '20') beside decimal odds; an external benchmark for shadow comparison, not a market price.
+    profit_line: str | None = None
+    profit_line_decimal: float | None = None
 
 
 @dataclasses.dataclass(frozen=True)
@@ -122,6 +127,8 @@ def _record_from_chunk(program: str, lines: list[str]) -> TwinSpiresRecord | Non
         return None
     # The preceding cell is DAYS; the horse-name cell is immediately before it.
     horse_name = lines[style_at - 2]
+    # Row layout: odds, "M: x", PL, [expert tag], runner.  "-" (no line made) is kept as None, never as 0.
+    profit_line = lines[2] if style_at - 2 > 2 and not _TAG.match(lines[2]) and lines[2] != "-" else None
     # The eight cells after the style code have a fixed documented order.
     cells = lines[style_at + 1:style_at + 9]
     if any(cell not in ("-", "") and _number(cell) is None for cell in cells[:5]):
@@ -142,6 +149,7 @@ def _record_from_chunk(program: str, lines: list[str]) -> TwinSpiresRecord | Non
         early_speed_points=int(_STYLE.fullmatch(lines[style_at]).group(2)),
         current_odds=lines[0],
         morning_line=_ml_cell(lines[1]) if len(lines) > 1 else None,
+        profit_line=profit_line, profit_line_decimal=morningline_to_decimal(profit_line),
     )
 
 

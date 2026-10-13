@@ -2954,6 +2954,8 @@ with tab5:
                         st.info(
                             f"Race bundle: TwinSpires {_p5_extras.twinspires_status} · "
                             f"RACE STATS {_p5_extras.race_stats_status} · "
+                            f"Speed/Class/Pace tabs "
+                            f"{', '.join(f'{k[3:]} {v}' for k, v in sorted(_p5_extras.ts_tab_status.items())) or 'NOT_PRESENT'} · "
                             f"market snapshot {_p5_extras.market_snapshot_status}"
                         )
                         for _p5_bundle_warning in (
