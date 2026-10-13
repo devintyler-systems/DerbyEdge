@@ -390,3 +390,21 @@ def test_mnr_r5_jockey_with_no_starts_does_not_leak_his_record_into_the_trainer(
     by_program = {e.program_number: e for e in bundle.card.entries}
     assert (by_program["7"].jockey, by_program["7"].trainer) == ("Reynaldo Dumont", "Juan C. Vazquez")
     assert by_program["2"].jockey == "Luis Alberto Batista"   # leading "*" (apprentice) is stripped
+
+
+def test_a_past_start_as_a_coupled_entry_with_a_lettered_program_is_not_an_incomplete_row():
+    """MNR R8 10-12 was blocked by 'materially incomplete PP row for Sneads: missing finish position': in one past race
+    the PRG column printed '1A (9)' (a coupled entry), and the row pattern only accepted digits there."""
+    fixture = ROOT / "tests" / "fixtures" / "MNR_Full_Race_Data_R5_10-12-26.md"
+    text = fixture.read_text(encoding="utf-8")
+    old = "AW-Fast\t1\t22\t6\t24\tAlencarW"             # Prussian Blue's most recent start
+    assert old in text
+    bundle = parse_race_bundle(
+        text.replace(old, "AW-Fast\t1A (9)\t22\t6\t24\tAlencarW", 1), source_path=fixture.name,
+        as_of=datetime(2026, 10, 13, 0, 32, tzinfo=timezone.utc),
+        captured_at=datetime(2026, 10, 13, 0, 32, 35, tzinfo=timezone.utc),
+    )
+    assert bundle.validation.passed and not bundle.validation.errors
+    row = next(p for p in bundle.card.past_performances if p.raw_text.endswith("1A (9) 22 6 24 AlencarW Trailed, outrun"))
+    assert (row.program_or_post, row.odds, row.finish_position, row.beaten_lengths, row.jockey) == \
+        ("1A (9)", "22", 6, "24", "AlencarW")

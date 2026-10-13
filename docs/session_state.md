@@ -27,10 +27,10 @@ shortcut (runs `start_derbyedge.bat`). 57 older races lack a post time (`AS_OF_U
   `docs/bet_picks.md`); stored pre-post in `bet_picks`, track record under the picks (hit rate vs expected, return at stored chart payoffs + CI, INSUFFICIENT <30), longshot warning; Results Import itself stores no place/show payoffs.
   Fixed a gate leak: the results page graded stored BET tags the board never showed (CT R10 "BET 1, ROI -100%"); withheld now. Thresholds untuned.
 ## RACE STATS / bundle
-Optional bundle block, strict parser, stored raw + parsed in `twinspires_race_stats`, not scored; confirmed on card 75 (post-race TEST row).
-A malformed block or one contradicting the DK card blocks the import. One sample only (BEL); bias samples tiny. `track_bias`/`trip_flags` empty.
+Optional bundle block, strict parser, stored raw + parsed in `twinspires_race_stats`, not scored; confirmed on card 75. A malformed block or one contradicting the DK card blocks the import. One sample only (BEL); bias samples tiny. `track_bias`/`trip_flags` empty.
 ## Open
-- TwinSpires SPEED/CLASS/PACE tabs captured (optional bundle sections, strict parse, `twinspires_tab_stats`, not scored) + Profit Line parsed on the summary tab. Format: `docs/race_bundle_format.md`. NA-style runners are stored as printed; `twinspires_pace_for_card` still drops pace for a whole race when any starter has no E/E/P/P/S style (fail-closed, unchanged; matters for maidens with first-timers).
+- MNR R8 10-12 blocked by a PP row whose PRG cell was `1A (9)` (coupled entry in a past race): fixed in the PP row pattern (letter after the program). Not yet merged.
+- TwinSpires SPEED/CLASS/PACE tabs + Profit Line captured (merged, PR #49; verified live on MNR R7; `docs/race_bundle_format.md`). NA-style runners stored as printed; `twinspires_pace_for_card` still drops pace for the whole race if any starter has no E/E-P/P/S style (MNR R7: 3 of 5 NA -> no pace). Count how often before deciding.
 - Basic grid weight cell accepts a leading `*` (first-time Lasix, `*L121`; KEE R9 10-11 was blocked by it). CT R7 10-10 race_results had the on-track order for a DQ'd horse (Results Import); overwritten from the chart with `scripts/ingest_results_charts.py --populate --replace` (path that stores on-track order for DQs not yet fixed). 18 older GP charts fail the chart parser (not blocking).
 - Pasting caution: DK and TwinSpires tabs auto-advance to the next race. Bare `ALLOWANCE` (no `$`) leaves `race_class` NULL (no scoring effect).
 - Results Import rejected a real Equibase chart for a stakes race whose title has the sponsor ("West Virginia 1/ST BET Breeders Classic") as a
