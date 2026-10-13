@@ -26,7 +26,6 @@ shortcut (runs `start_derbyedge.bat`). 57 older races lack a post time (`AS_OF_U
 - **Bet-type picks (this branch):** Race Board shows WIN/PLACE/SHOW picks labelled PRE-THRESHOLD with break-even $ per $2 (`src/services/bet_picks.py`,
   `docs/bet_picks.md`); stored pre-post in `bet_picks`, track record under the picks (hit rate vs expected, return at stored chart payoffs + CI, INSUFFICIENT <30), longshot warning; Results Import itself stores no place/show payoffs.
   Fixed a gate leak: the results page graded stored BET tags the board never showed (CT R10 "BET 1, ROI -100%"); withheld now. Thresholds untuned.
-- Next lever is data: full bundle pre-post every race; measure the diagnostic cohort; add inputs one at a time. Calibration needs outcomes.
 ## RACE STATS / bundle
 Optional bundle block, strict parser, stored raw + parsed in `twinspires_race_stats`, not scored; confirmed on card 75 (post-race TEST row).
 A malformed block or one contradicting the DK card blocks the import. One sample only (BEL); bias samples tiny. `track_bias`/`trip_flags` empty.
@@ -38,4 +37,4 @@ A malformed block or one contradicting the DK card blocks the import. One sample
   "1/ST BET pre-race card": fixed (a chart's own structure now wins; real 1/ST BET pages are still rejected). Unverified on the user's actual PDF.
 - Issue #30 (explain LOW-confidence BET suppression): parked until real probabilities + live odds coexist. Race Board `Sum win prob 0.0000` still reads the gated column.
 - Not built: real-bet log (DK slips), place/show payoff capture from the chart PDF, multi-user. Not handled: dead heats.
-## Next move: a live race uploaded before post with its RACE STATS block, then read the `status` diagnostic cohort as the baseline.
+## Next move: a live race uploaded before post with its RACE STATS block, then read the `status` diagnostic cohort. Next lever is data: add inputs one at a time.
