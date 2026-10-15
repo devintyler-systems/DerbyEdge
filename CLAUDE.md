@@ -14,6 +14,7 @@ Python 3.11, SQLite (`db/derbyedge.db`, gitignored; schema `db/schema.sql`), Str
 - `src/ingest/` parsers (DK markdown, TwinSpires, race bundle, Equibase charts); `src/services/` intake, evidence status, paper trading, walk-forward
 - `src/models/` scorer, trainer, policy, confidence; `src/features/` feature builder; `src/derbyedge/` tracks, odds math
 - `training/` CLIs: `python -m training.status | walk_forward | paper_trading | daily_cycle`; `scripts/` ingest and migration tools
+- Away from the user's PC: `python scripts/race_board_cli.py <bundle.md>` prints the gated Race Board from a throwaway DB (`docs/race_board_cli.md`); never saved, never evidence.
 - Docs: `docs/race_bundle_format.md`, `chart_parser.md`, `walk_forward.md`, `paper_trading.md`, `play_day_checklist.md`
 - The user launches the app from the desktop **DerbyEdge** shortcut, which runs `start_derbyedge.bat` (Windows, `C:\Projects\derbyedge-engine`).
 
