@@ -1,8 +1,11 @@
+import os
 import sqlite3
 from pathlib import Path
 
 ROOT        = Path(__file__).resolve().parents[2]
-DB_PATH     = ROOT / "db" / "derbyedge.db"
+# DERBYEDGE_DB points the whole pipeline (app, build_features.py, score.py) at another database file.  It exists for
+# throwaway runs (scripts/race_board_cli.py); unset, the real db/derbyedge.db is used exactly as before.
+DB_PATH     = Path(os.environ["DERBYEDGE_DB"]) if os.environ.get("DERBYEDGE_DB") else ROOT / "db" / "derbyedge.db"
 SCHEMA_PATH = ROOT / "db" / "schema.sql"
 
 
