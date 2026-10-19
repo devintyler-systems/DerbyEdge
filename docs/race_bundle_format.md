@@ -36,7 +36,7 @@ An optional fourth block, the TwinSpires **RACE STATS** panel, may be pasted any
   warns `NO_PP_HISTORY: <program> <name> (DK: no details available)`. Their history features are empty, so the stored forecast for them
   rests on defaults: the Race Board and `race_board_cli.py` label them `NO PP HISTORY` (signal: `feature_store.dk_history_start_count` is
   0, `src/services/no_history.py`), and any pre-threshold pick on one carries the warning `NO PP HISTORY (default-driven)`. Selection and
-  scoring are unchanged: this labels the evidence, it does not add any. The TwinSpires tabs print `0` for such a runner's figures; they are
+  scoring are unchanged: this labels the evidence, it does not add any. `No details available.` does **not** mean a first-time starter: IND R9's two such runners show $12K and $20K earnings on the TwinSpires summary, so they have raced and DraftKings simply had no record for them. A true debut has no earnings. The existing starter-to-PP match-rate prerequisite (90%) still blocks a card where too many starters have no PPs. The TwinSpires tabs print `0` for such a runner's figures; they are
   stored as printed.
 
 ## Optional: TwinSpires SPEED, CLASS and PACE tabs

@@ -4702,8 +4702,10 @@ with tab8:
                                                    min_value=1, step=1)
                 with _fe2:
                     _ed_surface  = st.selectbox("Surface", _SURFACES, index=_surf_idx)
-                    _ed_dist     = st.number_input("Distance (furlongs)", value=_dist_f_cur,
-                                                   min_value=2.0, max_value=20.0, step=0.5, format="%.1f")
+                    # Two decimals and a 1.0 F floor: a 400-yard Quarter Horse card is 1.82 F, and rounding it to 1.8 would
+                    # rewrite its distance to 396 yards on save.
+                    _ed_dist     = st.number_input("Distance (furlongs)", value=max(_dist_f_cur, 1.0),
+                                                   min_value=1.0, max_value=20.0, step=0.5, format="%.2f")
                     _ed_class    = st.text_input("Race class",       value=_adm.get("race_class") or "")
                     _ed_stakes   = st.text_input("Stakes name",      value=_adm.get("stakes_name") or "")
                 _ff1, _ff2 = st.columns(2)

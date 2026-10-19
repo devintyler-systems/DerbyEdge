@@ -124,3 +124,14 @@ def test_the_board_cli_labels_a_runner_with_no_history(tmp_path):
     assert "NO PP HISTORY: Pasta Salad Rhonda." in r.stdout
     row = next(ln for ln in r.stdout.splitlines() if "| Pasta Salad Rhonda" in ln)
     assert row.rstrip().endswith("NONE |")
+
+
+def test_the_admin_race_edit_distance_box_accepts_a_yard_distance_and_does_not_round_it_away():
+    """IND R9 (400 Y = 1.82 F) crashed the Admin tab: StreamlitValueBelowMinError, value 1.82 below min_value 2.0.
+    The box also formatted to one decimal, so saving would have rewritten 400 yards to 396. A source guard (the Streamlit script
+    cannot be imported in a test)."""
+    import re
+    src = (ROOT / "src" / "app" / "app.py").read_text(encoding="utf-8")
+    box = re.search(r'st\.number_input\("Distance \(furlongs\)".*?format="[^"]*"\)', src, re.S).group(0)
+    assert float(re.search(r"min_value=([\d.]+)", box).group(1)) <= 1.0
+    assert 'format="%.2f"' in box
