@@ -84,6 +84,7 @@ def main(argv: list[str] | None = None) -> int:
     import pandas as pd
     from src.app.race_import import RaceImportDispatchError, dispatch_primary_race_card_import, markdown_import_summary
     from src.services import bet_picks as bp
+    from src.services.no_history import NO_HISTORY_NOTE, no_history_entry_ids
     from src.services.draftkings_markdown_intake import markdown_card_score_readiness, persist_validated_draftkings_markdown
     from src.services.race_bundle_intake import persist_race_bundle_extras
     from src.services.score_delivery import contain_ineligible_board
@@ -157,7 +158,7 @@ def main(argv: list[str] | None = None) -> int:
     if not ready.score_eligible:
         print("NOT SCORED — the card is not score-eligible:")
         for blocker in ready.blockers:
-            print(f"  • {blocker}")
+            print(f"  • {blocker.message}")
         return 3
     for script in ("build_features.py", "score.py"):
         ok, out = _step(script, card_id, env)
@@ -185,6 +186,9 @@ def main(argv: list[str] | None = None) -> int:
         print(f"Pace: {state.replace('PACE_', '')} — {f0.get('classified_runner_count')}/{f0.get('active_runner_count')} classified"
               + (f" — {f0.get('pace_band')} pressure" if state == "PACE_READY" else
                  "; unknown runners have no pace fit" if state == "PACE_PARTIAL" else "; pace excluded from the forecast"))
+    no_history = no_history_entry_ids(feats)
+    pp_counts = ({int(e): (None if pd.isna(c) else int(c)) for e, c in zip(feats["entry_id"], feats["dk_history_start_count"])}
+                 if not feats.empty and "dk_history_start_count" in feats.columns else {})
     valid_win = pd.to_numeric(board.get("win_probability"), errors="coerce").notna().any()
     print("\n" + ("FORECAST" if valid_win else "DIAGNOSTIC FORECAST — NOT VALID FOR BETTING")
           + ("" if valid_win else ": the stored model probabilities of an uncalibrated seed baseline. The eligibility gate withholds "
@@ -202,9 +206,14 @@ def main(argv: list[str] | None = None) -> int:
         score = r.get("confidence_score")
         conf = "—" if pd.isna(score) else (
             f"{'LOW' if float(score) < LOW_THRESHOLD else 'MEDIUM' if float(score) < HIGH_THRESHOLD else 'HIGH'} ({float(score):.2f})")
+        n_pp = pp_counts.get(int(r["entry_id"]))
         rows.append([int(r["rank"]), r["horse_name"], int(r["post_position"]), _ml(r.get("morning_line_odds")),
-                     _pct(diag), _pct(ml_imp), diff, conf])
-    print(_table(["Rank", "Horse", "Post", "ML", "Diagnostic Win %", "ML-implied %", "Diff (pts)", "Confidence"], rows))
+                     _pct(diag), _pct(ml_imp), diff, conf,
+                     "NONE" if int(r["entry_id"]) in no_history else ("—" if n_pp is None else n_pp)])
+    print(_table(["Rank", "Horse", "Post", "ML", "Diagnostic Win %", "ML-implied %", "Diff (pts)", "Confidence", "PPs"], rows))
+    nh_names = [r[1] for r in rows if r[8] == "NONE"]
+    if nh_names:
+        print(f"NO PP HISTORY: {', '.join(nh_names)}. {NO_HISTORY_NOTE}.")
     low = [r[1] for r in rows if str(r[7]).startswith("LOW")]
     if low:
         print(f"Low confidence (score < {LOW_THRESHOLD}): {len(low)} of {len(rows)} entries")
@@ -215,7 +224,7 @@ def main(argv: list[str] | None = None) -> int:
           "type, so none of this is proven. Model probability, break-even payout per $2 and the morning-line price are shown side "
           "by side for your own judgment; each is unvalidated. No stake is computed, and none of this is a recommended wager.")
     allowed = bp.picks_allowed(board, run["model_type"])
-    runners = bp.runners_from_board(board) if allowed else []
+    runners = bp.runners_from_board(board, no_history) if allowed else []
     picks = bp.recommend_picks(runners)
     source = bp.forecast_source(runners)
     if not allowed:

@@ -31,6 +31,11 @@ def parse_furlongs(raw: Optional[str]) -> Optional[float]:
     s = s.replace(" ", " ").replace("½", " 1/2")
     s = re.sub(r"\s+", " ", s).upper()
 
+    # Yards alone ("400 Y", Quarter Horse distances): 220 yards to the furlong.  "1m 70 Y" is not matched here.
+    m = re.fullmatch(r"(\d{2,4}) ?Y(?:ARDS?)?", s)
+    if m:
+        return int(m.group(1)) / 220.0
+
     # Integer-fraction furlongs: "4 1/2F", "4 1/2 FURLONGS"
     m = re.search(r"(?<!\d)(\d+)\s+1/2\s*(?:FURLONGS?|F\b)", s)
     if m:

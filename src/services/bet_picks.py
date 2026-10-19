@@ -149,6 +149,7 @@ def recommend_picks(runners: list[dict]) -> list[dict]:
             "entry_id": int(r["entry_id"]), "horse_name": r["horse_name"], "post_position": r.get("post_position"),
             "bet_types": types, "label": "+".join(types), "source": ENGINE_FORECAST,
             "morning_line": _finite(r.get("morning_line")), "longshot_warning": longshot, "best_lead": best_lead,
+            "no_history": bool(r.get("no_history")),
             "legs": {t: {"model_prob": probs[t][0], "market_prob": probs[t][1],
                          "lead_over_ml": probs[t][0] - probs[t][1], "breakeven_payout": BASE_STAKE / probs[t][0]}
                      for t in types},
@@ -157,8 +158,11 @@ def recommend_picks(runners: list[dict]) -> list[dict]:
     return picks[:MAX_PICKS]
 
 
-def runners_from_board(board) -> list[dict]:
-    """Runner dicts from the Race Board frame: the valid Win % when present, else the stored diagnostic one."""
+def runners_from_board(board, no_history_ids=()) -> list[dict]:
+    """Runner dicts from the Race Board frame: the valid Win % when present, else the stored diagnostic one.
+
+    ``no_history_ids``: entry ids with no past performances; they stay eligible but each pick carries a warning."""
+    no_history = {int(i) for i in no_history_ids}
     out = []
     for _, row in board.iterrows():
         win = _finite(row.get("win_probability"))
@@ -167,7 +171,8 @@ def runners_from_board(board) -> list[dict]:
         out.append({"entry_id": row["entry_id"], "horse_name": row["horse_name"],
                     "post_position": row.get("post_position"), "model_win": win,
                     "morning_line": _finite(row.get("morning_line_odds")),
-                    "market_win": _finite(row.get("market_implied_prob"))})
+                    "market_win": _finite(row.get("market_implied_prob")),
+                    "no_history": int(row["entry_id"]) in no_history})
     return out
 
 
@@ -188,7 +193,9 @@ def picks_frame(picks: list[dict]):
             **{f"{t}: model / ML-implied": (f"{p['legs'][t]['model_prob'] * 100:.0f}% / {p['legs'][t]['market_prob'] * 100:.0f}%"
                                             if t in p["legs"] else "—") for t in BET_TYPES},
             "Break-even payout per $2": " · ".join(f"{t} ≥ ${p['legs'][t]['breakeven_payout']:.2f}" for t in p["bet_types"]),
-            "Warning": "LONGSHOT (model > 2x market)" if p.get("longshot_warning") else "",
+            "Warning": " · ".join(w for w in (
+                "LONGSHOT (model > 2x market)" if p.get("longshot_warning") else "",
+                "NO PP HISTORY (default-driven)" if p.get("no_history") else "") if w),
             "Source": "engine forecast (pre-threshold)" if p.get("source") == ENGINE_FORECAST else "morning-line baseline",
         })
     return pd.DataFrame(rows)

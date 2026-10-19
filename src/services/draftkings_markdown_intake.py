@@ -17,6 +17,7 @@ from typing import Any
 
 from src.derbyedge.tracks import resolve_track
 from src.ingest.draftkings_markdown import (
+    SCOPE_QUARTER_HORSE,
     DraftKingsMarkdownCard,
     ValidationResult,
     parse_draftkings_markdown,
@@ -607,11 +608,18 @@ def _workout_count(conn: sqlite3.Connection, card_id: int) -> int:
     ).fetchone()[0])
 
 
+def _warnings_of(validation_json: str | None) -> list[str]:
+    try:
+        return list(json.loads(validation_json or "{}").get("warnings") or [])
+    except (TypeError, ValueError):
+        return []
+
+
 def markdown_card_score_readiness(conn: sqlite3.Connection, card_id: int) -> MarkdownCardScoreReadiness:
     """Return visible, input-specific blockers before feature build or scoring."""
     ensure_draftkings_markdown_intake_tables(conn)
     provenance = conn.execute(
-        """SELECT validation_status, parsed_runner_count FROM dk_markdown_imports
+        """SELECT validation_status, parsed_runner_count, validation_json FROM dk_markdown_imports
            WHERE card_id=? ORDER BY import_id DESC LIMIT 1""", (card_id,)
     ).fetchone()
     blockers: list[ScoreReadinessBlocker] = []
@@ -620,6 +628,11 @@ def markdown_card_score_readiness(conn: sqlite3.Connection, card_id: int) -> Mar
         blockers.append(ScoreReadinessBlocker("MISSING_MARKDOWN_PROVENANCE", "Cannot score: no validated Markdown import is linked to this card."))
     elif provenance[0] != "PASS":
         blockers.append(ScoreReadinessBlocker("MARKDOWN_VALIDATION_FAILED", "Cannot score: latest Markdown import did not pass validation."))
+    if provenance and any(str(w).startswith(SCOPE_QUARTER_HORSE) for w in _warnings_of(provenance[2])):
+        blockers.append(ScoreReadinessBlocker(
+            "OUT_OF_SCOPE_QUARTER_HORSE",
+            "Cannot score: this is a Quarter Horse race (distance printed in yards). The model is thoroughbred-only and "
+            "a score would be pooled with thoroughbred evidence; the card is kept for the record."))
     active = _active_entry_count(conn, card_id)
     if expected and active != expected:
         blockers.append(ScoreReadinessBlocker("RUNNER_COUNT_MISMATCH", f"Cannot score: persisted active runners={active}; validated runners={expected}."))
