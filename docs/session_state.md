@@ -29,12 +29,12 @@ shortcut (runs `start_derbyedge.bat`). 57 older races lack a post time (`AS_OF_U
 ## RACE STATS / bundle
 Optional bundle block, strict parser, stored raw + parsed in `twinspires_race_stats`, not scored; confirmed on card 75. A malformed block or one contradicting the DK card blocks the import. One sample only (BEL); bias samples tiny. `track_bias`/`trip_flags` empty.
 ## Open
-- `scripts/race_board_cli.py`: headless gated Race Board for runs away from the PC (throwaway DB via `DERBYEDGE_DB`; docs/race_board_cli.md). Not merged yet.
+- IND R9 10-19 (Quarter Horse, `400 Y`) failed on yard distances: now read; yards-only races import but are NOT scored (thoroughbred-only model); no-PP-history runners are labelled on the board/CLI/picks. Not merged yet.
+- `scripts/race_board_cli.py` (merged, PR #52): headless gated Race Board for runs away from the PC (throwaway DB via `DERBYEDGE_DB`; docs/race_board_cli.md).
 - MNR R8 10-12 blocked by a PP row whose PRG cell was `1A (9)` (coupled entry in a past race): fixed in the PP row pattern (letter after the program). Not yet merged.
 - SA R10 10-12 Results Import silently dropped Wild West End (a chart row with `---` in Last Raced = first-time starter), gave Psalm 9th (really 10th), then back-filled the horse that ran as scratched. Fixed: `---` rows read, an unreadable chart row now fails the import loudly, a real finisher clears a wrong scratch flag. Maiden-race charts imported before this fix may carry the same fault: unaudited. Not yet merged.
 - TwinSpires SPEED/CLASS/PACE tabs + Profit Line captured (merged, PR #49; verified live on MNR R7; `docs/race_bundle_format.md`). NA-style runners stored as printed; `twinspires_pace_for_card` still drops pace for the whole race if any starter has no E/E-P/P/S style (MNR R7: 3 of 5 NA -> no pace). Count how often before deciding.
-- Basic grid weight cell accepts a leading `*` (first-time Lasix, `*L121`; KEE R9 10-11 was blocked by it). CT R7 10-10 race_results had the on-track order for a DQ'd horse (Results Import); overwritten from the chart with `scripts/ingest_results_charts.py --populate --replace` (path that stores on-track order for DQs not yet fixed). 18 older GP charts fail the chart parser (not blocking).
-- Results Import once rejected a real Equibase stakes chart whose sponsor title read as a "1/ST BET pre-race card": fixed (a chart's own structure wins). Unverified on the user's actual PDF.
-- Issue #30 (LOW-confidence BET suppression) parked until real probabilities + live odds coexist; Race Board `Sum win prob 0.0000` still reads the gated column.
+- Basic grid weight cell accepts a leading `*` (`*L121`, fixed). CT R7 10-10 DQ on-track order: overwrite from the chart with `scripts/ingest_results_charts.py --populate --replace` (DQ path not yet fixed). 18 older GP charts fail the chart parser (not blocking).
+- Issue #30 (LOW-confidence BET suppression) parked; Race Board `Sum win prob 0.0000` still reads the gated column.
 - Not built: real-bet log (DK slips), place/show payoff capture from the chart PDF, multi-user. Not handled: dead heats.
 ## Next move: live races uploaded before post with RACE STATS + the 3 tabs (tabs auto-advance races: check each), then read the `status` diagnostic cohort. Next lever is data.

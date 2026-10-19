@@ -47,6 +47,10 @@ _DMR_IDENTITY_RE = re.compile(
 _PCT_RECORD_RE = re.compile(r"^(?:\d{1,3}\s*%|\d+\s*-\s*\d+\s*-\s*\d+\s*-\s*\d+\s*$)")
 _MTP_RE = re.compile(r"(?mi)^\s*(?:(\d{1,3})\s*)?MTP\s*$")
 _SCRATCH_TOKENS = frozenset({"SCR", "SCRATCH", "SCRATCHED"})
+# Warning prefixes other code keys on (readiness gate, board labels): keep the spelling in one place.
+SCOPE_QUARTER_HORSE = "SCOPE_QUARTER_HORSE"
+NO_PP_HISTORY = "NO_PP_HISTORY"
+_YARDS_ONLY_DISTANCE = re.compile(r"^\d{2,4}\s*Y$", re.I)
 _SEX_WORDS = frozenset({
     "colt", "filly", "gelding", "horse", "mare", "ridgling", "rig", "rigling",
 })
@@ -315,7 +319,8 @@ def _metadata(raw: str, source_path: str) -> Race:
     lines = [line for line in lines if line]
     race_match = re.search(r"\bRACE\s+(\d+)\b", header, re.I)
     purse_match = re.search(r"Purse:\s*\$([\d,.]+)K?", header, re.I)
-    distance_match = re.search(r"(?m)^\s*(\d+(?:\s+\d+/\d+)?\s*[MF])\s*$", header, re.I)
+    # Furlongs / miles ("5 1/2 F", "1 M"), or yards alone ("400 Y": Quarter Horse distances).
+    distance_match = re.search(r"(?m)^\s*(\d+(?:\s+\d+/\d+)?\s*[MF]|\d{2,4}\s*Y)\s*$", header, re.I)
     surface_match = re.search(r"(?m)^\s*([A-Za-z.]+):\s*([A-Za-z ]+)\s*$", header)
     # Some cards show the surface alone, with no track condition ("Synthetic").
     bare_surface = None if surface_match else re.search(
@@ -556,7 +561,7 @@ def _parse_history(entry: Entry, block: str) -> tuple[list[PastPerformance], lis
     for work_date, lines in _dated_blocks(workout_section):
         joined = " ".join(lines)
         match = re.search(
-            r"(\d+\s*[FM])\s+([A-Za-z.]+-[A-Za-z]+(?:\s+[A-Za-z]+)?)\s+"
+            r"(\d+\s*[FM]|\d{2,4}\s*Y)\s+([A-Za-z.]+-[A-Za-z]+(?:\s+[A-Za-z]+)?)\s+"
             r"(\d{1,2}:\d{2}\.\d+|\d{2}\.\d+)\s*(?:[A-Za-z]+)?\s*(.*)$", joined, re.I,
         )
         time_text = _clean(match.group(3)) if match else None
@@ -945,6 +950,21 @@ def validate_draftkings_markdown_card(card: DraftKingsMarkdownCard) -> Validatio
                 errors.append(f"entry {entry.program_number or '?'} missing required {label}")
         if entry.is_active and (entry.horse_profile.sire is None or entry.horse_profile.dam is None):
             warnings.append(f"entry {entry.program_number or '?'} has optional pedigree fields unavailable")
+    # A distance printed in yards alone ("400 Y") is a Quarter Horse race, outside the thoroughbred model's scope.
+    if race.distance and _YARDS_ONLY_DISTANCE.match(race.distance.strip()):
+        warnings.append(
+            f"{SCOPE_QUARTER_HORSE}: the distance is printed in yards ({race.distance.strip()}), which marks a Quarter Horse race; "
+            "it is imported for the record but not scored, because the model is thoroughbred-only and a score would be pooled with "
+            "thoroughbred evidence")
+    # Starters with no past performances at all: first-time starters, or DraftKings printed "No details available.".
+    with_history = {row.horse_name for row in card.past_performances}
+    no_history = [e for e in card.entries if e.is_active and e.horse_name not in with_history]
+    if no_history:
+        warnings.append(
+            f"{NO_PP_HISTORY}: " + "; ".join(
+                f"{e.program_number} {e.horse_name}" + (" (DK: no details available)" if "No details available" in (e.raw_block or "") else "")
+                for e in no_history)
+            + " have no past performances (first-time starters or no data); their forecast rests on defaults")
     for row in card.past_performances:
         missing = [label for label, value in (("date", row.start_date), ("race track", row.track), ("distance", row.distance), ("surface-condition", row.surface_condition), ("finish position", row.finish_position), ("class", row.race_class)) if value is None or value == ""]
         if missing:

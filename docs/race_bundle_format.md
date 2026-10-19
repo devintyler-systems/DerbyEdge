@@ -23,6 +23,22 @@ An optional fourth block, the TwinSpires **RACE STATS** panel, may be pasted any
 * Scratches, also-eligibles (`AE…`) and main-track-only (`MTO…`) entries are kept but are not starters;
   `field_size` and runner counts are starters only. The `AE`/`MTO` label spelling is UNVERIFIED against a real DK export.
 
+## Yard distances (Quarter Horse races) and runners with no past performances
+
+* **Distances in yards.** The race header (`400 Y`) and workout rows (`220 Y`) are read; yards convert at 220 to the furlong
+  (`parse_furlongs("400 Y")` = 1.82 F). `1m 70 Y` is unchanged (a mile).
+* **A yards-only race distance marks a Quarter Horse race.** It imports (validation PASS, kept for the record) with a
+  `SCOPE_QUARTER_HORSE` warning, but **scoring is blocked** (`OUT_OF_SCOPE_QUARTER_HORSE` in `markdown_card_score_readiness`, so the
+  app, auto-score and `scripts/race_board_cli.py` all stop): the model is thoroughbred-only, and a score would be pooled with
+  thoroughbred evidence (the model family would read 1.82 F as `dirt_sprint`). Quarter Horse support needs its own model and outcome
+  data. A thoroughbred 2 F race prints `2 F`, so it is unaffected. UNVERIFIED beyond IND R9 10-19-26.
+* **Starters with no past performances** (first-time starters, or DraftKings printed `No details available.`) are not errors. The import
+  warns `NO_PP_HISTORY: <program> <name> (DK: no details available)`. Their history features are empty, so the stored forecast for them
+  rests on defaults: the Race Board and `race_board_cli.py` label them `NO PP HISTORY` (signal: `feature_store.dk_history_start_count` is
+  0, `src/services/no_history.py`), and any pre-threshold pick on one carries the warning `NO PP HISTORY (default-driven)`. Selection and
+  scoring are unchanged: this labels the evidence, it does not add any. The TwinSpires tabs print `0` for such a runner's figures; they are
+  stored as printed.
+
 ## Optional: TwinSpires SPEED, CLASS and PACE tabs
 
 Three more TwinSpires program tabs (BRIS figures with ranks) can be pasted into the same file. Sample:

@@ -86,6 +86,7 @@ from src.models.trainer import (
 )
 from src.services.run_mode import CardRunState, get_card_run_state
 from src.services.score_delivery import contain_ineligible_board
+from src.services.no_history import NO_HISTORY_NOTE, no_history_entry_ids
 from src.services.feature_lineage import (
     entry_details_feature_status_rows,
     model_diagnostics_feature_status_rows,
@@ -1848,9 +1849,15 @@ with tab1:
                 },
             )
 
+        # ── Runners with no past performances (first-time starters / no data) ──
+        _nh_ids = no_history_entry_ids(feat_df)
+        _nh_names = [str(_r["horse_name"]) for _, _r in board_df.iterrows() if int(_r["entry_id"]) in _nh_ids]
+        if _nh_names:
+            st.warning(f"**NO PP HISTORY: {', '.join(_nh_names)}.** {NO_HISTORY_NOTE}.")
+
         # ── Pre-threshold picks (WIN / PLACE / SHOW) ───────────────────────────
         _pk_ok = _bp.picks_allowed(board_df, (meta or {}).get("model_type"))
-        _pk_runners = _bp.runners_from_board(board_df) if _pk_ok else []
+        _pk_runners = _bp.runners_from_board(board_df, _nh_ids) if _pk_ok else []
         _picks = _bp.recommend_picks(_pk_runners)
         _pk_source = _bp.forecast_source(_pk_runners)
         st.markdown("#### Bet-type picks")
