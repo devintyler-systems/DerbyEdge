@@ -71,6 +71,7 @@ def test_every_curated_track_has_a_timezone_and_every_zone_is_valid():
     ("PEN", "PEN"), ("Pimlico Race Course", "PIM"), ("Hawthorne", "HAW"),
     ("Horseshoe Indianapolis", "IND"), ("Indiana Downs", "IND"), ("Parx", "PRX"), ("PRX", "PRX"),
     ("Tampa Bay Downs", "TAM"), ("Kentucky Downs", "KD"), ("Lone Star Park", "LS"),
+    ("Keeneland Breeders Cup", "KEE"), ("Keeneland", "KEE"),
 ])
 def test_the_acceptance_aliases_resolve_to_one_code(text, code):
     assert resolve_track(track_name=text)["track_code"] == code

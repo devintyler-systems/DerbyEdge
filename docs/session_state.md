@@ -29,6 +29,7 @@ shortcut (runs `start_derbyedge.bat`). 57 older races lack a post time (`AS_OF_U
 ## RACE STATS / bundle
 Optional bundle block, strict parser, stored raw + parsed in `twinspires_race_stats`, not scored; confirmed on card 75. A malformed block or one contradicting the DK card blocks the import. One sample only (BEL); bias samples tiny. `track_bias`/`trip_flags` empty.
 ## Open
+- KEE R11 10-31 (Breeders' Cup day) header `Keeneland Breeders Cup` was not in the track registry: alias added (not merged). Its PP rows with missing distance/surface/finish (foreign starters?) are UNDIAGNOSED: need the file.
 - IND R9 10-19 (Quarter Horse, `400 Y`): yard distances read (merged, #53); yards-only races import but are NOT scored (thoroughbred-only); no-PP-history runners labelled. Admin race-edit distance box now allows 1.0 F+ (crash fix, not merged).
 - `scripts/race_board_cli.py` (merged, PR #52): headless gated Race Board for runs away from the PC (throwaway DB via `DERBYEDGE_DB`; docs/race_board_cli.md).
 - MNR R8 10-12 blocked by a PP row whose PRG cell was `1A (9)` (coupled entry in a past race): fixed in the PP row pattern (letter after the program). Not yet merged.
