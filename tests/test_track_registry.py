@@ -32,6 +32,14 @@ KNOWN_GAPS: set[str] = {
     "ASHWOOD TRAINING CENTER", "THREE DIAMONDS TRAINING CENTER", "DEAUVILLE", "SAINT CLOUD", "Dubai - Meydan",
     "DOUBLE M TRAINING CENTER", "NEW HORIZONS FARM",
 }
+# KEE_Full_Race_Data_R11_10-31-26.md (Breeders' Cup day) adds overseas past-performance venues (same rule: not the race track).
+KNOWN_GAPS |= {
+    "ASCOT", "BADEN BADEN", "CHANTILLY", "CHELMSFORD CITY", "CHESTER", "CHUKYO", "COMPIEGNE", "CURRAGH", "DOHA", "DONCASTER",
+    "EPSOM", "GOODWOOD", "GOWRAN PARK", "HANNOVER", "HANSHIN", "HAYDOCK PARK", "HOPPEGARTEN", "KEMPTON PARK", "KILLARNEY",
+    "KING ABDULAZIZ RACECOURSE", "KOKURA", "KOLN", "KYOTO", "LEOPARDSTOWN", "LIMERICK", "LINGFIELD", "LONGCHAMP", "MUNCHEN",
+    "NAKAYAMA", "NAVAN", "NEWBURY", "NEWCASTLE", "NEWMARKET", "NIIGATA", "ROSCOMMON", "ROYAL WINDSOR", "SAPPORO", "SHA TIN",
+    "SOUTHWELL", "THURLES", "TOKYO", "WOLVERHAMPTON", "YORK",
+}
 
 
 def _rows(name):
@@ -71,6 +79,7 @@ def test_every_curated_track_has_a_timezone_and_every_zone_is_valid():
     ("PEN", "PEN"), ("Pimlico Race Course", "PIM"), ("Hawthorne", "HAW"),
     ("Horseshoe Indianapolis", "IND"), ("Indiana Downs", "IND"), ("Parx", "PRX"), ("PRX", "PRX"),
     ("Tampa Bay Downs", "TAM"), ("Kentucky Downs", "KD"), ("Lone Star Park", "LS"),
+    ("Keeneland Breeders Cup", "KEE"), ("Keeneland", "KEE"),
 ])
 def test_the_acceptance_aliases_resolve_to_one_code(text, code):
     assert resolve_track(track_name=text)["track_code"] == code
