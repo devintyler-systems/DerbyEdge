@@ -50,6 +50,7 @@ _SCRATCH_TOKENS = frozenset({"SCR", "SCRATCH", "SCRATCHED"})
 # Warning prefixes other code keys on (readiness gate, board labels): keep the spelling in one place.
 SCOPE_QUARTER_HORSE = "SCOPE_QUARTER_HORSE"
 NO_PP_HISTORY = "NO_PP_HISTORY"
+PP_NO_DISTANCE = "PP_NO_DISTANCE"
 _YARDS_ONLY_DISTANCE = re.compile(r"^\d{2,4}\s*Y$", re.I)
 _SEX_WORDS = frozenset({
     "colt", "filly", "gelding", "horse", "mare", "ridgling", "rig", "rigling",
@@ -158,6 +159,9 @@ class PastPerformance:
     raw_odds: str | None = None
     raw_beaten_lengths: str | None = None
     raw_text: str | None = None
+    # True when the row has no distance cell at all (overseas starts DraftKings prints without one); the rest of the row
+    # was still read cell by cell.  Anything else with no distance is a malformed row.
+    distance_omitted_by_source: bool = False
 
 
 @dataclasses.dataclass
@@ -392,6 +396,49 @@ def _dated_blocks(section: str) -> list[tuple[date | None, list[str]]]:
     return rows
 
 
+def _raw_pp_rows(section: str) -> list[str | None]:
+    """The tab-separated data row of each dated PP block, in the same order as ``_dated_blocks``.
+
+    ``_clean`` flattens tabs, which loses which cell was blank; the raw row keeps it.  None when a block has no such row."""
+    out: list[str | None] = []
+    matches = list(DATE_RE.finditer(section))
+    for index, match in enumerate(matches):
+        end = matches[index + 1].start() if index + 1 < len(matches) else len(section)
+        rows = [ln for ln in section[match.end():end].splitlines()
+                if ln.count("\t") >= 5 and not ln.strip().startswith(("SEE LESS", "WORKOUTS"))]
+        out.append(rows[-1] if rows else None)
+    return out
+
+
+_SURFACE_CELL = re.compile(r"^[A-Za-z.]{1,6}-[A-Za-z]")
+
+
+def _pp_row_from_cells(raw_row: str | None) -> dict | None:
+    """Read one PP row by its tab-separated cells: DIST, SURF-COND, PRG (PP), ODDS, FIN, BL, JOCKEY, COMMENT.
+
+    Handles what the flattened-text pattern cannot: a blank ODDS cell, a PRG cell holding only "(4)", and a row with no
+    distance cell.  Returns None unless the surface and finish cells are well formed, so a damaged row still fails loudly."""
+    if not raw_row:
+        return None
+    cells = [c.strip() for c in raw_row.rstrip("\r\n").split("\t")]
+    omitted = bool(cells) and bool(_SURFACE_CELL.match(cells[0]))
+    if omitted:
+        cells = [""] + cells
+    if len(cells) < 7:
+        return None
+    distance, surface, program, odds, finish, beaten, jockey = cells[:7]
+    comment = " ".join(c for c in cells[7:] if c).strip()
+    if not _SURFACE_CELL.match(surface) or not re.fullmatch(r"\d+|SCR", finish):
+        return None
+    if distance and not re.fullmatch(r"\d+(?:\s+\d+/\d+)?\s*[MF](?:\s+\d+\s*Y)?|\d{2,4}\s*Y", distance, re.I):
+        return None
+    return {
+        "distance": distance or None, "surface": surface, "program": program or None, "odds": odds or None,
+        "finish": "SCR" if finish == "SCR" else int(finish), "bl": beaten or None, "jockey": jockey or None,
+        "comment": _clean(comment), "distance_omitted": omitted,
+    }
+
+
 def _profile(horse: str, block: str) -> HorseProfile:
     match = re.search(
         re.escape(horse) + r"\s*\n([^\n]+)\s+-\s+([^\n]+)\s*\n([^,\n]+),\s*([^,\n]+),\s*(\d+)",
@@ -514,8 +561,10 @@ def _parse_history(entry: Entry, block: str) -> tuple[list[PastPerformance], lis
     workout_section = block.split("WORKOUTS", 1)[1] if workout_header else ""
     pps: list[PastPerformance] = []
     workouts: list[Workout] = []
-    for start_date, lines in _dated_blocks(pp_section):
+    raw_rows = _raw_pp_rows(pp_section)
+    for block_index, (start_date, lines) in enumerate(_dated_blocks(pp_section)):
         joined = " ".join(lines)
+        cells = _pp_row_from_cells(raw_rows[block_index] if block_index < len(raw_rows) else None)
         dist_match = re.search(
             r"((?:\d+(?:\s+\d+/\d+)?\s*[MF](?:\s+\d+\s*Y)?)|(?:\d{2,4}\s*Y))\s+"
             r"([A-Za-z.]+-[A-Za-z]+(?:\s+(?!SCR\b)[A-Za-z]+){0,2})\s+(.+)$", joined, re.I,
@@ -545,6 +594,33 @@ def _parse_history(entry: Entry, block: str) -> tuple[list[PastPerformance], lis
             # An explicitly marked historical scratch is not an absent finish
             # field; retain the source state rather than treating it as a run.
             finish = "SCR"
+        # Cell-by-cell reading repairs rows the flattened-text pattern cannot read, and corrects one it read shifted (a blank ODDS
+        # cell makes the next cells slide left).  A scratch row keeps its established representation.
+        row_distance = dist_match.group(1) if dist_match else None
+        row_surface = surface_condition
+        omitted = False
+        if cells is not None and cells["finish"] != "SCR":
+            regex_ok = (detail_match is not None and detail_match.group("finish").isdigit()
+                        and int(detail_match.group("finish")) == cells["finish"]
+                        and detail_match.group("bl") == cells["bl"] and detail_match.group("jockey") == (cells["jockey"] or "").split(" ")[0])
+            if not regex_ok:
+                row_distance, row_surface, omitted = cells["distance"], cells["surface"], cells["distance_omitted"]
+                finish = cells["finish"]
+                detail_match = None
+                forced = cells
+            else:
+                forced = None
+        else:
+            forced = None
+        if forced is not None:
+            pps.append(PastPerformance(
+                horse_name=entry.horse_name or "", start_date=start_date, track=track, race_class=race_class,
+                distance=row_distance, surface_condition=row_surface, program_or_post=forced["program"], odds=forced["odds"],
+                finish_position=forced["finish"], beaten_lengths=forced["bl"], jockey=forced["jockey"], comment=forced["comment"],
+                raw_distance=row_distance, raw_race_class=race_class, raw_surface_condition=row_surface, raw_odds=forced["odds"],
+                raw_beaten_lengths=forced["bl"], raw_text=joined, distance_omitted_by_source=omitted,
+            ))
+            continue
         pps.append(PastPerformance(
             horse_name=entry.horse_name or "", start_date=start_date, track=track, race_class=race_class,
             distance=dist_match.group(1) if dist_match else None, surface_condition=surface_condition,
@@ -965,12 +1041,22 @@ def validate_draftkings_markdown_card(card: DraftKingsMarkdownCard) -> Validatio
                 f"{e.program_number} {e.horse_name}" + (" (DK: no details available)" if "No details available" in (e.raw_block or "") else "")
                 for e in no_history)
             + " have no past performances (first-time starters or no data); their forecast rests on defaults")
+    no_distance: dict[str, int] = {}
     for row in card.past_performances:
         missing = [label for label, value in (("date", row.start_date), ("race track", row.track), ("distance", row.distance), ("surface-condition", row.surface_condition), ("finish position", row.finish_position), ("class", row.race_class)) if value is None or value == ""]
+        if missing == ["distance"] and row.distance_omitted_by_source:
+            # DraftKings prints some overseas starts with no distance cell at all; the rest of the row was read cell by cell.
+            # Kept for its finish, odds and jockey, but it carries no distance, so distance-based features must not use it.
+            no_distance[row.horse_name] = no_distance.get(row.horse_name, 0) + 1
+            missing = []
         if missing:
             errors.append(f"materially incomplete PP row for {row.horse_name}: missing {', '.join(missing)}")
         if row.start_date is not None and row.start_date >= card.as_of.date():
             errors.append(f"PP row for {row.horse_name} is on or after as_of ({row.start_date.isoformat()})")
+    if no_distance:
+        warnings.append(
+            f"{PP_NO_DISTANCE}: " + "; ".join(f"{name} ({n})" for name, n in no_distance.items())
+            + " past-performance row(s) have no printed distance (overseas starts); kept, but not usable for distance features")
     for row in card.workouts:
         missing = [label for label, value in (("date", row.work_date), ("distance", row.distance), ("time", row.time)) if value is None or value == ""]
         if missing:

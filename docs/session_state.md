@@ -29,7 +29,7 @@ shortcut (runs `start_derbyedge.bat`). 57 older races lack a post time (`AS_OF_U
 ## RACE STATS / bundle
 Optional bundle block, strict parser, stored raw + parsed in `twinspires_race_stats`, not scored; confirmed on card 75. A malformed block or one contradicting the DK card blocks the import. One sample only (BEL); bias samples tiny. `track_bias`/`trip_flags` empty.
 ## Open
-- KEE R11 10-31 (Breeders' Cup day) header `Keeneland Breeders Cup` was not in the track registry: alias added (not merged). Its PP rows with missing distance/surface/finish (foreign starters?) are UNDIAGNOSED: need the file.
+- KEE R11 10-31 (Breeders' Cup): `Keeneland Breeders Cup` aliased to KEE; PP rows now read by cells (no-distance, `(4)` program, blank odds); 38 overseas rows had been silently MISREAD (program 0 + price): re-upload older cards with overseas starts. Not merged yet.
 - IND R9 10-19 (Quarter Horse, `400 Y`): yard distances read (merged, #53); yards-only races import but are NOT scored (thoroughbred-only); no-PP-history runners labelled. Admin race-edit distance box now allows 1.0 F+ (crash fix, not merged).
 - `scripts/race_board_cli.py` (merged, PR #52): headless gated Race Board for runs away from the PC (throwaway DB via `DERBYEDGE_DB`; docs/race_board_cli.md).
 - MNR R8 10-12 blocked by a PP row whose PRG cell was `1A (9)` (coupled entry in a past race): fixed in the PP row pattern (letter after the program). Not yet merged.
@@ -37,5 +37,4 @@ Optional bundle block, strict parser, stored raw + parsed in `twinspires_race_st
 - TwinSpires SPEED/CLASS/PACE tabs + Profit Line captured (merged, PR #49; verified live on MNR R7; `docs/race_bundle_format.md`). NA-style runners stored as printed; `twinspires_pace_for_card` still drops pace for the whole race if any starter has no E/E-P/P/S style (MNR R7: 3 of 5 NA -> no pace). Count how often before deciding.
 - Basic grid weight cell accepts a leading `*` (`*L121`, fixed). CT R7 10-10 DQ on-track order: overwrite from the chart with `scripts/ingest_results_charts.py --populate --replace` (DQ path not yet fixed). 18 older GP charts fail the chart parser (not blocking).
 - Issue #30 (LOW-confidence BET suppression) parked; Race Board `Sum win prob 0.0000` still reads the gated column.
-- Not built: real-bet log (DK slips), place/show payoff capture from the chart PDF, multi-user. Not handled: dead heats.
-## Next move: live races uploaded before post with RACE STATS + the 3 tabs (tabs auto-advance races: check each), then read the `status` diagnostic cohort. Next lever is data.
+## Next move: live races uploaded before post with RACE STATS + the 3 tabs (tabs auto-advance races: check each), then read the `status` diagnostic cohort. Next lever is data. Not built: real-bet log, place/show chart payoffs, multi-user; dead heats not handled.

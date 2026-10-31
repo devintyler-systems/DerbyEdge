@@ -23,6 +23,24 @@ An optional fourth block, the TwinSpires **RACE STATS** panel, may be pasted any
 * Scratches, also-eligibles (`AE…`) and main-track-only (`MTO…`) entries are kept but are not starters;
   `field_size` and runner counts are starters only. The `AE`/`MTO` label spelling is UNVERIFIED against a real DK export.
 
+## Past-performance rows read by their cells (overseas starts)
+
+A PP row is a tab-separated line: `DIST, SURF-COND, PRG (PP), ODDS, FIN, BL, JOCKEY, COMMENT`. The flattened-text pattern cannot see a blank
+cell, so when it fails (or disagrees with the cells) the row is read cell by cell (`_pp_row_from_cells`). Seen on KEE R11 10-31-26:
+
+* **No distance cell at all** (some UK/Irish starts): the row is kept (finish, odds, jockey) with `distance` empty and
+  `distance_omitted_by_source` set. One `PP_NO_DISTANCE` warning names the horses and counts; the builder ignores rows with no distance in
+  every distance comparison. A row missing its distance for any *other* reason is still a `materially incomplete PP row` error.
+* **PRG cell holding only `(4)`**, blank ODDS (Japanese and Qatari starts): program stored as `(4)`, odds empty, jockey kept whole
+  (`Hamanaka S.`).
+* **Program `0` with a printed price** (UK/Irish starts): previously read **wrong without any error** (the price became the finish and the
+  jockey the lengths). Found by diffing the old and new parser over 17 cards / 2,967 rows: only this card changed (78 rows: 40 had failed
+  validation, 38 had been misread). Cards imported earlier that carry overseas starts could hold such rows; re-uploading them stores the
+  corrected rows.
+* A damaged row (finish not a number, blank surface, too few cells) is still not guessed: it fails validation with the horse named.
+* The Breeders' Cup card prints its track as `Keeneland Breeders Cup`; it is registered as KEE. Overseas past-performance venues (Ascot,
+  Kyoto, Longchamp...) are not in the track registry and never block an import (only the race's own track does).
+
 ## Yard distances (Quarter Horse races) and runners with no past performances
 
 * **Distances in yards.** The race header (`400 Y`) and workout rows (`220 Y`) are read; yards convert at 220 to the furlong
